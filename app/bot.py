@@ -1,23 +1,27 @@
+import os
 import asyncio
-from telegram.ext import Application, CommandHandler
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from app.config import TELEGRAM_BOT_TOKEN
 
-# Проста команда для тесту
-async def start(update, context):
-    await update.message.reply_text('🚀 Crypto Analysis Bot is alive! Use /analyze BTC/USDT')
+# Ініціалізація бота та диспетчера
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+dp = Dispatcher()
+
+# Обробка команди /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("🚀 Crypto Analysis Bot is alive! Use /analyze BTC/USDT")
+
+# Обробка команди /analyze (заглушка)
+@dp.message(Command("analyze"))
+async def cmd_analyze(message: types.Message):
+    await message.answer("📊 Analysis feature is coming soon!")
 
 # Основна функція для запуску бота
-def main():
-    # Створюємо Application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Додаємо обробники команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("analyze", analyze_command))  # Ми її створимо далі
-    
-    # Запускаємо бота
+async def main():
     print("Bot is running...")
-    application.run_polling()
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
