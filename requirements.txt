@@ -1,7 +1,2 @@
-setuptools==70.0.0
-wheel==0.43.0
 python-telegram-bot==20.7
 python-dotenv==1.0.0
-pandas==2.0.2
-numpy==1.24.3
-ccxt==4.1.59
