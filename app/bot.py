@@ -1,27 +1,19 @@
-import os
-import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+import telebot
 from app.config import TELEGRAM_BOT_TOKEN
 
-# Ініціалізація бота та диспетчера
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-# Обробка команди /start
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("🚀 Crypto Analysis Bot is alive! Use /analyze BTC/USDT")
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "🚀 Crypto Analysis Bot is alive! Use /analyze BTC/USDT")
 
-# Обробка команди /analyze (заглушка)
-@dp.message(Command("analyze"))
-async def cmd_analyze(message: types.Message):
-    await message.answer("📊 Analysis feature is coming soon!")
+@bot.message_handler(commands=['analyze'])
+def analyze_command(message):
+    bot.reply_to(message, "📊 Analysis feature is coming soon!")
 
-# Основна функція для запуску бота
-async def main():
+def main():
     print("Bot is running...")
-    await dp.start_polling(bot)
+    bot.infinity_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
