@@ -1,5 +1,9 @@
-from app.bot import start_polling
-import app.handlers  # noqa: F401  (реєструє хендлери)
+from app.bot import bot
+import app.handlers  # завантажує всі команди
 
-if __name__ == "__main__":
-    start_polling()
+def main():
+    print("✅ Bot is running...")
+    bot.infinity_polling()
+
+if __name__ == '__main__':
+    main()
