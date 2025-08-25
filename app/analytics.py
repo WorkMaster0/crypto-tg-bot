@@ -1,4 +1,4 @@
-import json
+ import json
 import math
 import time
 from datetime import datetime, timezone
@@ -164,4 +164,168 @@ def generate_signal(df: pd.DataFrame) -> Dict:
     last_rsi = df["rsi"].iloc[-1]
     last_atr = df["atr"].iloc[-1]
     vol = df["volume"].iloc[-1]
-    vol_avg_
+    vol_avg = df["volume"].rolling(20).mean().iloc[-1]
+
+    near_sup = min(sup, key=lambda x: abs(x - last_price)) if sup else None
+    near_res = min(res, key=lambda x: abs(x - last_price)) if res else None
+
+    decision = "NEUTRAL"
+    confidence = 0.5
+    reason = []
+
+    if near_sup and abs(last_price - near_sup) <= 0.5 * last_atr and last_rsi < 35:
+        decision = "LONG"
+        confidence = 0.6
+        reason.append(f"Тест підтримки ~{near_sup:.4f} + RSI {last_rsi:.1f}")
+        if vol > 1.2 * vol_avg:
+            confidence += 0.1
+            reason.append("Обсяг вище середнього")
+    elif near_res and abs(last_price - near_res) <= 0.5 * last_atr and last_rsi > 65:
+        decision = "SHORT"
+        confidence = 0.6
+        reason.append(f"Тест опору ~{near_res:.4f} + RSI {last_rsi:.1f}")
+        if vol > 1.2 * vol_avg:
+            confidence += 0.1
+            reason.append("Обсяг вище середнього")
+    else:
+        # Пробиття
+        if near_res and last_price - near_res > 0.7 * last_atr and vol > 1.1 * vol_avg:
+            decision = "LONG"
+            confidence = 0.55
+            reason.append("Пробиття опору з обсягом")
+        elif near_sup and near_sup - last_price > 0.7 * last_atr and vol > 1.1 * vol_avg:
+            decision = "SHORT"
+            confidence = 0.55
+            reason.append("Пробиття підтримки з обсягом")
+
+    confidence = float(max(0.0, min(0.95, confidence)))
+    payload = {
+        "decision": decision,
+        "confidence": confidence,
+        "price": last_price,
+        "rsi": float(last_rsi),
+        "atr": float(last_atr),
+        "supports": sup,
+        "resistances": res,
+        "near_support": near_sup,
+        "near_resistance": near_res,
+        "volume": float(vol),
+        "volume_avg": float(vol_avg),
+    }
+    payload["reason"] = "; ".join(reason) if reason else "Сигнал слабкий або відсутній"
+    return payload
+
+# ---------- Бек-тест (спрощено) ----------
+
+def backtest_level_rsi(df: pd.DataFrame, rsi_buy=35, rsi_sell=65, atr_touch=0.5) -> Dict:
+    """
+    Правила в бек-тесті:
+    - Long: коли ціна в межах 0.5*ATR від підтримки і RSI<35. Вихід: ціна доходить до найближчого опору або стоп під мінімум (1*ATR).
+    - Short: дзеркально.
+    Результат: кількість угод, winrate, PnL у % від ціни.
+    """
+    df = df.copy()
+    df["rsi"] = rsi(df["close"])
+    df["atr"] = atr(df)
+    sup, res = find_support_resistance(df)
+    trades = []
+    for i in range(30, len(df) - 2):
+        price = df["close"].iloc[i]
+        r = df["rsi"].iloc[i]
+        a = df["atr"].iloc[i]
+        if not np.isfinite(a) or a <= 0:
+            continue
+        if sup:
+            near_sup = min(sup, key=lambda x: abs(x - price))
+        else:
+            near_sup = None
+        if res:
+            near_res = min(res, key=lambda x: abs(x - price))
+        else:
+            near_res = None
+
+        # Long
+        if near_sup and abs(price - near_sup) <= atr_touch * a and r < rsi_buy:
+            tp = min(res) if res else price + 2*a
+            sl = price - a
+            exit_price = None
+            for j in range(i+1, min(i+60, len(df))):
+                low = df["low"].iloc[j]
+                high = df["high"].iloc[j]
+                # перевірка стопа/тейку
+                if low <= sl:
+                    exit_price = sl
+                    break
+                if high >= tp:
+                    exit_price = tp
+                    break
+            if exit_price is None:
+                exit_price = df["close"].iloc[min(i+60, len(df)-1)]
+            pnl = (exit_price - price) / price
+            trades.append(pnl)
+
+        # Short
+        if near_res and abs(price - near_res) <= atr_touch * a and r > rsi_sell:
+            tp = max(sup) if sup else price - 2*a
+            sl = price + a
+            exit_price = None
+            for j in range(i+1, min(i+60, len(df))):
+                low = df["low"].iloc[j]
+                high = df["high"].iloc[j]
+                if high >= sl:
+                    exit_price = sl
+                    break
+                if low <= tp:
+                    exit_price = tp
+                    break
+            if exit_price is None:
+                exit_price = df["close"].iloc[min(i+60, len(df)-1)]
+            pnl = (price - exit_price) / price
+            trades.append(pnl)
+
+    if not trades:
+        return {"trades": 0, "winrate": 0.0, "pnl_pct": 0.0}
+    wins = [x for x in trades if x > 0]
+    pnl_pct = sum(trades) * 100
+    return {"trades": len(trades), "winrate": round(len(wins)/len(trades)*100, 2), "pnl_pct": round(pnl_pct, 2)}
+
+# ---------- Alpha/Heatmap/Сканери ----------
+
+def heatmap_top_moves(limit: int = 15) -> List[Tuple[str, float]]:
+    tickers = get_24h_tickers()
+    # зміна у %
+    pairs = [(t["symbol"], float(t.get("priceChangePercent", 0.0))) for t in tickers if t["symbol"].endswith("USDT")]
+    pairs.sort(key=lambda x: abs(x[1]), reverse=True)
+    return pairs[:limit]
+
+def alpha_volatility_compression(top_n: int = 10, interval: str = "1h") -> List[Tuple[str, float]]:
+    """
+    Унікальна фіча: знаходимо пари з найменшим ATR% за останні 100 свічок -> можливий майбутній прорив.
+    ATR% = ATR / Close * 100
+    """
+    symbols = get_usdt_symbols(limit=80)
+    results = []
+    for s in symbols:
+        try:
+            df = get_klines(s, interval, limit=150)
+            a = atr(df, 14)
+            atrp = (a / df["close"]) * 100
+            val = float(atrp.iloc[-1])
+            if np.isfinite(val):
+                results.append((s, val))
+            time.sleep(0.05)  # не спамимо API
+        except Exception:
+            continue
+    results.sort(key=lambda x: x[1])  # найменший ATR%
+    return results[:top_n]
+
+# ---------- Розмір позиції / Risk ----------
+
+def position_size(balance: float, risk_pct: float, entry: float, stop: float) -> Dict:
+    risk_amount = balance * (risk_pct / 100.0)
+    per_unit_risk = abs(entry - stop)
+    if per_unit_risk <= 0:
+        return {"size": 0.0, "risk_amount": 0.0, "rr": None}
+    size = risk_amount / per_unit_risk
+    rr2 = abs((entry - (entry + (entry - stop) * 2)) / (entry - stop))  # умовний RR=2 приклад
+    return {"size": size, "risk_amount": risk_amount, "rr": rr2}
