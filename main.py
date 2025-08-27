@@ -1,7 +1,9 @@
 import os
+import json
 from flask import Flask, request
 from app.bot import bot
-import app.handlers  # імпортуємо всі твої команди
+import app.handlers  # імпортуємо всі твої хендлери
+import telebot.types
 
 app = Flask(__name__)
 
@@ -14,9 +16,12 @@ WEBHOOK_URL = f"{BASE_URL}/{TOKEN}"
 # 🔹 Endpoint для отримання апдейтів від Telegram
 @app.route(f"/{TOKEN}", methods=["POST"])
 def receive_update():
-    json_str = request.get_data().decode("UTF-8")
-    update = bot._convert_update(json_str)
-    bot.process_new_updates([update])
+    try:
+        json_str = request.get_data().decode("UTF-8")
+        update = telebot.types.Update.de_json(json.loads(json_str))
+        bot.process_new_updates([update])
+    except Exception as e:
+        print(f"❌ Error processing update: {e}")
     return "OK", 200
 
 
@@ -26,7 +31,7 @@ def home():
     return "✅ Crypto Bot is running with webhook!"
 
 
-# 🔹 Ставимо webhook одразу при старті
+# 🔹 Ставимо webhook при старті
 with app.app_context():
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL)
