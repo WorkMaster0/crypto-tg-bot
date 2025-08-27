@@ -1,5 +1,10 @@
+# handlers.py
 from app.bot import bot
-from app.analytics import get_price, generate_signal, trend_strength, calculate_indicators, get_levels
+from app.analytics import (
+    get_price, generate_signal, trend_strength,
+    support_resistance_levels, rsi_indicator,
+    ema_indicator, sma_indicator, macd_indicator,
+)
 from app.chart import plot_candles
 
 # 🔹 /start
@@ -14,12 +19,10 @@ def send_help(message):
 """
 📌 *Available Commands:*
 /start - Check bot status
-/analyze BTCUSDT - Get support/resistance + signal
+/analyze BTCUSDT - Full analysis with support/resistance + indicators
 /price BTCUSDT - Current price
 /trend BTCUSDT - Market trend
 /chart BTCUSDT - Send chart
-/indicators BTCUSDT - Technical indicators (RSI, EMA, MACD)
-/levels BTCUSDT - Support and resistance levels
 /heatmap - Top movers (coming soon 🚀)
 """)
 
@@ -33,17 +36,6 @@ def price_handler(message):
         bot.reply_to(message, f"💰 {symbol} price: *{price:.2f}* USDT")
     else:
         bot.reply_to(message, "⚠️ Usage: /price BTCUSDT")
-
-# 🔹 /analyze
-@bot.message_handler(commands=['analyze'])
-def analyze_handler(message):
-    args = message.text.split()
-    if len(args) > 1:
-        symbol = args[1].upper()
-        signal = generate_signal(symbol)
-        bot.reply_to(message, signal)
-    else:
-        bot.reply_to(message, "⚠️ Usage: /analyze BTCUSDT")
 
 # 🔹 /trend
 @bot.message_handler(commands=['trend'])
@@ -67,33 +59,37 @@ def chart_handler(message):
     else:
         bot.reply_to(message, "⚠️ Usage: /chart BTCUSDT")
 
-# 🔹 /indicators
-@bot.message_handler(commands=['indicators'])
-def indicators_handler(message):
+# 🔹 /analyze - повний аналіз з індикаторами
+@bot.message_handler(commands=['analyze'])
+def analyze_handler(message):
     args = message.text.split()
     if len(args) > 1:
         symbol = args[1].upper()
-        indicators = calculate_indicators(symbol)
-        response = f"📊 Technical Indicators for {symbol}:\n"
-        for key, value in indicators.items():
-            response += f"{key}: {value}\n"
+        price = get_price(symbol)
+        signal = generate_signal(symbol)
+        trend = trend_strength(symbol)
+        support, resistance = support_resistance_levels(symbol)
+        rsi = rsi_indicator(symbol)
+        ema = ema_indicator(symbol)
+        sma = sma_indicator(symbol)
+        macd = macd_indicator(symbol)
+
+        response = f"""
+📊 *Analysis for {symbol}*:
+
+💰 Price: {price:.2f} USDT
+📈 Signal: {signal}
+🔹 Trend: {trend}
+
+📌 Support: {support:.2f}
+📌 Resistance: {resistance:.2f}
+
+📊 Indicators:
+- RSI: {rsi:.2f}
+- EMA: {ema:.2f}
+- SMA: {sma:.2f}
+- MACD: {macd:.2f}
+"""
         bot.reply_to(message, response)
     else:
-        bot.reply_to(message, "⚠️ Usage: /indicators BTCUSDT")
-
-# 🔹 /levels
-@bot.message_handler(commands=['levels'])
-def levels_handler(message):
-    args = message.text.split()
-    if len(args) > 1:
-        symbol = args[1].upper()
-        support, resistance = get_levels(symbol)
-        bot.reply_to(message,
-f"📌 Levels for {symbol}:\nSupport: {support}\nResistance: {resistance}")
-    else:
-        bot.reply_to(message, "⚠️ Usage: /levels BTCUSDT")
-
-# 🔹 /heatmap (заглушка)
-@bot.message_handler(commands=['heatmap'])
-def heatmap_handler(message):
-    bot.reply_to(message, "🚀 Heatmap coming soon!")
+        bot.reply_to(message, "⚠️ Usage: /analyze BTCUSDT")
