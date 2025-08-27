@@ -10,10 +10,6 @@ app = Flask(__name__)
 def home():
     return "✅ Crypto Bot is running!"
 
-def run_bot():
-    print("🤖 Bot polling started...")
-    bot.infinity_polling(skip_pending=True)
-
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
