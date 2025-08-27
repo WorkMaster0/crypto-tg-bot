@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-RENDER_APP_URL = os.getenv('RENDER_APP_URL')  # https://your-app-name.onrender.com
 
 # Binance
 BINANCE_BASES = [
