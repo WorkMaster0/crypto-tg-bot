@@ -81,8 +81,9 @@ def run_bot():
         keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
         keep_alive_thread.start()
     
-    # Запускаємо Flask сервер
-    run_flask()
+    # Запускаємо Flask сервер (ВЕБХУК режим)
+    print("🌐 Starting Flask server in WEBHOOK mode...")
+    app.run(host='0.0.0.0', port=5000, debug=False)
 
 # Обробник помилок бота
 @bot.error_handler
