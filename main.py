@@ -1,38 +1,20 @@
+import threading
 import os
-import json
-from flask import Flask, request
+from flask import Flask
 from app.bot import bot
-import app.handlers  # імпортуємо всі твої хендлери
-import telebot.types
+import app.handlers  # реєструє всі хендлери
 
 app = Flask(__name__)
 
-# 🔑 Токен і URL для webhook
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://crypto-tg-bot-2.onrender.com")
-WEBHOOK_URL = f"{BASE_URL}/{TOKEN}"
-
-
-# 🔹 Endpoint для отримання апдейтів від Telegram
-@app.route(f"/{TOKEN}", methods=["POST"])
-def receive_update():
-    try:
-        json_str = request.get_data().decode("UTF-8")
-        update = telebot.types.Update.de_json(json.loads(json_str))
-        bot.process_new_updates([update])
-    except Exception as e:
-        print(f"❌ Error processing update: {e}")
-    return "OK", 200
-
-
-# 🔹 Health-check
 @app.route("/")
 def home():
-    return "✅ Crypto Bot is running with webhook!"
+    return "✅ Crypto Bot is running!"
 
+def run_bot():
+    print("🤖 Bot polling started...")
+    bot.infinity_polling(skip_pending=True)
 
-# 🔹 Ставимо webhook при старті
-with app.app_context():
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
-    print(f"🌍 Webhook set to {WEBHOOK_URL}")
+if __name__ == "__main__":
+    threading.Thread(target=run_bot, daemon=True).start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
