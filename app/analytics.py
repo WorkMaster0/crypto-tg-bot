@@ -1,78 +1,84 @@
-import yfinance as yf
+# analytics.py
+import ccxt
 import pandas as pd
-import talib
+import numpy as np
 
-# 🔹 Поточна ціна
+# 🔹 Підключення до Binance
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+})
+
+# 🔹 Отримання ціни
 def get_price(symbol: str) -> float:
-    data = yf.Ticker(symbol + "-USD").history(period="1d")
-    if data.empty:
-        return 0.0
-    return data['Close'][-1]
+    ticker = exchange.fetch_ticker(symbol)
+    return ticker['last']
 
-# 🔹 Сигнали для трейдингу
+# 🔹 Генерація сигналу на купівлю/продаж
 def generate_signal(symbol: str) -> str:
-    data = yf.Ticker(symbol + "-USD").history(period="60d", interval="1d")
-    if data.empty:
-        return "⚠️ Data not available."
-    
-    close = data['Close']
-    rsi = talib.RSI(close, timeperiod=14)
-    ma_short = talib.SMA(close, timeperiod=10)
-    ma_long = talib.SMA(close, timeperiod=50)
+    df = fetch_ohlcv(symbol)
+    close = df['close'].iloc[-1]
+    ema_short = df['close'].ewm(span=10, adjust=False).mean().iloc[-1]
+    ema_long = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
 
-    signal = ""
-    if rsi.iloc[-1] < 30:
-        signal += "📉 Oversold – possible BUY signal.\n"
-    elif rsi.iloc[-1] > 70:
-        signal += "📈 Overbought – possible SELL signal.\n"
-    
-    if ma_short.iloc[-1] > ma_long.iloc[-1]:
-        signal += "✅ Uptrend detected by SMA crossover.\n"
+    if ema_short > ema_long:
+        return "🟢 Buy Signal"
+    elif ema_short < ema_long:
+        return "🔴 Sell Signal"
     else:
-        signal += "⚠️ Downtrend detected by SMA crossover.\n"
-    
-    return signal
+        return "⚪ Neutral"
 
 # 🔹 Сила тренду
 def trend_strength(symbol: str) -> str:
-    data = yf.Ticker(symbol + "-USD").history(period="30d", interval="1d")
-    if data.empty:
-        return "⚠️ Data not available."
-    
-    close = data['Close']
-    ema_short = talib.EMA(close, timeperiod=5)
-    ema_long = talib.EMA(close, timeperiod=20)
+    df = fetch_ohlcv(symbol)
+    rsi_val = rsi_indicator(symbol)
+    if rsi_val > 70:
+        return "📉 Overbought"
+    elif rsi_val < 30:
+        return "📈 Oversold"
+    else:
+        return "↔ Neutral trend"
 
-    strength = (ema_short.iloc[-1] - ema_long.iloc[-1]) / ema_long.iloc[-1] * 100
-    return f"📊 Trend strength: {strength:.2f}%"
+# 🔹 Рівні підтримки та опору
+def support_resistance_levels(symbol: str) -> tuple:
+    df = fetch_ohlcv(symbol)
+    high = df['high'].iloc[-20:]
+    low = df['low'].iloc[-20:]
+    support = low.min()
+    resistance = high.max()
+    return support, resistance
 
-# 🔹 Технічні індикатори
-def calculate_indicators(symbol: str) -> dict:
-    data = yf.Ticker(symbol + "-USD").history(period="60d", interval="1d")
-    if data.empty:
-        return {"Error": "Data not available"}
-    
-    close = data['Close']
-    high = data['High']
-    low = data['Low']
+# 🔹 RSI
+def rsi_indicator(symbol: str, period: int = 14) -> float:
+    df = fetch_ohlcv(symbol)
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = -delta.clip(upper=0).rolling(period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
 
-    indicators = {
-        "RSI": talib.RSI(close, timeperiod=14).iloc[-1],
-        "EMA_10": talib.EMA(close, timeperiod=10).iloc[-1],
-        "EMA_50": talib.EMA(close, timeperiod=50).iloc[-1],
-        "MACD": talib.MACD(close)[0].iloc[-1],
-        "ATR": talib.ATR(high, low, close, timeperiod=14).iloc[-1]
-    }
-    return indicators
+# 🔹 EMA
+def ema_indicator(symbol: str, period: int = 20) -> float:
+    df = fetch_ohlcv(symbol)
+    return df['close'].ewm(span=period, adjust=False).mean().iloc[-1]
 
-# 🔹 Рівні підтримки і опору
-def get_levels(symbol: str) -> tuple:
-    data = yf.Ticker(symbol + "-USD").history(period="90d", interval="1d")
-    if data.empty:
-        return (0.0, 0.0)
-    
-    close = data['Close']
-    pivot = (data['High'].max() + data['Low'].min() + close.iloc[-1]) / 3
-    support = pivot - (data['High'].max() - data['Low'].min()) / 2
-    resistance = pivot + (data['High'].max() - data['Low'].min()) / 2
-    return (round(support, 2), round(resistance, 2))
+# 🔹 SMA
+def sma_indicator(symbol: str, period: int = 20) -> float:
+    df = fetch_ohlcv(symbol)
+    return df['close'].rolling(period).mean().iloc[-1]
+
+# 🔹 MACD
+def macd_indicator(symbol: str, fast: int = 12, slow: int = 26, signal_period: int = 9) -> float:
+    df = fetch_ohlcv(symbol)
+    ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=signal_period, adjust=False).mean()
+    return macd.iloc[-1] - signal.iloc[-1]
+
+# 🔹 Отримання OHLCV (дані свічок)
+def fetch_ohlcv(symbol: str, timeframe: str = '1h', limit: int = 100) -> pd.DataFrame:
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
