@@ -2,11 +2,6 @@ from telebot import TeleBot
 from telebot.types import Message
 from app.analytics import get_price, generate_signal, trend_strength
 
-# 🔹 Старий /start
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "🚀 Crypto Analysis Bot is alive! Use /analyze BTCUSDT")
-
 # 🔹 Старий /analyze (заглушка)
 @bot.message_handler(commands=['analyze'])
 def old_analyze_command(message):
@@ -45,10 +40,7 @@ def trend_handler(message):
     else:
         bot.reply_to(message, "⚠️ Usage: /trend BTCUSDT")
 
-# 🔹 Новий /help
-@bot.message_handler(commands=['help'])
-def send_help(message):
-    bot.reply_to(message,
+
 """
 📌 *Available Commands:*
 /start - Check bot status
