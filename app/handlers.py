@@ -46,17 +46,6 @@ def trend_handler(message):
     else:
         bot.reply_to(message, "⚠️ Usage: /trend BTCUSDT")
 
-# 🔹 Новий /chart
-@bot.message_handler(commands=['chart'])
-def chart_handler(message):
-    args = message.text.split()
-    if len(args) > 1:
-        symbol = args[1].upper()
-        img = plot_candles(symbol)
-        bot.send_photo(message.chat.id, img)
-    else:
-        bot.reply_to(message, "⚠️ Usage: /chart BTCUSDT")
-
 # 🔹 Новий /help
 @bot.message_handler(commands=['help'])
 def send_help(message):
