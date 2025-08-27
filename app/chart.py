@@ -1,7 +1,7 @@
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from io import BytesIO
-from app.analytics import get_ohlcv
+from app.analytics import get_ohlcv  # ← ЦЕЙ ІМПОРТ ПОВИНЕН БУТИ
 
 def plot_candles(symbol, timeframe='1h'):
     """Побудувати свічковий графік"""
