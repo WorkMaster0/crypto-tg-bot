@@ -1,46 +1,81 @@
 import telebot
-import os
-import traceback
+from app.config import TELEGRAM_BOT_TOKEN
+from app.analytics import get_price, generate_signal, trend_strength
+from app.chart import plot_candles
 
-# ====== Налаштування ======
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # у Render треба додати в Environment variables
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-
-# ====== Команди ======
 @bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, "👋 Привіт! Я бот для криптоаналітики.")
+def send_welcome(message):
+    bot.reply_to(message, "🚀 Crypto Analysis Bot is alive! Use /analyze BTCUSDT")
 
+@bot.message_handler(commands=['price'])
+def price_handler(message):
+    args = message.text.split()
+    if len(args) > 1:
+        symbol = args[1].upper()
+        price = get_price(symbol)
+        if price > 0:
+            bot.reply_to(message, f"💰 *{symbol}* price: `${price:.2f}`")
+        else:
+            bot.reply_to(message, "❌ Не вдалося отримати ціну")
+    else:
+        bot.reply_to(message, "⚠️ Використання: /price BTCUSDT")
+
+@bot.message_handler(commands=['analyze'])
+def analyze_handler(message):
+    args = message.text.split()
+    if len(args) > 1:
+        symbol = args[1].upper()
+        signal = generate_signal(symbol)
+        bot.reply_to(message, signal, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "⚠️ Використання: /analyze BTCUSDT")
+
+@bot.message_handler(commands=['trend'])
+def trend_handler(message):
+    args = message.text.split()
+    if len(args) > 1:
+        symbol = args[1].upper()
+        trend = trend_strength(symbol)
+        bot.reply_to(message, trend, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "⚠️ Використання: /trend BTCUSDT")
+
+@bot.message_handler(commands=['chart'])
+def chart_handler(message):
+    args = message.text.split()
+    if len(args) > 1:
+        symbol = args[1].upper()
+        img = plot_candles(symbol)
+        if img:
+            bot.send_photo(message.chat.id, img, caption=f"📈 Графік {symbol} (1h)")
+        else:
+            bot.reply_to(message, "❌ Не вдалося побудувати графік")
+    else:
+        bot.reply_to(message, "⚠️ Використання: /chart BTCUSDT")
 
 @bot.message_handler(commands=['help'])
-def help_cmd(message):
-    bot.send_message(message.chat.id, "🛠 Доступні команди:\n/start\n/help")
+def send_help(message):
+    help_text = """
+📌 *Доступні команди:*
+/start - Перевірити статус бота
+/analyze BTCUSDT - Аналіз + рівні підтримки/опору
+/price BTCUSDT - Поточна ціна
+/trend BTCUSDT - Аналіз тренду
+/chart BTCUSDT - Графік ціни
+/help - Довідка
 
+🔸 *Приклади:*
+/analyze BTCUSDT
+/price ETHUSDT
+/chart SOLUSDT
+"""
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
-# ====== Універсальний catcher для всіх повідомлень ======
-@bot.message_handler(func=lambda msg: True)
-def catch_all(message):
-    try:
-        # Тут можеш ставити свою основну логіку
-        bot.send_message(message.chat.id, f"📩 Ти написав: {message.text}")
+def main():
+    print("Bot is running...")
+    bot.infinity_polling()
 
-    except Exception as e:
-        # Локальна помилка для конкретного апдейту
-        error_text = f"⚠️ Помилка: {e}\n\n{traceback.format_exc()}"
-        print(error_text)  # пишемо в логи Render
-        bot.send_message(message.chat.id, "❌ Сталася помилка під час обробки твого запиту.")
-
-
-# ====== Глобальний catcher ======
-def run_bot():
-    while True:
-        try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=30)
-        except Exception as e:
-            print("🔥 Глобальна помилка:", e)
-            traceback.print_exc()
-
-
-if __name__ == "__main__":
-    run_bot()
+if __name__ == '__main__':
+    main()
