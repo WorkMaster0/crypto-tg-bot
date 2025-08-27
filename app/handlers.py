@@ -1,7 +1,6 @@
 from telebot import TeleBot
 from telebot.types import Message
 from app.analytics import get_price, generate_signal, trend_strength
-from app.chart import plot_candles
 
 # 🔹 Старий /start
 @bot.message_handler(commands=['start'])
