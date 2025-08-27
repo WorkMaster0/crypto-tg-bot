@@ -13,7 +13,9 @@ bot = TeleBot(TELEGRAM_BOT_TOKEN)
 
 # Імпортуємо та реєструємо обробники
 from app.handlers import register_all_handlers
-register_all_handlers(bot)
+register_all_handlers(bot)  # ← передаємо bot у функцію
+
+# Решта коду (webhook, Flask routes)...
 
 # Webhook обробник для Telegram
 @app.route('/webhook', methods=['POST'])
