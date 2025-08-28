@@ -15,8 +15,10 @@ from app.config import (
 )
 
 # ---------- BINANCE HELPERS (CACHED) ----------
-@cached(cache=TTLCache(maxsize=50, ttl=300))  # Кеш на 5 хвилин (300 секунд)
+@cached(cache=TTLCache(maxsize=50, ttl=300))
 def _binance_get_cached(path: str, params: Dict) -> dict:
+    # Створюємо стабільний ключ для кешування з path і params
+    cache_key = (path, frozenset(params.items()))
     last_error = None
     for base in BINANCE_BASES:
         try:
