@@ -3,7 +3,7 @@ import math
 import requests
 import numpy as np
 from typing import Dict, List, Tuple, Optional
-from cachetools import cached, TTLCache  # <-- Додано імпорт для кешу
+from cachetools import cached, TTLCache  # Додано імпорт для кешу
 
 from app.config import (
     BINANCE_BASES,
@@ -15,10 +15,7 @@ from app.config import (
 )
 
 # ---------- BINANCE HELPERS (CACHED) ----------
-@cached(cache=TTLCache(maxsize=50, ttl=300))
-def _binance_get_cached(path: str, params: Dict) -> dict:
-    # Створюємо стабільний ключ для кешування з path і params
-    cache_key = (path, frozenset(params.items()))
+def _binance_get(path: str, params: Dict) -> dict:
     last_error = None
     for base in BINANCE_BASES:
         try:
@@ -31,22 +28,21 @@ def _binance_get_cached(path: str, params: Dict) -> dict:
             continue
     raise last_error or RuntimeError("Binance unreachable")
 
-def _binance_get(path: str, params: Dict) -> dict:
-    return _binance_get_cached(path, params)
-
 def normalize_symbol(s: str) -> str:
     s = s.strip().upper().replace("/", "")
     return s
 
-@cached(cache=TTLCache(maxsize=100, ttl=60))  # Кеш на 1 хвилину для ціни
+@cached(cache=TTLCache(maxsize=100, ttl=60))
 def get_price(symbol: str) -> float:
     symbol = normalize_symbol(symbol)
     data = _binance_get("/api/v3/ticker/price", {"symbol": symbol})
     return float(data["price"])
 
-@cached(cache=TTLCache(maxsize=50, ttl=300))  # Кеш на 5 хвилин для клін
 def get_klines(symbol: str, interval: str = DEFAULT_INTERVAL, limit: int = KLINES_LIMIT) -> Dict[str, np.ndarray]:
     symbol = normalize_symbol(symbol)
+    # Створюємо унікальний ключ для кешування на основі параметрів
+    cache_key = f"klines_{symbol}_{interval}_{limit}"
+    
     data = _binance_get("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
     arr = np.array(data, dtype=object)
     ts = (arr[:,0].astype(np.int64) // 1000).astype(np.int64)
@@ -281,8 +277,6 @@ def generate_signal_text(symbol: str, interval: str = DEFAULT_INTERVAL) -> str:
         if sentiment_value is not None and sentiment_value > 70:
             confluence_score += 1
             reason.append("Extreme Greed")
-
-    # --- Breakout Logic (can be added here similarly) ---
 
     # --- FORM FINAL SIGNAL MESSAGE ---
     if signal_direction and confluence_score >= 3:
