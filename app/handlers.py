@@ -175,3 +175,41 @@ def setdefault_handler(message):
         return bot.reply_to(message, "⚠️ Приклад: <code>/setdefault 1h</code>")
     _user_defaults.setdefault(message.chat.id, {})["interval"] = parts[1]
     bot.reply_to(message, f"✅ Інтервал за замовчуванням для цього чату: <b>{parts[1]}</b>")
+
+# ---------- /squeeze ----------
+@bot.message_handler(commands=['squeeze'])
+def squeeze_scanner(message):
+    """Сканує топ пари на стиснення волатильності"""
+    parts = message.text.split()
+    try:
+        n = int(parts[1]) if len(parts) > 1 else 5
+    except:
+        n = 5
+    n = max(1, min(n, 10))  # Обмежуємо вивід від 1 до 10 пар
+
+    try:
+        top_pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'DOGEUSDT', 'LINKUSDT']
+        squeeze_list = []
+
+        for pair in top_pairs:
+            try:
+                ratio = find_atr_squeeze(pair, '1h', 50)
+                if ratio < 0.8:  # Фільтр: показуємо ті, де ATR нижче середнього на 20%+
+                    squeeze_list.append((pair, ratio))
+            except Exception as e:
+                print(f"Помилка для {pair}: {e}")
+                continue
+
+        squeeze_list.sort(key=lambda x: x[1])  # Сортуємо за найменшим ratio (найсильніше стиснення)
+
+        if squeeze_list:
+            lines = [f"🔍 <b>Стиснення волатильності (ATR Squeeze)</b> на 1h:"]
+            for i, (pair, ratio) in enumerate(squeeze_list[:n], 1):
+                lines.append(f"{i}. {pair} : ATR Ratio = <code>{ratio:.3f}</code>")
+            lines.append("\n💡 <i>Стиснення часто передує сильному руху. Готуйся до пробою! (Ratio < 1.0 = низька волатильность)</i>")
+            bot.reply_to(message, "\n".join(lines))
+        else:
+            bot.reply_to(message, "На даний момент сильних стискень не виявлено (всі коефіцієнти > 0.8).")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка сканера: {e}")
