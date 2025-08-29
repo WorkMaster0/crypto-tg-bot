@@ -346,3 +346,35 @@ def find_atr_squeeze(symbol: str, interval: str = '1h', limit: int = 100) -> flo
     except Exception as e:
         print(f"Помилка розрахунку стискання для {symbol}: {e}")
         return 1.0
+        
+        # ---------- LIQUIDITY TRAP DETECTOR ----------
+def detect_liquidity_trap(symbol: str, interval: str = "1h", lookback: int = 50):
+    """
+    Шукає пастки ліквідності (фальшиві пробої).
+    Умови:
+    - Пробій локального high/low
+    - Закриття свічки назад у діапазон
+    - Аномально великий об'єм
+    """
+
+    candles = get_klines(symbol, interval=interval, limit=lookback)
+    h, l, c, v = candles["h"], candles["l"], candles["c"], candles["v"]
+
+    local_high = max(h[:-1])
+    local_low = min(l[:-1])
+    last_close = c[-1]
+    last_open = c[-2]
+    last_high = h[-1]
+    last_low = l[-1]
+    last_vol = v[-1]
+
+    avg_vol = np.mean(v[:-1]) if len(v) > 1 else last_vol
+
+    # Умови пастки
+    trap_signal = None
+    if last_high > local_high and last_close < local_high and last_vol > 1.5 * avg_vol:
+        trap_signal = f"🐻 <b>Short Trap</b> на {symbol} – фальшивий пробій вверх!"
+    elif last_low < local_low and last_close > local_low and last_vol > 1.5 * avg_vol:
+        trap_signal = f"🐂 <b>Long Trap</b> на {symbol} – фальшивий пробій вниз!"
+
+    return trap_signal
