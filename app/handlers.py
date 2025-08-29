@@ -299,8 +299,8 @@ def smart_sr_handler(message):
     
     try:
         df = get_klines(symbol, interval="1h", limit=200)
-        if df is None or df.empty:
-            return bot.send_message(message.chat.id, f"❌ Дані для {symbol} недоступні")
+  if not df or len(df['c']) == 0:
+    return bot.send_message(message.chat.id, f"❌ Дані для {symbol} недоступні")
 
         closes = np.array(df['c'], dtype=float)
         highs = np.array(df['h'], dtype=float)
