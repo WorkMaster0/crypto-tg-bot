@@ -188,7 +188,9 @@ def squeeze_scanner(message):
     n = max(1, min(n, 10))  # Обмежуємо вивід від 1 до 10 пар
 
     try:
-        top_pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'DOGEUSDT', 'LINKUSDT']
+        top_pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 
+                     'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 
+                     'DOGEUSDT', 'LINKUSDT']
         squeeze_list = []
 
         for pair in top_pairs:
@@ -206,10 +208,12 @@ def squeeze_scanner(message):
             lines = [f"🔍 <b>Стиснення волатильності (ATR Squeeze)</b> на 1h:"]
             for i, (pair, ratio) in enumerate(squeeze_list[:n], 1):
                 lines.append(f"{i}. {pair} : ATR Ratio = <code>{ratio:.3f}</code>")
-            lines.append("\n💡 <i>Стиснення часто передує сильному руху. Готуйся до пробою! (Ratio < 1.0 = низька волатильность)</i>")
-            bot.reply_to(message, "\n".join(lines))
+            lines.append("\n💡 <i>Стиснення часто передує сильному руху. Готуйся до пробою! (Ratio < 1.0 = низька волатильність)</i>")
+
+            bot.send_message(message.chat.id, "\n".join(lines), parse_mode="HTML")
         else:
-            bot.reply_to(message, "На даний момент сильних стискень не виявлено (всі коефіцієнти > 0.8).")
+            bot.send_message(message.chat.id, 
+                             "На даний момент сильних стискень не виявлено (всі коефіцієнти > 0.8).")
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка сканера: {e}")
+        bot.send_message(message.chat.id, f"❌ Помилка сканера: {e}")
