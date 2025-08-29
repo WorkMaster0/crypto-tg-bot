@@ -1,3 +1,4 @@
+from app.analytics import detect_impulse_compression
 from app.bot import bot
 from app.analytics import (
     get_price, get_klines, generate_signal_text, trend_strength_text,
