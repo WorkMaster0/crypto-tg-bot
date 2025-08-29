@@ -321,25 +321,28 @@ def position_size(balance: float, risk_pct: float, entry: float, stop: float) ->
     return {"risk_amount": risk_amount, "qty": qty, "rr_one_tp": 2*per_unit_risk}
 
 # ---------- ATR SQUEEZE SCANNER ----------
+# ---------- ATR SQUEEZE SCANNER ----------
 def find_atr_squeeze(symbol: str, interval: str = '1h', limit: int = 100) -> float:
     """
-    Сканує пари в пошуках стиснення волатильності (низький ATR відносно його середнього).
-    Повертає коефіцієнт стискання (current_atr / atr_ma). Чим менше, тим сильніше стиснення.
+    Повертає коефіцієнт стискання волатильності (current_atr / atr_ma_20).
+    Чим менше значення — тим сильніше стиснення (наприклад, 0.70).
     """
     try:
         candles = get_klines(symbol, interval=interval, limit=limit)
         h, l, c = candles["h"], candles["l"], candles["c"]
 
         atr_values = atr(h, l, c, 14)
-
+        # Маємо мати хоча б 20 значень ATR для порівняння із середнім
         if len(atr_values) < 20:
-            return 1.0  # замало даних
+            return 1.0
 
-        current_atr = atr_values[-1]
-        atr_ma = np.mean(atr_values[-20:])  # середнє за останні 20
-        squeeze_ratio = current_atr / atr_ma if atr_ma != 0 else 1
+        current_atr = float(atr_values[-1])
+        atr_ma = float(np.mean(atr_values[-20:]))
+        if atr_ma == 0:
+            return 1.0
 
-        return squeeze_ratio
+        return current_atr / atr_ma
+
     except Exception as e:
         print(f"Помилка розрахунку стискання для {symbol}: {e}")
         return 1.0
