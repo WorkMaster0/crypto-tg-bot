@@ -179,50 +179,72 @@ def setdefault_handler(message):
 # ---------- /squeeze ----------
 @bot.message_handler(commands=['squeeze'])
 def squeeze_scanner(message):
-    """Сканує топ пари на стиснення волатильності"""
+    """Сканує топ пари на стиснення волатильності і аналізує напрям"""
     parts = message.text.split()
     try:
         n = int(parts[1]) if len(parts) > 1 else 5
     except:
         n = 5
-    n = max(1, min(n, 10))  # 1..10
+    n = max(1, min(n, 10))
 
     try:
-        top_pairs = [
-            'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT',
-            'XRPUSDT','ADAUSDT','AVAXUSDT','DOTUSDT',
-            'DOGEUSDT','LINKUSDT'
-        ]
+        top_pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 
+                     'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 
+                     'DOGEUSDT', 'LINKUSDT']
         squeeze_list = []
 
         for pair in top_pairs:
             try:
-                ratio = find_atr_squeeze(pair, '1h', 100)  # ← беремо більше свічок
-                # Лог у консоль, щоб бачити значення
-                print(f"[SQUEEZE] {pair} -> ratio={ratio:.3f}")
+                ratio = find_atr_squeeze(pair, '1h', 50)
                 if ratio < 0.8:
                     squeeze_list.append((pair, ratio))
             except Exception as e:
                 print(f"Помилка для {pair}: {e}")
                 continue
 
-        squeeze_list.sort(key=lambda x: x[1])  # найменший ratio зверху
+        squeeze_list.sort(key=lambda x: x[1])
 
         if squeeze_list:
-            lines = [ "🔍 <b>Стиснення волатильності (ATR Squeeze)</b> на 1h:" ]
+            lines = [f"🔍 <b>Стиснення волатильності (ATR Squeeze)</b> на 1h:"]
             for i, (pair, ratio) in enumerate(squeeze_list[:n], 1):
-                # Використовуємо <code> (дозволений тег) і ЖОДНИХ сирих '<' чи '>'
-                lines.append(f"{i}. <b>{pair}</b> : ATR Ratio = <code>{ratio:.3f}</code> {'✅' if ratio < 0.8 else ''}")
-            # У цьому рядку замінили '<' на '&lt;'
-            lines.append("💡 <i>Стиснення часто передує сильному руху. Готуйся до пробою! (Ratio &lt; 1.0 = низька волатильність)</i>")
+                # Отримуємо додаткові дані
+                candles = get_klines(pair, interval="1h", limit=100)
+                close = np.array(candles["c"], dtype=float)
+
+                rsi_val = rsi(close, 14)[-1]
+                ema_fast = ta.trend.ema_indicator(pd.Series(close), 20).iloc[-1]
+                ema_slow = ta.trend.ema_indicator(pd.Series(close), 50).iloc[-1]
+
+                # Bollinger Bands
+                bb_high = ta.volatility.BollingerBands(pd.Series(close), window=20).bollinger_hband().iloc[-1]
+                bb_low  = ta.volatility.BollingerBands(pd.Series(close), window=20).bollinger_lband().iloc[-1]
+                last_price = close[-1]
+
+                # Визначаємо напрям
+                signal = "⚖️ Нейтрально"
+                if last_price > ema_fast > ema_slow and last_price > bb_high:
+                    signal = "🟢 Ймовірний ріст (пробій вгору)"
+                elif last_price < ema_fast < ema_slow and last_price < bb_low:
+                    signal = "🔴 Ймовірне падіння (пробій вниз)"
+                elif rsi_val > 65:
+                    signal = "⚠️ RSI перекупленість → обережно, може бути відкат вниз"
+                elif rsi_val < 35:
+                    signal = "⚠️ RSI перепроданість → можливий відскок вгору"
+
+                lines.append(
+                    f"{i}. {pair} : ATR Ratio = <code>{ratio:.3f}</code>\n"
+                    f"   ➤ RSI = <b>{rsi_val:.1f}</b>\n"
+                    f"   ➤ {signal}"
+                )
+
+            lines.append("\n💡 ATR Squeeze = сигнал, що скоро буде сильний рух. "
+                         "Індикатори вище допомагають визначити ймовірний напрям.")
 
             bot.send_message(message.chat.id, "\n".join(lines), parse_mode="HTML")
+
         else:
-            bot.send_message(
-                message.chat.id,
-                "На даний момент сильних стискень не виявлено (всі коефіцієнти ≥ 0.8)."
-            )
+            bot.send_message(message.chat.id, 
+                             "На даний момент сильних стискань не виявлено (всі коефіцієнти > 0.8).")
 
     except Exception as e:
-        # Тут без parse_mode, щоб не зловити ще один парсер-баг
         bot.send_message(message.chat.id, f"❌ Помилка сканера: {e}")
