@@ -337,7 +337,7 @@ def smart_sr_handler(message):
             signal += f"\n⚠️ Pre-top detected: можливий short біля {nearest_resistance:.4f}"
 
         # Генеруємо графік
-        img = plot_candles(symbol, interval="1h", limit=100, sr_levels=sr_levels)
+        img = plot_candles(symbol, interval="1h", limit=100)
         bot.send_photo(message.chat.id, img, caption=f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
         
     except Exception as e:
