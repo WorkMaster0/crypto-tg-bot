@@ -248,3 +248,29 @@ def squeeze_scanner(message):
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Помилка сканера: {e}")
+        
+        # ---------- /trap ----------
+@bot.message_handler(commands=['trap'])
+def trap_scanner(message):
+    """Сканує топ пари на пастки ліквідності"""
+    top_pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 
+                 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 
+                 'DOGEUSDT', 'LINKUSDT']
+
+    traps = []
+    for pair in top_pairs:
+        try:
+            signal = detect_liquidity_trap(pair, interval="1h", lookback=50)
+            if signal:
+                traps.append(signal)
+        except Exception as e:
+            print(f"Помилка для {pair}: {e}")
+            continue
+
+    if traps:
+        bot.send_message(message.chat.id, 
+                         "🔍 <b>Виявлені пастки ліквідності:</b>\n\n" + "\n".join(traps),
+                         parse_mode="HTML")
+    else:
+        bot.send_message(message.chat.id, 
+                         "✅ Пасток ліквідності не знайдено на 1h таймфреймі.")
