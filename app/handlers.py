@@ -1,4 +1,3 @@
-from app.analytics import detect_impulse_compression
 from app.bot import bot
 from app.analytics import (
     get_price, get_klines, generate_signal_text, trend_strength_text,
@@ -275,37 +274,3 @@ def trap_scanner(message):
     else:
         bot.send_message(message.chat.id, 
                          "✅ Пасток ліквідності не знайдено на 1h таймфреймі.")
-                        
-                        #/impulse
-@bot.message_handler(commands=['impulse'])
-def impulse_handler(message):
-    parts = message.text.split()
-    if len(parts) > 1:
-        symbol = parts[1].upper()
-    else:
-        return bot.reply_to(message, "⚠️ Використання: /impulse BTCUSDT")
-
-    try:
-        info = detect_impulse_compression(symbol, interval="1h", lookback=180,
-                                          impulse_atr_mult=1.8, compression_length=6, compression_atr_mult=0.65)
-        if "error" in info:
-            return bot.send_message(message.chat.id, f"❌ Error: {info['error']}")
-
-        if info["verdict"] == "NO_PATTERN":
-            return bot.send_message(message.chat.id, f"ℹ️ Для {symbol} патерн не знайдено на 1h.")
-
-        # Формуємо повідомлення HTML-безпечне
-        txt = (
-            f"<b>Impulse+Compression — {symbol}</b>\n"
-            f"Verdict: <b>{info['verdict']}</b>  Score: <b>{info['score']:.1f}</b>/100\n"
-            f"Direction: <b>{info['direction']}</b>\n"
-            f"Price: <b>{info['last_price']:.6f}</b>\n\n"
-            f"Impulse: rel={info['impulse_rel']:.2f} (bars={info['impulse_bars']})\n"
-            f"Compression ATR: {info['compression_atr']:.6f}  Long ATR avg: {info['long_atr_avg']:.6f}\n"
-            f"Volume: last={info['vol_impulse']:.2f} avg={info['vol_avg']:.2f}  confirm={info['vol_confirm']}\n"
-            f"Trend: EMA20={info['ema20']:.6f} EMA50={info['ema50']:.6f}  bias={info['trend_bias']}\n\n"
-            f"⤴ Tips: Score≥65 + direction aligned with trend → stronger continuation signal."
-        )
-        bot.send_message(message.chat.id, txt, parse_mode="HTML")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Error: {e}")
