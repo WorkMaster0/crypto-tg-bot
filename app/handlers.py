@@ -276,6 +276,9 @@ def trap_scanner(message):
                          "✅ Пасток ліквідності не знайдено на 1h таймфреймі.")
                         
                         # ---------- /smart_sr ----------
+@bot.message_handler(commands=['smart_sr'])
+def smart_sr_handler(message):
+    
 from app.bot import bot
 from app.analytics import get_klines
 from app.chart import plot_candles
