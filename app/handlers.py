@@ -276,8 +276,14 @@ def trap_scanner(message):
         bot.send_message(message.chat.id, 
                          "✅ Пасток ліквідності не знайдено на 1h таймфреймі.")
                         
-# ---------- Smart S/R ----------
+# ---------- /smart_sr ----------
 def find_support_resistance(prices, window=20, delta=0.005):
+    """
+    Автоматично знаходить локальні S/R рівні
+    prices: масив цін (закриття)
+    window: скільки свічок дивимося для локального максимуму/мінімуму
+    delta: мінімальна дистанція між рівнями (5%)
+    """
     sr_levels = []
     for i in range(window, len(prices)-window):
         local_max = max(prices[i-window:i+window+1])
@@ -298,35 +304,41 @@ def smart_sr_handler(message):
     symbol = parts[1].upper()
     
     try:
-    df = get_klines(symbol, interval="1h", limit=200)
-    if not df or len(df['c']) == 0:
-        return bot.send_message(message.chat.id, f"❌ Дані для {symbol} недоступні")
+        # Отримуємо дані
+        df = get_klines(symbol, interval="1h", limit=200)
+        if not df or len(df.get('c', [])) == 0:
+            return bot.send_message(message.chat.id, f"❌ Дані для {symbol} недоступні")
 
-    closes = np.array(df['c'], dtype=float)
-    highs = np.array(df['h'], dtype=float)
-    lows = np.array(df['l'], dtype=float)
-    volumes = np.array(df['v'], dtype=float)
-    
-    sr_levels = find_support_resistance(closes, window=20, delta=0.005)
-    last_price = closes[-1]
+        closes = np.array(df['c'], dtype=float)
+        highs = np.array(df['h'], dtype=float)
+        lows = np.array(df['l'], dtype=float)
+        volumes = np.array(df['v'], dtype=float)
+        
+        # Знаходимо S/R рівні
+        sr_levels = find_support_resistance(closes, window=20, delta=0.005)
+        last_price = closes[-1]
 
-    # Перевірка breakout
-    signal = "ℹ️ Патерн не знайдено"
-    for lvl in sr_levels:
-        if last_price > lvl * 1.01:
-            signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
-        elif last_price < lvl * 0.99:
-            signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
+        # Перевірка breakout
+        signal = "ℹ️ Патерн не знайдено"
+        for lvl in sr_levels:
+            if last_price > lvl * 1.01:
+                signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
+            elif last_price < lvl * 0.99:
+                signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
 
-    # Перевірка pre-top / pump
-    impulse = (closes[-1] - closes[-4]) / closes[-4]
-    vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:])
-    nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-    if impulse > 0.08 and vol_spike and nearest_resistance is not None:
-        signal += f"\n⚠️ Pre-top detected: можливий short біля {nearest_resistance:.4f}"
+        # Перевірка pre-top / pump
+        if len(closes) >= 4:
+            impulse = (closes[-1] - closes[-4]) / closes[-4]
+        else:
+            impulse = 0
+        vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
+        nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
+        if impulse > 0.08 and vol_spike and nearest_resistance is not None:
+            signal += f"\n⚠️ Pre-top detected: можливий short біля {nearest_resistance:.4f}"
 
-    img = plot_candles(symbol, interval="1h", limit=100, sr_levels=sr_levels)
-    bot.send_photo(message.chat.id, img, caption=f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
-    
-except Exception as e:
-    bot.send_message(message.chat.id, f"❌ Error: {e}")
+        # Генеруємо графік
+        img = plot_candles(symbol, interval="1h", limit=100, sr_levels=sr_levels)
+        bot.send_photo(message.chat.id, img, caption=f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
