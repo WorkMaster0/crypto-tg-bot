@@ -338,7 +338,7 @@ def smart_sr_handler(message):
 
         # Генеруємо графік
         img = plot_candles(symbol, interval="1h", limit=100)
-bot.send_photo(message.chat.id, img, caption=f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
+        bot.send_photo(message.chat.id, img, caption=f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
         
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
