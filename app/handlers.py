@@ -6,7 +6,7 @@ from app.analytics import (
     find_levels, top_movers, position_size, normalize_symbol, find_atr_squeeze  # <-- Додано find_atr_squeeze
 )
 from app.chart import plot_candles
-from app.config import DEFAULT_INTERVAL, ALLOWED_INTERVALS
+from app.config import DEFAULT_INTERVAL, ALLOWED_INTERVALS, client
 
 # просте зберігання налаштувань чату в ОЗП
 _user_defaults = {}  # chat_id -> {"interval": "1h"}
