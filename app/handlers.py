@@ -437,7 +437,7 @@ def smart_auto_handler(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
         
-        # ---------- /patern ----------
+# ---------- /patern ----------
 @bot.message_handler(commands=['patern', 'pattern'])
 def pattern_handler(message):
     """
@@ -566,7 +566,7 @@ def pattern_handler(message):
                 last_5_range = max(highs[-5:]) - min(lows[-5:])
                 prev_5_range = max(highs[-10:-5]) - min(lows[-10:-5])
                 
-                if last_5_range < prev_5_range * 0.6:  Консолідація
+                if last_5_range < prev_5_range * 0.6:  # Консолідація
                     if price_change > 0:
                         patterns.append(("BULL_FLAG", "LONG", "Бичачий прапор"))
                     else:
