@@ -1,5 +1,4 @@
 import requests
-from app.handlers import find_support_resistance
 import numpy as np
 from app.bot import bot
 from app.analytics import (
