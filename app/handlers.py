@@ -1,5 +1,4 @@
 import requests
-import talib
 import numpy as np
 from app.bot import bot
 from app.analytics import (
@@ -183,52 +182,57 @@ def setdefault_handler(message):
 @bot.message_handler(commands=['squeeze'])
 def squeeze_handler(message):
     try:
-        # Отримуємо топ-20 монет за обсягом
-        top_symbols = get_top_symbols(limit=20)
+        bot.send_message(message.chat.id, "⏳ Сканую ринок на squeeze...")
+
+        # Беремо всі торгові пари USDT
+        tickers = client.get_ticker()
+        usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
+
+        # Фільтруємо тільки ліквідні (обсяг > 5 млн USDT за 24h)
+        filtered = [
+            t for t in usdt_pairs 
+            if float(t['quoteVolume']) > 5_000_000
+        ]
+
+        # Сортуємо за % зміни за 24h
+        sorted_pairs = sorted(filtered, key=lambda x: float(x['priceChangePercent']), reverse=True)[:30]
 
         results = []
-        for symbol in top_symbols:
-            try:
-                # Беремо дані 4h для аналізу
-                df = get_klines(symbol, interval="4h", limit=200)
-                if not df or len(df.get("c", [])) < 50:
-                    continue
+        for t in sorted_pairs:
+            symbol = t['symbol']
 
-                closes = np.array(df["c"], dtype=float)
-                highs = np.array(df["h"], dtype=float)
-                lows = np.array(df["l"], dtype=float)
-
-                # 🎯 RSI
-                rsi = talib.RSI(closes, timeperiod=14)
-
-                # 🎯 Bollinger Bands
-                upper, middle, lower = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-
-                # 🎯 Keltner Channels (EMA ± ATR)
-                ema = talib.EMA(closes, timeperiod=20)
-                atr = talib.ATR(highs, lows, closes, timeperiod=20)
-                kc_upper = ema + 1.5 * atr
-                kc_lower = ema - 1.5 * atr
-
-                # 🔍 Перевірка squeeze (BB всередині KC)
-                if upper[-1] < kc_upper[-1] and lower[-1] > kc_lower[-1]:
-                    if rsi[-1] > 60:
-                        results.append(f"🚀 {symbol}: Squeeze breakout UP (RSI {rsi[-1]:.1f})")
-                    elif rsi[-1] < 40:
-                        results.append(f"⚡ {symbol}: Squeeze breakout DOWN (RSI {rsi[-1]:.1f})")
-
-            except Exception as e:
-                print(f"[SQUEEZE ERROR] {symbol}: {e}")
+            # Беремо історію (200 свічок по 1h)
+            df = get_klines(symbol, interval="1h", limit=200)
+            if not df or len(df.get('c', [])) < 50:
                 continue
 
+            closes = np.array(df['c'], dtype=float)
+
+            # Bollinger Bands
+            upper, middle, lower = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+
+            # Bollinger Band Width
+            bbw = (upper - lower) / middle
+            squeeze = bbw[-1] < np.percentile(bbw[-50:], 20)  # нижче 20% перцентиля → стискання
+
+            # RSI
+            rsi = talib.RSI(closes, timeperiod=14)
+            rsi_last = rsi[-1]
+
+            if squeeze:
+                if rsi_last > 55:
+                    results.append(f"🚀 LONG squeeze: {symbol} (RSI {rsi_last:.1f})")
+                elif rsi_last < 45:
+                    results.append(f"⚡ SHORT squeeze: {symbol} (RSI {rsi_last:.1f})")
+
         if results:
-            bot.send_message(message.chat.id, "<b>Squeeze Scanner — Top 20</b>\n\n" + "\n".join(results), parse_mode="HTML")
+            bot.send_message(message.chat.id, "📊 <b>Ринок стискається — потенційні сигнали:</b>\n\n" + "\n".join(results), parse_mode="HTML")
         else:
-            bot.send_message(message.chat.id, "ℹ️ Жодного squeeze-сигналу не знайдено серед топ-20 монет.")
+            bot.send_message(message.chat.id, "ℹ️ Немає монет у squeeze прямо зараз.")
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Помилка сканера: {e}")
-        
+
         # ---------- /trap ----------
 @bot.message_handler(commands=['trap'])
 def trap_scanner(message):
