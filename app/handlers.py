@@ -375,7 +375,7 @@ def smart_auto_handler(message):
                 sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 last_price = closes[-1]
 
-                                signal = None
+                signal = None
                 for lvl in sr_levels:
                     diff = last_price - lvl
                     diff_pct = (diff / lvl) * 100
