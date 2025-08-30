@@ -1536,3 +1536,267 @@ def ai_backtest_handler(message):
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка backtest: {str(e)}")
+        
+        # ---------- /ai_scanner ----------
+@bot.message_handler(commands=['ai_scanner'])
+def ai_scanner_handler(message):
+    """
+    Автоматичний сканер топ токенів за зростанням + AI аналіз
+    """
+    try:
+        processing_msg = bot.send_message(message.chat.id, "🔍 AI сканує топ токени...")
+        
+        # Отримуємо дані
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        
+        # Фільтруємо: USDT пари + обсяг > 10M$ + ціна > 0.01$
+        usdt_pairs = [
+            d for d in data 
+            if (d['symbol'].endswith('USDT') and 
+                float(d['quoteVolume']) > 10000000 and
+                float(d['lastPrice']) > 0.01)
+        ]
+        
+        # Сортуємо за зростанням (тільки позитивні)
+        growing_pairs = [
+            pair for pair in usdt_pairs 
+            if float(pair['priceChangePercent']) > 3.0  # Мінімум +3%
+        ]
+        growing_pairs.sort(key=lambda x: float(x['priceChangePercent']), reverse=True)
+        
+        top_growers = growing_pairs[:15]  # Топ-15 за зростанням
+        
+        best_opportunities = []
+        
+        for pair in top_growers:
+            symbol = pair['symbol']
+            price_change = float(pair['priceChangePercent'])
+            volume = float(pair['quoteVolume']) / 1000000  # В мільйонах
+            
+            try:
+                # AI аналіз для кожного токена
+                signal_text = generate_signal_text(symbol, interval="1h")
+                
+                # Перевіряємо чи сигнал підтверджує зростання
+                is_bullish = any(keyword in signal_text for keyword in 
+                               ['LONG', 'BUY', 'UP', 'BULL', 'STRONG LONG'])
+                
+                if is_bullish and price_change > 5.0:  # Мінімум +5%
+                    # Додатковий аналіз на 4h для підтвердження
+                    signal_4h = generate_signal_text(symbol, interval="4h")
+                    is_bullish_4h = any(keyword in signal_4h for keyword in 
+                                      ['LONG', 'BUY', 'UP', 'BULL'])
+                    
+                    if is_bullish_4h:
+                        best_opportunities.append({
+                            'symbol': symbol,
+                            'price_change': price_change,
+                            'volume': volume,
+                            'signal_1h': signal_text,
+                            'signal_4h': signal_4h
+                        })
+                        
+            except Exception as e:
+                continue
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        if not best_opportunities:
+            bot.reply_to(message, "🔍 Не знайдено ідеальних сигналів")
+            return
+        
+        # Сортуємо за зростанням
+        best_opportunities.sort(key=lambda x: x['price_change'], reverse=True)
+        
+        response = ["🚀 <b>AI Scanner - Топ сигнали за зростанням:</b>\n"]
+        response.append("<i>Токени з рістом >5% + підтвердження AI</i>\n")
+        
+        for opportunity in best_opportunities[:10]:
+            # Спрощений сигнал
+            lines_1h = opportunity['signal_1h'].split('\n')
+            short_signal = lines_1h[0] if len(lines_1h) > 0 else "No signal"
+            
+            response.append(
+                f"\n🟢 <b>{opportunity['symbol']}</b> - {opportunity['price_change']:+.2f}%"
+            )
+            response.append(f"   📊 Обсяг: {opportunity['volume']:.1f}M")
+            response.append(f"   📶 Сигнал: {short_signal}")
+            
+            # Додаємо кнопку для швидкого аналізу
+            # (додамо markup пізніше)
+        
+        # Додаємо кнопки для швидкого доступу
+        markup = types.InlineKeyboardMarkup()
+        for opportunity in best_opportunities[:3]:
+            markup.add(types.InlineKeyboardButton(
+                f"📊 {opportunity['symbol']}", 
+                callback_data=f"analyze_{opportunity['symbol']}"
+            ))
+        
+        markup.add(types.InlineKeyboardButton(
+            "🔄 Оновити сканування", 
+            callback_data="rescan_ai"
+        ))
+        
+        bot.send_message(message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка сканера: {str(e)}")
+
+# ---------- /ai_daily ----------
+@bot.message_handler(commands=['ai_daily'])
+def ai_daily_handler(message):
+    """
+    Щоденний AI звіт з найкращими можливостями
+    """
+    try:
+        processing_msg = bot.send_message(message.chat.id, "📊 Готую щоденний AI звіт...")
+        
+        # Отримуємо дані
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        response = requests.get(url, timeout=20)
+        data = response.json()
+        
+        # Різні категорії для аналізу
+        categories = {
+            'top_gainers': [],    # Топ росту
+            'high_volume': [],    # Висока ліквідність
+            'breakouts': [],      # Пробої
+            'consolidation': []   # Консолідація
+        }
+        
+        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 5000000]
+        
+        # Аналізуємо кожну категорію
+        for pair in usdt_pairs:
+            symbol = pair['symbol']
+            price_change = float(pair['priceChangePercent'])
+            volume = float(pair['quoteVolume'])
+            
+            try:
+                # Швидкий аналіз
+                signal_1h = generate_signal_text(symbol, interval="1h")
+                
+                # Категоризуємо
+                if price_change > 8.0:
+                    categories['top_gainers'].append({
+                        'symbol': symbol, 
+                        'change': price_change,
+                        'volume': volume,
+                        'signal': signal_1h
+                    })
+                elif volume > 100000000:
+                    categories['high_volume'].append({
+                        'symbol': symbol,
+                        'change': price_change, 
+                        'volume': volume,
+                        'signal': signal_1h
+                    })
+                elif "BREAKOUT" in signal_1h:
+                    categories['breakouts'].append({
+                        'symbol': symbol,
+                        'change': price_change,
+                        'volume': volume,
+                        'signal': signal_1h
+                    })
+                elif "CONSOLIDATION" in signal_1h:
+                    categories['consolidation'].append({
+                        'symbol': symbol,
+                        'change': price_change,
+                        'volume': volume,
+                        'signal': signal_1h
+                    })
+                    
+            except Exception:
+                continue
+        
+        # Сортуємо кожну категорію
+        for key in categories:
+            categories[key].sort(key=lambda x: x['change'] if 'change' in x else x['volume'], reverse=True)
+        
+        # Формуємо звіт
+        response = ["📊 <b>Щоденний AI Звіт:</b>\n"]
+        
+        # Топ росту
+        if categories['top_gainers']:
+            response.append("\n🚀 <b>Топ Росту (>8%):</b>")
+            for item in categories['top_gainers'][:5]:
+                response.append(f"🟢 {item['symbol']} - {item['change']:+.2f}%")
+        
+        # Висока ліквідність
+        if categories['high_volume']:
+            response.append("\n💎 <b>Висока Ліквідність:</b>")
+            for item in categories['high_volume'][:5]:
+                response.append(f"📊 {item['symbol']} - Vol: {item['volume']/1000000:.1f}M")
+        
+        # Пробої
+        if categories['breakouts']:
+            response.append("\n🎯 <b>Потенційні Пробої:</b>")
+            for item in categories['breakouts'][:5]:
+                response.append(f"⚡ {item['symbol']} - {item['change']:+.2f}%")
+        
+        # Консолідація
+        if categories['consolidation']:
+            response.append("\n⏳ <b>Консолідація (майбутні пробої):</b>")
+            for item in categories['consolidation'][:5]:
+                response.append(f"📈 {item['symbol']} - {item['change']:+.2f}%")
+        
+        response.append("\n⚠️ <i>Використовуйте /ai_scanner для детального аналізу</i>")
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        bot.reply_to(message, "\n".join(response), parse_mode="HTML")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка звіту: {str(e)}")
+
+# ---------- Callback для AI сканера ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('analyze_'))
+def ai_analyze_callback(call):
+    """Обробка кнопок аналізу"""
+    try:
+        symbol = call.data.replace('analyze_', '')
+        bot.send_message(call.message.chat.id, f"🔍 Детально аналізую {symbol}...")
+        
+        # Швидкий аналіз на різних таймфреймах
+        response = [f"📊 <b>Детальний аналіз {symbol}:</b>\n"]
+        
+        for interval in ['15m', '1h', '4h']:
+            try:
+                signal = generate_signal_text(symbol, interval=interval)
+                lines = signal.split('\n')
+                response.append(f"\n{interval}: {lines[0]}")
+            except:
+                response.append(f"\n{interval}: Помилка аналізу")
+        
+        # Додаємо кнопку для повного аналізу
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(
+            "🧠 Повний AI Аналіз", 
+            callback_data=f"full_analyze_{symbol}"
+        ))
+        
+        bot.send_message(call.message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+        
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Помилка: {str(e)}")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'rescan_ai')
+def rescan_ai_callback(call):
+    """Пересканування"""
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        ai_scanner_handler(call.message)
+    except:
+        bot.send_message(call.message.chat.id, "🔄 Запускаю нове сканування...")
+        ai_scanner_handler(call.message)
