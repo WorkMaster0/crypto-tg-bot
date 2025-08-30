@@ -345,63 +345,69 @@ def smart_sr_handler(message):
         bot.send_message(message.chat.id, f"❌ Error: {e}")
 
 # ---------- /smart_auto ----------
-# Список монет для моніторингу (можеш розширити)
-WATCHLIST = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
-    "DOGEUSDT", "TRXUSDT", "MATICUSDT", "DOTUSDT", "LTCUSDT", "SHIBUSDT",
-    "AVAXUSDT", "UNIUSDT", "ATOMUSDT", "LINKUSDT", "XMRUSDT", "ETCUSDT",
-    "XLMUSDT", "APTUSDT", "ARBUSDT", "SANDUSDT", "AAVEUSDT", "FIDAUSDT",
-    "NEARUSDT", "OPUSDT", "GALAUSDT", "ICPUSDT", "FILUSDT", "PEPEUSDT"
-]
-
-
-@bot.message_handler(commands=['smart_auto'])
+ @bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
     try:
-        all_signals = []
+        import requests
+        import numpy as np
 
-        for symbol in WATCHLIST:
-            df = get_klines(symbol, interval="1h", limit=200)
-            if not df or len(df.get('c', [])) < 50:
+        # 1. Тягнемо всі пари з Binance
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        data = requests.get(url).json()
+
+        # 2. Фільтруємо тільки USDT пари і прибираємо сміття
+        usdt_pairs = [
+            x for x in data
+            if x["symbol"].endswith("USDT") 
+            and not x["symbol"].endswith("BUSD")   # щоб не було дублів
+            and float(x["quoteVolume"]) > 5_000_000  # мінімум $5M обсягу
+        ]
+
+        # 3. Беремо топ-30 по обсягу
+        top_pairs = sorted(usdt_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)[:30]
+        symbols = [x["symbol"] for x in top_pairs]
+
+        results = []
+        for symbol in symbols:
+            try:
+                df = get_klines(symbol, interval="1h", limit=200)
+                if not df or len(df.get("c", [])) == 0:
+                    continue
+
+                closes = np.array(df["c"], dtype=float)
+                volumes = np.array(df["v"], dtype=float)
+
+                sr_levels = find_support_resistance(closes, window=20, delta=0.005)
+                last_price = closes[-1]
+
+                signal = None
+                for lvl in sr_levels:
+                    if last_price > lvl * 1.01:
+                        signal = f"🚀 LONG breakout: {symbol} пробив {lvl:.4f}"
+                    elif last_price < lvl * 0.99:
+                        signal = f"⚡ SHORT breakout: {symbol} пробив {lvl:.4f}"
+
+                if signal:
+                    # Перевірка на pump (pre-top)
+                    if len(closes) >= 4:
+                        impulse = (closes[-1] - closes[-4]) / closes[-4]
+                    else:
+                        impulse = 0
+                    vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
+                    nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
+                    if impulse > 0.08 and vol_spike and nearest_resistance is not None:
+                        signal += f"\n⚠️ Pre-top detected: можливий SHORT біля {nearest_resistance:.4f}"
+
+                    results.append(signal)
+
+            except Exception as e:
+                print(f"Error on {symbol}: {e}")
                 continue
 
-            closes = np.array(df['c'], dtype=float)
-            volumes = np.array(df['v'], dtype=float)
-            sr_levels = find_support_resistance(closes, window=20, delta=0.005)
-            last_price = closes[-1]
-
-            best_signal = None
-
-            # ---- Перевірка breakout ----
-            for lvl in sr_levels:
-                if last_price > lvl * 1.01:  # пробій опору
-                    best_signal = f"🚀 LONG breakout: пробій опору {lvl:.4f}"
-                elif last_price < lvl * 0.99:  # пробій підтримки
-                    best_signal = f"⚡ SHORT breakout: пробій підтримки {lvl:.4f}"
-
-            # ---- Перевірка pre-top / pump ----
-            impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-            vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
-            nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-
-            if impulse > 0.08 and vol_spike and nearest_resistance:
-                pretop_signal = f"⚠️ Pre-top detected: можливий SHORT біля {nearest_resistance:.4f}"
-                # Якщо вже був breakout — додаємо pre-top як уточнення
-                if best_signal:
-                    best_signal += f"\n{pretop_signal}"
-                else:
-                    best_signal = pretop_signal
-
-            # Додаємо сигнал, якщо він є
-            if best_signal:
-                all_signals.append(f"<b>{symbol}</b>\n{best_signal}\n")
-
-        # ---- Формуємо відповідь ----
-        if all_signals:
-            text = "<b>📊 Smart Auto S/R сигнали:</b>\n\n" + "\n".join(all_signals)
-            bot.send_message(message.chat.id, text, parse_mode="HTML")
+        if results:
+            bot.send_message(message.chat.id, "\n\n".join(results))
         else:
-            bot.send_message(message.chat.id, "ℹ️ Сигналів зараз немає.")
+            bot.send_message(message.chat.id, "ℹ️ Сигналів не знайдено.")
 
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
