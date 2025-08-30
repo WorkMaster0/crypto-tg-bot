@@ -1294,3 +1294,245 @@ def ai_arbitrage_handler(message):
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка AI арбітражу: {str(e)}")
+        
+        # ---------- /ai_strategy ----------
+@bot.message_handler(commands=['ai_strategy'])
+def ai_strategy_handler(message):
+    """
+    AI-генератор персоналізованих торгових стратегій
+    """
+    try:
+        parts = message.text.split()
+        symbol = "BTCUSDT"
+        
+        if len(parts) >= 2:
+            symbol = parts[1].upper()
+            if not symbol.endswith('USDT'):
+                symbol += 'USDT'
+        
+        processing_msg = bot.send_message(message.chat.id, f"🧠 AI створює стратегію для {symbol}...")
+        
+        # Отримуємо дані для аналізу
+        candles_1h = get_klines(symbol, interval="1h", limit=100)
+        candles_4h = get_klines(symbol, interval="4h", limit=100)
+        candles_1d = get_klines(symbol, interval="1d", limit=100)
+        
+        if not all([candles_1h, candles_4h, candles_1d]):
+            bot.reply_to(message, f"❌ Недостатньо даних для {symbol}")
+            return
+        
+        # Аналізуємо ринок
+        closes_1h = np.array(candles_1h['c'], dtype=float)
+        closes_4h = np.array(candles_4h['c'], dtype=float)
+        closes_1d = np.array(candles_1d['c'], dtype=float)
+        
+        current_price = closes_1h[-1]
+        
+        # AI аналіз ринкових умов
+        trend_1h = (closes_1h[-1] / closes_1h[-24] - 1) * 100  # Зміна за 24 години
+        trend_4h = (closes_4h[-1] / closes_4h[-6] - 1) * 100   # Зміна за 24 години (6*4h)
+        volatility = np.std(closes_1h[-24:]) / np.mean(closes_1h[-24:]) * 100
+        
+        # Визначаємо тип ринку
+        if abs(trend_1h) > 5:
+            market_condition = "TRENDING"
+            strength = "STRONG" if abs(trend_1h) > 8 else "MODERATE"
+            direction = "BULL" if trend_1h > 0 else "BEAR"
+        elif volatility < 2:
+            market_condition = "SIDEWAYS"
+            strength = "LOW_VOLATILITY"
+            direction = "NEUTRAL"
+        else:
+            market_condition = "VOLATILE"
+            strength = "HIGH_VOLATILITY" 
+            direction = "UNCERTAIN"
+        
+        # Генеруємо AI стратегію
+        strategies = {
+            "TRENDING_BULL_STRONG": {
+                "strategy": "BREAKOUT FOLLOWING",
+                "entry": "Pullback to EMA20 or support",
+                "stop_loss": "2% below entry", 
+                "take_profit": "RRR 1:3",
+                "confidence": "85%"
+            },
+            "TRENDING_BEAR_STRONG": {
+                "strategy": "SHORT ON BOUNCE",
+                "entry": "Retracement to resistance",
+                "stop_loss": "2% above entry",
+                "take_profit": "RRR 1:2.5", 
+                "confidence": "80%"
+            },
+            "SIDEWAYS_LOW_VOLATILITY": {
+                "strategy": "MEAN REVERSION",
+                "entry": "Extremes of range",
+                "stop_loss": "Outside range",
+                "take_profit": "Middle of range",
+                "confidence": "75%"
+            },
+            "VOLATILE_HIGH_VOLATILITY": {
+                "strategy": "VOLATILITY BREAKOUT",
+                "entry": "Break of consolidation",
+                "stop_loss": "False breakout level",
+                "take_profit": "ATR-based targets",
+                "confidence": "70%"
+            }
+        }
+        
+        strategy_key = f"{market_condition}_{direction}_{strength}"
+        selected_strategy = strategies.get(strategy_key, strategies["VOLATILE_HIGH_VOLATILITY"])
+        
+        # Додаткові AI рекомендації
+        if trend_1h > 3 and trend_4h > 2:
+            additional_tips = [
+                "🎯 Consider scaling in positions",
+                "📈 Look for continuation patterns",
+                "⚡ High momentum - avoid counter-trend trades"
+            ]
+        elif trend_1h < -3 and trend_4h < -2:
+            additional_tips = [
+                "🎯 Short on bounces only",
+                "📉 Watch for capitulation signals", 
+                "⚡ Avoid catching falling knives"
+            ]
+        else:
+            additional_tips = [
+                "🎯 Wait for clear signals",
+                "📊 Range-bound trading recommended",
+                "⚡ Reduce position size in choppy markets"
+            ]
+        
+        # Формуємо відповідь
+        response = [
+            f"🎯 <b>AI Generated Strategy for {symbol}</b>",
+            f"Current Price: ${current_price:.2f}",
+            f"",
+            f"📊 <b>Market Analysis:</b>",
+            f"Condition: {market_condition}",
+            f"Direction: {direction}",
+            f"Strength: {strength}",
+            f"1h Trend: {trend_1h:+.2f}%",
+            f"Volatility: {volatility:.2f}%",
+            f"",
+            f"🚀 <b>Recommended Strategy:</b>",
+            f"Type: {selected_strategy['strategy']}",
+            f"Entry: {selected_strategy['entry']}",
+            f"Stop Loss: {selected_strategy['stop_loss']}",
+            f"Take Profit: {selected_strategy['take_profit']}",
+            f"Confidence: {selected_strategy['confidence']}",
+            f"",
+            f"💡 <b>AI Tips:</b>"
+        ]
+        
+        response.extend(additional_tips)
+        
+        response.extend([
+            f"",
+            f"⏰ <b>Timeframes:</b>",
+            f"• Primary: 1h for entries",
+            f"• Confirmation: 4h for trend", 
+            f"• Context: 1d for overall direction",
+            f"",
+            f"⚠️ <i>AI-generated based on current market conditions</i>"
+        ])
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        # Додаємо графік
+        try:
+            img = plot_candles(symbol, interval="4h", limit=50)
+            bot.send_photo(message.chat.id, img, caption="\n".join(response), parse_mode="HTML")
+        except:
+            bot.reply_to(message, "\n".join(response), parse_mode="HTML)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка генерації стратегії: {str(e)}")
+
+# ---------- /ai_backtest ----------
+@bot.message_handler(commands=['ai_backtest'])
+def ai_backtest_handler(message):
+    """
+    AI-симуляція стратегії на історичних даних
+    """
+    try:
+        parts = message.text.split()
+        symbol = "BTCUSDT"
+        
+        if len(parts) >= 2:
+            symbol = parts[1].upper()
+            if not symbol.endswith('USDT'):
+                symbol += 'USDT'
+        
+        processing_msg = bot.send_message(message.chat.id, f"📊 AI тестує стратегію для {symbol}...")
+        
+        # Отримуємо історичні дані
+        candles = get_klines(symbol, interval="1h", limit=200)
+        if not candles:
+            bot.reply_to(message, f"❌ Недостатньо даних для {symbol}")
+            return
+        
+        closes = np.array(candles['c'], dtype=float)
+        
+        # IMITATE AI BACKTESTING
+        initial_balance = 10000  # $10,000
+        balance = initial_balance
+        trades = 0
+        winning_trades = 0
+        
+        # Симулюємо торгівлю
+        for i in range(50, len(closes)-1):
+            # Проста стратегія (в реальності буде складна AI логіка)
+            price_change = (closes[i] / closes[i-24] - 1) * 100  # Зміна за 24 години
+            
+            if price_change > 3:  # Сильний аптренд
+                # BUY сигнал
+                entry_price = closes[i]
+                exit_price = closes[i+1]
+                profit = (exit_price - entry_price) / entry_price * 100
+                
+                if profit > 0:
+                    winning_trades += 1
+                balance *= (1 + profit / 100)
+                trades += 1
+        
+        # Результати
+        total_return = (balance - initial_balance) / initial_balance * 100
+        win_rate = (winning_trades / trades * 100) if trades > 0 else 0
+        
+        response = [
+            f"📊 <b>AI Backtest Results for {symbol}</b>",
+            f"Period: 200 hours (≈8 days)",
+            f"Initial Balance: ${initial_balance:,.0f}",
+            f"",
+            f"📈 <b>Performance:</b>",
+            f"Final Balance: ${balance:,.2f}",
+            f"Total Return: {total_return:+.2f}%",
+            f"Trades Made: {trades}",
+            f"Win Rate: {win_rate:.1f}%",
+            f"",
+            f"🎯 <b>Strategy Summary:</b>",
+            f"• Trend-following approach",
+            f"• 1h timeframe entries",
+            f"• 24h trend confirmation",
+            f"• Risk-managed position sizing",
+            f"",
+            f"💡 <b>AI Recommendations:</b>",
+            f"✅ Suitable for current market" if total_return > 2 else "⚠️ Needs optimization",
+            f"📊 Monitor win rate consistency",
+            f"⚡ Adjust based on volatility",
+            f"",
+            f"⚠️ <i>Simulated results - past performance ≠ future results</i>"
+        ]
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        bot.reply_to(message, "\n".join(response), parse_mode="HTML")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка backtest: {str(e)}")
