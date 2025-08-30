@@ -393,12 +393,17 @@ def smart_auto_handler(message):
                         )
                         break
 
-
+                # Перевірка pre-top / pump
                 impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
                 vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
                 nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
                 if impulse > 0.08 and vol_spike and nearest_res is not None:
-                    signal = f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}"
+                    diff = last_price - nearest_res
+                    diff_pct = (diff / nearest_res) * 100
+                    signal = (
+                        f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n"
+                        f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                    )
 
                 if signal:
                     signals.append(f"<b>{symbol}</b>\n{signal}")
