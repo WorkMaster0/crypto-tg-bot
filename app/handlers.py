@@ -379,7 +379,7 @@ def smart_auto_handler(message):
                 sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 last_price = closes[-1]
 
-                signal = ""
+signal = ""
 
 # шукаємо найближчий рівень до ціни
 nearest_level = min(sr_levels, key=lambda x: abs(x - last_price), default=None)
