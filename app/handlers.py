@@ -375,14 +375,24 @@ def smart_auto_handler(message):
                 sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 last_price = closes[-1]
 
-                signal = None
+                                signal = None
                 for lvl in sr_levels:
+                    diff = last_price - lvl
+                    diff_pct = (diff / lvl) * 100
+
                     if last_price > lvl * 1.01:
-                        signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
+                        signal = (
+                            f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n"
+                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        )
                         break
                     elif last_price < lvl * 0.99:
-                        signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
+                        signal = (
+                            f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n"
+                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        )
                         break
+
 
                 impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
                 vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
