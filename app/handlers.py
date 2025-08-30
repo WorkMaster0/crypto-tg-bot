@@ -653,68 +653,58 @@ def scan_top_patterns(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка при скануванні топ монет: {str(e)}")
         
-        # ---------- /analyze_auto ----------
+# ---------- /analyze_auto (ПОКРАЩЕНА ВЕРСІЯ) ----------
 @bot.message_handler(commands=['analyze_auto'])
 def analyze_auto_handler(message):
     """
-    Автоматичне сканування топ токенів на всіх таймфреймах
-    Знаходить токени з 6-7 сигналами
+    Автоматичне сканування топ токенів - знаходить будь-які сигнали
     """
     try:
-        # Відправляємо повідомлення про початок сканування
-        processing_msg = bot.send_message(message.chat.id, "🔍 Сканую топ токени... Це може зайняти кілька хвилин")
+        processing_msg = bot.send_message(message.chat.id, "🔍 Сканую топ токени...")
         
-        # Отримуємо топ токени за обсягом
+        # Отримуємо топ токени
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
-        # Фільтруємо USDT пари з високим обсягом
         usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 50000000]
         top_symbols = [pair['symbol'] for pair in sorted(usdt_pairs, 
                                                        key=lambda x: float(x['quoteVolume']), 
-                                                       reverse=True)[:30]]
+                                                       reverse=True)[:20]]  # Топ-20 для швидкості
         
         results = []
         
-        # Скануємо кожен токен на всіх таймфреймах
         for symbol in top_symbols:
             try:
                 symbol_signals = []
                 
-                for interval in ALLOWED_INTERVALS:
+                # Перевіряємо тільки основні таймфрейми для швидкості
+                for interval in ['1h', '4h', '1d']:
                     try:
-                        # Отримуємо сигнали для кожного таймфрейму
-                        candles = get_klines(symbol, interval=interval, limit=100)
-                        if not candles or len(candles['c']) < 20:
-                            continue
-                        
-                        # Генеруємо текст сигналу
                         signal_text = generate_signal_text(symbol, interval=interval)
                         
-                        # Перевіряємо чи є сильний сигнал
-                        if any(keyword in signal_text for keyword in ['🟢 STRONG LONG', '🔴 STRONG SHORT', 'сильний', 'потенційний']):
-                            signal_type = "LONG" if "🟢" in signal_text else "SHORT"
-                            symbol_signals.append((interval, signal_type, signal_text))
+                        # Шукаємо БУДЬ-ЯКІ сигнали (не тільки STRONG)
+                        if '🟢' in signal_text or '🔴' in signal_text:
+                            signal_type = "LONG" if '🟢' in signal_text else "SHORT"
+                            symbol_signals.append((interval, signal_type))
                             
-                    except Exception as e:
+                    except Exception:
                         continue
                 
-                # Якщо знайшли 6+ сигналів для цього токена
-                if len(symbol_signals) >= 6:
-                    # Групуємо сигнали по типу
-                    long_signals = sum(1 for _, signal_type, _ in symbol_signals if signal_type == "LONG")
-                    short_signals = sum(1 for _, signal_type, _ in symbol_signals if signal_type == "SHORT")
+                # Якщо знайшли сигнали для цього токена
+                if symbol_signals:
+                    long_count = sum(1 for _, signal_type in symbol_signals if signal_type == "LONG")
+                    short_count = sum(1 for _, signal_type in symbol_signals if signal_type == "SHORT")
                     
                     results.append({
                         'symbol': symbol,
                         'total_signals': len(symbol_signals),
-                        'long_signals': long_signals,
-                        'short_signals': short_signals,
+                        'long_signals': long_count,
+                        'short_signals': short_count,
                         'signals': symbol_signals
                     })
                     
-            except Exception as e:
+            except Exception:
                 continue
         
         # Видаляємо повідомлення про обробку
@@ -724,72 +714,66 @@ def analyze_auto_handler(message):
             pass
         
         if not results:
-            bot.reply_to(message, "🔍 Не знайдено токенів з 6+ сигналами")
+            bot.reply_to(message, "🔍 Не знайдено токенів з сигналами")
             return
         
         # Сортуємо за кількістю сигналів
         results.sort(key=lambda x: x['total_signals'], reverse=True)
         
         # Формуємо відповідь
-        response = ["🎯 <b>Токени з 6+ сигналами:</b>\n"]
+        response = ["🎯 <b>Токени з сигналами:</b>\n"]
         
-        for result in results[:10]:  # Показуємо топ-10
+        for result in results:
             dominant_signal = "🟢 LONG" if result['long_signals'] > result['short_signals'] else "🔴 SHORT"
             response.append(
-                f"\n📊 <b>{result['symbol']}</b> - {result['total_signals']} сигналів "
+                f"\n📊 <b>{result['symbol']}</b> - {result['total_signals']} сигн. "
                 f"({result['long_signals']}🟢 {result['short_signals']}🔴) - {dominant_signal}"
             )
             
             # Додаємо інформацію про таймфрейми
-            for interval, signal_type, signal_text in result['signals'][:5]:  # Перші 5 сигналів
+            for interval, signal_type in result['signals']:
                 emoji = "🟢" if signal_type == "LONG" else "🔴"
-                response.append(f"   {emoji} {interval}: {signal_type}")
+                response.append(f"   {emoji} {interval}")
         
-        response.append(f"\n📈 <i>Знайдено {len(results)} токен(ів) з 6+ сигналами</i>")
-        
-        # Додаємо кнопки для швидкого аналізу топ токенів
-        markup = types.InlineKeyboardMarkup()
-        for result in results[:3]:
-            markup.add(types.InlineKeyboardButton(
-                f"📊 {result['symbol']}", 
-                callback_data=f"analyze_{result['symbol']}"
-            ))
-        
-        bot.send_message(message.chat.id, "\n".join(response), 
-                        parse_mode="HTML", reply_markup=markup)
+        bot.reply_to(message, "\n".join(response), parse_mode="HTML")
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка при скануванні: {str(e)}")
 
-# ---------- /analyze_multi ----------
+# ---------- /analyze_multi (ПОКРАЩЕНА ВЕРСІЯ) ----------
 @bot.message_handler(commands=['analyze_multi'])
 def analyze_multi_handler(message):
     """
-    Швидке сканування топ-10 токенів на 1h таймфреймі
+    Швидке сканування топ токенів на 1h таймфреймі
     """
     try:
-        processing_msg = bot.send_message(message.chat.id, "🔍 Швидке сканування топ-10 токенів...")
+        processing_msg = bot.send_message(message.chat.id, "🔍 Швидке сканування топ токенів...")
         
         # Отримуємо топ токени
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
-        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 50000000]
+        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 30000000]
         top_symbols = [pair['symbol'] for pair in sorted(usdt_pairs, 
                                                        key=lambda x: float(x['quoteVolume']), 
-                                                       reverse=True)[:10]]
+                                                       reverse=True)[:15]]  # Топ-15
         
-        strong_signals = []
+        signals_found = []
         
         for symbol in top_symbols:
             try:
                 signal_text = generate_signal_text(symbol, interval="1h")
                 
-                # Перевіряємо на сильні сигнали
-                if any(keyword in signal_text for keyword in ['🟢 STRONG LONG', '🔴 STRONG SHORT']):
-                    signal_type = "LONG" if "🟢" in signal_text else "SHORT"
-                    strong_signals.append((symbol, signal_type, signal_text))
+                # Шукаємо БУДЬ-ЯКІ сигнали
+                if '🟢' in signal_text or '🔴' in signal_text:
+                    signal_type = "LONG" if '🟢' in signal_text else "SHORT"
+                    
+                    # Беремо перші 2 рядки для короткого опису
+                    lines = signal_text.split('\n')
+                    short_info = ' | '.join(lines[:2]) if len(lines) > 1 else lines[0]
+                    
+                    signals_found.append((symbol, signal_type, short_info))
                     
             except Exception:
                 continue
@@ -799,70 +783,30 @@ def analyze_multi_handler(message):
         except:
             pass
         
-        if not strong_signals:
-            bot.reply_to(message, "🔍 Не знайдено сильних сигналів у топ-10 токенів (1h)")
+        if not signals_found:
+            bot.reply_to(message, "🔍 Не знайдено сигналів у топ токенах (1h)")
             return
         
-        response = ["⚡ <b>Сильні сигнали у топ-10 токенів (1h):</b>\n"]
+        response = ["⚡ <b>Сигнали у топ токенах (1h):</b>\n"]
         
-        for symbol, signal_type, signal_text in strong_signals:
+        for symbol, signal_type, info in signals_found:
             emoji = "🟢" if signal_type == "LONG" else "🔴"
-            # Беремо тільки перші 2 рядки з сигналу
-            lines = signal_text.split('\n')
-            short_signal = ' | '.join(lines[:2])
-            response.append(f"\n{emoji} <b>{symbol}</b>: {short_signal}")
+            response.append(f"\n{emoji} <b>{symbol}</b>: {info}")
         
         bot.reply_to(message, "\n".join(response), parse_mode="HTML")
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка: {str(e)}")
 
-# ---------- Callback для аналізу конкретного токена ----------
-@bot.callback_query_handler(func=lambda call: call.data.startswith('analyze_'))
-def analyze_callback_handler(call):
-    """
-    Обробка callback для детального аналізу токена
-    """
-    try:
-        symbol = call.data.replace('analyze_', '')
-        bot.send_message(call.message.chat.id, f"🔍 Аналізую {symbol}...")
-        
-        # Аналізуємо на всіх таймфреймах
-        response = [f"📊 <b>Детальний аналіз {symbol}:</b>\n"]
-        
-        for interval in ALLOWED_INTERVALS:
-            try:
-                signal_text = generate_signal_text(symbol, interval=interval)
-                
-                # Перевіряємо чи є сигнал
-                if any(keyword in signal_text for keyword in ['🟢', '🔴', 'LONG', 'SHORT']):
-                    # Спрощуємо вивід
-                    lines = signal_text.split('\n')
-                    short_info = f"{lines[0]} | {lines[1]}" if len(lines) > 1 else lines[0]
-                    response.append(f"\n{interval}: {short_info}")
-                    
-            except Exception:
-                continue
-        
-        # Додаємо графік
-        try:
-            img = plot_candles(symbol, interval="1h", limit=100)
-            bot.send_photo(call.message.chat.id, img, caption="\n".join(response), parse_mode="HTML")
-        except:
-            bot.send_message(call.message.chat.id, "\n".join(response), parse_mode="HTML")
-            
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ Помилка: {str(e)}")
-
-# ---------- /analyze_top ----------
+# ---------- /analyze_top (ПОКРАЩЕНА ВЕРСІЯ) ----------
 @bot.message_handler(commands=['analyze_top'])
 def analyze_top_handler(message):
     """
-    Сканування топ-5 токенів з найбільшою кількістю сигналів
+    Сканування токенів з сигналами (будь-яка кількість)
     """
     try:
         parts = message.text.split()
-        min_signals = 5  # Мінімальна кількість сигналів
+        min_signals = 1  # Мінімум 1 сигнал (а не 5)
         
         if len(parts) >= 2:
             try:
@@ -874,13 +818,13 @@ def analyze_top_handler(message):
         
         # Отримуємо топ токени
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
         usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 30000000]
         top_symbols = [pair['symbol'] for pair in sorted(usdt_pairs, 
                                                        key=lambda x: float(x['quoteVolume']), 
-                                                       reverse=True)[:20]]
+                                                       reverse=True)[:25]]
         
         token_stats = []
         
@@ -889,14 +833,15 @@ def analyze_top_handler(message):
                 signal_count = 0
                 signal_details = []
                 
-                for interval in ALLOWED_INTERVALS:
+                # Перевіряємо тільки основні таймфрейми
+                for interval in ['1h', '4h', '1d']:
                     try:
                         signal_text = generate_signal_text(symbol, interval=interval)
                         
-                        # Рахуємо сигнали
-                        if "🟢" in signal_text or "🔴" in signal_text:
+                        # Рахуємо БУДЬ-ЯКІ сигнали
+                        if '🟢' in signal_text or '🔴' in signal_text:
                             signal_count += 1
-                            signal_type = "LONG" if "🟢" in signal_text else "SHORT"
+                            signal_type = "LONG" if '🟢' in signal_text else "SHORT"
                             signal_details.append((interval, signal_type))
                             
                     except Exception:
@@ -926,7 +871,7 @@ def analyze_top_handler(message):
         
         response = [f"🏆 <b>Топ токени з {min_signals}+ сигналами:</b>\n"]
         
-        for stat in token_stats[:10]:
+        for stat in token_stats:
             # Групуємо сигнали по типу
             long_count = sum(1 for _, signal_type in stat['details'] if signal_type == "LONG")
             short_count = sum(1 for _, signal_type in stat['details'] if signal_type == "SHORT")
@@ -945,3 +890,52 @@ def analyze_top_handler(message):
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка: {str(e)}")
+
+# ---------- /analyze_debug ----------
+@bot.message_handler(commands=['analyze_debug'])
+def analyze_debug_handler(message):
+    """
+    Діагностика - що повертає generate_signal_text
+    """
+    try:
+        parts = message.text.split()
+        symbol = "BTCUSDT"
+        interval = "1h"
+        
+        if len(parts) >= 2:
+            symbol = parts[1].upper()
+            if not symbol.endswith('USDT'):
+                symbol += 'USDT'
+        
+        if len(parts) >= 3:
+            interval = parts[2]
+        
+        # Тестуємо generate_signal_text
+        signal_text = generate_signal_text(symbol, interval=interval)
+        
+        # Аналізуємо що повертається
+        analysis = [
+            f"🔍 <b>Діагностика для {symbol} [{interval}]:</b>",
+            f"Довжина тексту: {len(signal_text)} символів",
+            "",
+            "<b>Перші 5 рядків:</b>"
+        ]
+        
+        # Додаємо перші 5 рядків
+        lines = signal_text.split('\n')
+        for i, line in enumerate(lines[:5], 1):
+            analysis.append(f"{i}. {line}")
+        
+        # Перевіряємо наявність ключових слів
+        analysis.append("")
+        analysis.append("<b>Знайдені ключові слова:</b>")
+        
+        keywords = ['🟢', '🔴', 'LONG', 'SHORT']
+        for keyword in keywords:
+            if keyword in signal_text:
+                analysis.append(f"✅ '{keyword}'")
+        
+        bot.reply_to(message, "\n".join(analysis), parse_mode="HTML")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка діагностики: {str(e)}")
