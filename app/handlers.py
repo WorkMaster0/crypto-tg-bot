@@ -184,25 +184,24 @@ def squeeze_handler(message):
     try:
         import requests
         import numpy as np
-        import talib
 
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url).json()
 
-        # ✅ фільтруємо тільки USDT-пари з нормальним об'ємом
+        # ✅ фільтруємо лише USDT-пари з нормальним об’ємом
         symbols = [
             d for d in data
             if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
         ]
 
-        # ✅ сортуємо за % зміни ціни (беремо топ рухомих монет)
+        # ✅ сортуємо по % зміни (як у smart_auto)
         symbols = sorted(
             symbols,
             key=lambda x: abs(float(x["priceChangePercent"])),
             reverse=True
         )
 
-        # беремо топ-30 найактивніших
+        # беремо топ-30
         top_symbols = [s["symbol"] for s in symbols[:30]]
 
         signals = []
@@ -213,31 +212,49 @@ def squeeze_handler(message):
                     continue
 
                 closes = np.array(df["c"], dtype=float)
-                highs = np.array(df["h"], dtype=float)
-                lows = np.array(df["l"], dtype=float)
+                volumes = np.array(df["v"], dtype=float)
 
-                # ATR для волатильності
-                atr = talib.ATR(highs, lows, closes, timeperiod=14)
-                atr_ratio = atr[-1] / np.mean(atr[-20:])
+                # ---- Bollinger Bands ----
+                period = 20
+                if len(closes) < period:
+                    continue
 
-                # RSI для підтвердження
-                rsi_val = talib.RSI(closes, timeperiod=14)[-1]
+                ma = np.convolve(closes, np.ones(period)/period, mode='valid')
+                std = np.array([closes[i-period+1:i+1].std() for i in range(period-1, len(closes))])
 
-                if atr_ratio < 0.75:  # стиснення волатильності
-                    direction = "📈 LONG bias" if rsi_val > 55 else "📉 SHORT bias" if rsi_val < 45 else "⏳ Нейтрально"
-                    signals.append(
-                        f"<b>{symbol}</b>\n"
-                        f"ATR Ratio = {atr_ratio:.3f} (низька волатильність)\n"
-                        f"RSI = {rsi_val:.1f} → {direction}"
-                    )
+                upper = ma + 2 * std
+                lower = ma - 2 * std
+                width = (upper - lower) / ma  # ширина смуги
+
+                last_price = closes[-1]
+                last_ma = ma[-1]
+                last_width = width[-1]
+                prev_width = width[-5:].mean()
+
+                # ---- Умови для squeeze ----
+                squeeze_detected = last_width < 0.02 and last_width < prev_width * 0.7
+                breakout_up = last_price > upper[-1]
+                breakout_down = last_price < lower[-1]
+
+                signal = None
+                if squeeze_detected:
+                    if breakout_up and volumes[-1] > np.mean(volumes[-20:]) * 1.5:
+                        diff = ((last_price - upper[-1]) / upper[-1]) * 100
+                        signal = f"🚀 LONG squeeze breakout вище {upper[-1]:.4f} ({diff:+.2f}%)"
+                    elif breakout_down and volumes[-1] > np.mean(volumes[-20:]) * 1.5:
+                        diff = ((last_price - lower[-1]) / lower[-1]) * 100
+                        signal = f"⚡ SHORT squeeze breakout нижче {lower[-1]:.4f} ({diff:+.2f}%)"
+
+                if signal:
+                    signals.append(f"<b>{symbol}</b>\n{signal}")
 
             except Exception:
                 continue
 
         if not signals:
-            bot.send_message(message.chat.id, "ℹ️ Стиснення не знайдено.")
+            bot.send_message(message.chat.id, "ℹ️ Жодних squeeze-сигналів не знайдено.")
         else:
-            text = "<b>ATR Squeeze Scanner</b>\n\n" + "\n\n".join(signals)
+            text = "<b>Squeeze Scanner Signals</b>\n\n" + "\n\n".join(signals)
             bot.send_message(message.chat.id, text, parse_mode="HTML")
 
     except Exception as e:
