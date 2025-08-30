@@ -179,87 +179,184 @@ def setdefault_handler(message):
     _user_defaults.setdefault(message.chat.id, {})["interval"] = parts[1]
     bot.reply_to(message, f"✅ Інтервал за замовчуванням для цього чату: <b>{parts[1]}</b>")
 
-# ---------- /squeeze ----------
+# ---------- /squeeze (ПОВНІСТЮ ПЕРЕРОБЛЕНА) ----------
 @bot.message_handler(commands=['squeeze'])
 def squeeze_handler(message):
+    """
+    Сучасний AI сканер сквізів та пробоїв
+    """
     try:
-        import requests
-        import numpy as np
-
+        processing_msg = bot.send_message(message.chat.id, "🔍 AI шукає сквізи та пробої...")
+        
+        # Отримуємо топ токени за обсягом
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        data = requests.get(url).json()
-
-        # ✅ фільтруємо лише USDT-пари з нормальним об’ємом
-        symbols = [
-            d for d in data
-            if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        
+        # Фільтруємо якісні токени
+        usdt_pairs = [
+            d for d in data 
+            if (d['symbol'].endswith('USDT') and 
+                float(d['quoteVolume']) > 50000000 and  # 50M+ обсяг
+                float(d['lastPrice']) > 0.01)  # Ціна > 0.01$
         ]
-
-        # ✅ сортуємо по % зміни (як у smart_auto)
-        symbols = sorted(
-            symbols,
-            key=lambda x: abs(float(x["priceChangePercent"])),
-            reverse=True
-        )
-
-        # беремо топ-30
-        top_symbols = [s["symbol"] for s in symbols[:30]]
-
-        signals = []
-        for symbol in top_symbols:
+        
+        # Сортуємо за зміною ціни (абсолютне значення)
+        volatile_pairs = sorted(usdt_pairs, 
+                              key=lambda x: abs(float(x['priceChangePercent'])), 
+                              reverse=True)[:20]
+        
+        squeeze_signals = []
+        
+        for pair in volatile_pairs:
+            symbol = pair['symbol']
+            price_change = float(pair['priceChangePercent'])
+            current_price = float(pair['lastPrice'])
+            
             try:
-                df = get_klines(symbol, interval="1h", limit=200)
-                if not df or len(df.get("c", [])) < 50:
+                # Отримуємо дані для технічного аналізу
+                candles = get_klines(symbol, interval="1h", limit=100)
+                if not candles or len(candles['c']) < 50:
                     continue
-
-                closes = np.array(df["c"], dtype=float)
-                volumes = np.array(df["v"], dtype=float)
-
-                # ---- Bollinger Bands ----
-                period = 20
-                if len(closes) < period:
-                    continue
-
-                ma = np.convolve(closes, np.ones(period)/period, mode='valid')
-                std = np.array([closes[i-period+1:i+1].std() for i in range(period-1, len(closes))])
-
-                upper = ma + 2 * std
-                lower = ma - 2 * std
-                width = (upper - lower) / ma  # ширина смуги
-
-                last_price = closes[-1]
-                last_ma = ma[-1]
-                last_width = width[-1]
-                prev_width = width[-5:].mean()
-
-                # ---- Умови для squeeze ----
-                squeeze_detected = last_width < 0.02 and last_width < prev_width * 0.7
-                breakout_up = last_price > upper[-1]
-                breakout_down = last_price < lower[-1]
-
-                signal = None
-                if squeeze_detected:
-                    if breakout_up and volumes[-1] > np.mean(volumes[-20:]) * 1.5:
-                        diff = ((last_price - upper[-1]) / upper[-1]) * 100
-                        signal = f"🚀 LONG squeeze breakout вище {upper[-1]:.4f} ({diff:+.2f}%)"
-                    elif breakout_down and volumes[-1] > np.mean(volumes[-20:]) * 1.5:
-                        diff = ((last_price - lower[-1]) / lower[-1]) * 100
-                        signal = f"⚡ SHORT squeeze breakout нижче {lower[-1]:.4f} ({diff:+.2f}%)"
-
-                if signal:
-                    signals.append(f"<b>{symbol}</b>\n{signal}")
-
-            except Exception:
+                
+                closes = np.array(candles['c'], dtype=float)
+                highs = np.array(candles['h'], dtype=float)
+                lows = np.array(candles['l'], dtype=float)
+                volumes = np.array(candles['v'], dtype=float)
+                
+                # Спрощений аналіз сквізу (без складних Bollinger Bands)
+                current_vol = volumes[-1]
+                avg_vol = np.mean(volumes[-20:])
+                vol_ratio = current_vol / avg_vol
+                
+                # Аналіз волатильності
+                recent_range = np.max(highs[-5:]) - np.min(lows[-5:])
+                prev_range = np.max(highs[-10:-5]) - np.min(lows[-10:-5])
+                range_ratio = recent_range / prev_range
+                
+                # Визначаємо тип сигналу
+                signal_type = None
+                signal_strength = "WEAK"
+                
+                # 1. ВИСОКИЙ ОБСЯГ + БІЛЬШИЙ РУХ
+                if vol_ratio > 2.0 and abs(price_change) > 8.0:
+                    signal_type = "VOLUME_BREAKOUT"
+                    signal_strength = "STRONG"
+                
+                # 2. СКВІЗ (низька волатильність) + ПРОБІЙ
+                elif range_ratio < 0.6 and abs(price_change) > 5.0:
+                    signal_type = "SQUEEZE_BREAKOUT" 
+                    signal_strength = "STRONG"
+                
+                # 3. ВИСОКИЙ ОБСЯГ без великого руху
+                elif vol_ratio > 2.5 and abs(price_change) < 3.0:
+                    signal_type = "VOLUME_SPIKE"
+                    signal_strength = "MODERATE"
+                
+                if signal_type:
+                    # Додатковий AI аналіз
+                    ai_signal = generate_signal_text(symbol, interval="1h")
+                    
+                    # Перевіряємо згоду з AI
+                    ai_bullish = any(keyword in ai_signal for keyword in ['LONG', 'BUY', 'UP', 'BULL'])
+                    ai_bearish = any(keyword in ai_signal for keyword in ['SHORT', 'SELL', 'DOWN', 'BEAR'])
+                    
+                    # Визначаємо напрямок
+                    direction = "BULL" if price_change > 0 else "BEAR"
+                    
+                    # Перевіряємо консенсус
+                    consensus = (direction == "BULL" and ai_bullish) or (direction == "BEAR" and ai_bearish)
+                    
+                    squeeze_signals.append({
+                        'symbol': symbol,
+                        'price_change': price_change,
+                        'signal_type': signal_type,
+                        'strength': signal_strength,
+                        'direction': direction,
+                        'consensus': consensus,
+                        'volume_ratio': vol_ratio,
+                        'range_ratio': range_ratio,
+                        'current_price': current_price,
+                        'ai_signal': ai_signal
+                    })
+                    
+            except Exception as e:
                 continue
-
-        if not signals:
-            bot.send_message(message.chat.id, "ℹ️ Жодних squeeze-сигналів не знайдено.")
-        else:
-            text = "<b>Squeeze Scanner Signals</b>\n\n" + "\n\n".join(signals)
-            bot.send_message(message.chat.id, text, parse_mode="HTML")
-
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        if not squeeze_signals:
+            bot.reply_to(message, "🔍 Не знайдено сквізів та пробоїв")
+            return
+        
+        # Сортуємо за силою сигналу
+        squeeze_signals.sort(key=lambda x: (
+            x['strength'] == "STRONG",
+            x['consensus'],
+            abs(x['price_change'])
+        ), reverse=True)
+        
+        response = ["🎯 <b>AI Squeeze Scanner - Знайдені сигнали:</b>\n"]
+        
+        for signal in squeeze_signals[:10]:
+            emoji = "🟢" if signal['direction'] == "BULL" else "🔴"
+            consensus_emoji = "✅" if signal['consensus'] else "⚠️"
+            
+            response.append(
+                f"\n{emoji} <b>{signal['symbol']}</b> - {signal['price_change']:+.2f}%"
+            )
+            response.append(f"   📊 Тип: {signal['signal_type']} ({signal['strength']})")
+            response.append(f"   🔊 Обсяг: x{signal['volume_ratio']:.1f}")
+            response.append(f"   📈 Волатильність: {signal['range_ratio']:.2f}")
+            response.append(f"   {consensus_emoji} Консенсус: {'Так' if signal['consensus'] else 'Ні'}")
+            
+            # Додаємо AI рекомендацію
+            if signal['consensus']:
+                if signal['direction'] == "BULL":
+                    response.append("   💡 Рекомендація: LONG на відкатах")
+                else:
+                    response.append("   💡 Рекомендація: SHORT на відскоках")
+        
+        # Додаємо кнопки для детального аналізу
+        markup = types.InlineKeyboardMarkup()
+        for signal in squeeze_signals[:3]:
+            markup.add(types.InlineKeyboardButton(
+                f"📊 {signal['symbol']}", 
+                callback_data=f"analyze_{signal['symbol']}"
+            ))
+        
+        markup.add(types.InlineKeyboardButton(
+            "🔄 Оновити сканування", 
+            callback_data="rescan_squeeze"
+        ))
+        
+        bot.send_message(message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+        
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Помилка сканера: {e}")
+        bot.reply_to(message, f"❌ Помилка сканера: {str(e)}")
+
+# ---------- Callback для оновлення сквіз-сканера ----------
+@bot.callback_query_handler(func=lambda call: call.data == 'rescan_squeeze')
+def rescan_squeeze_callback(call):
+    """Пересканування сквізів"""
+    try:
+        bot.answer_callback_query(call.id, "🔄 Пересканую...")
+        
+        # Видаляємо старе повідомлення
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except:
+            pass
+        
+        # Запускаємо нове сканування
+        squeeze_handler(call.message)
+        
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Помилка: {str(e)}")
 
         # ---------- /trap ----------
 @bot.message_handler(commands=['trap'])
