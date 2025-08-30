@@ -1,4 +1,5 @@
 import requests
+from app.handlers import find_support_resistance
 import numpy as np
 from app.bot import bot
 from app.analytics import (
@@ -345,75 +346,63 @@ def smart_sr_handler(message):
         bot.send_message(message.chat.id, f"❌ Error: {e}")
 
 # ---------- /smart_auto ----------
-def get_usdt_symbols():
-    """
-    Тягає всі USDT пари з Binance
-    """
-    url = "https://api.binance.com/api/v3/exchangeInfo"
-    data = requests.get(url).json()
-    symbols = [
-        s['symbol'] for s in data['symbols']
-        if s['quoteAsset'] == "USDT" and s['status'] == "TRADING"
-    ]
-    return symbols
+# Список монет для моніторингу (можеш розширити)
+WATCHLIST = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
+    "DOGEUSDT", "TRXUSDT", "MATICUSDT", "DOTUSDT", "LTCUSDT", "SHIBUSDT",
+    "AVAXUSDT", "UNIUSDT", "ATOMUSDT", "LINKUSDT", "XMRUSDT", "ETCUSDT",
+    "XLMUSDT", "APTUSDT", "ARBUSDT", "SANDUSDT", "AAVEUSDT", "FIDAUSDT",
+    "NEARUSDT", "OPUSDT", "GALAUSDT", "ICPUSDT", "FILUSDT", "PEPEUSDT"
+]
 
 
 @bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
     try:
-        bot.send_message(message.chat.id, "🔍 Сканую USDT пари, зачекайте...")
+        all_signals = []
 
-        symbols = get_usdt_symbols()
-        found_signals = 0
-
-        for symbol in symbols:
-            try:
-                df = get_klines(symbol, interval="1h", limit=200)
-                if not df or len(df.get('c', [])) < 30:
-                    continue
-
-                closes = np.array(df['c'], dtype=float)
-                volumes = np.array(df['v'], dtype=float)
-
-                # --- S/R рівні ---
-                sr_levels = find_support_resistance(closes, window=20, delta=0.005)
-                last_price = closes[-1]
-
-signal = ""
-
-# шукаємо найближчий рівень до ціни
-nearest_level = min(sr_levels, key=lambda x: abs(x - last_price), default=None)
-
-if nearest_level:
-    if last_price > nearest_level * 1.01:
-        signal = f"🚀 LONG breakout: ціна пробила опір {nearest_level:.4f}"
-    elif last_price < nearest_level * 0.99:
-        signal = f"⚡ SHORT breakout: ціна пробила підтримку {nearest_level:.4f}"
-
-                # --- Pre-top (pump detect) ---
-                impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-                vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
-                nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-                if impulse > 0.08 and vol_spike and nearest_resistance is not None:
-                    signal += f"\n⚠️ Pre-top detected: можливий short біля {nearest_resistance:.4f}"
-
-                # Якщо знайшли сигнал — шлемо
-                if signal:
-                    img = plot_candles(symbol, interval="1h", limit=100)
-                    bot.send_photo(
-                        message.chat.id,
-                        img,
-                        caption=f"<b>{symbol} — Smart Auto S/R</b>\n\n{signal}",
-                        parse_mode="HTML"
-                    )
-                    found_signals += 1
-
-            except Exception as e:
-                print(f"[ERROR] {symbol}: {e}")
+        for symbol in WATCHLIST:
+            df = get_klines(symbol, interval="1h", limit=200)
+            if not df or len(df.get('c', [])) < 50:
                 continue
 
-        if found_signals == 0:
-            bot.send_message(message.chat.id, "ℹ️ Жодного сигналу не знайдено.")
+            closes = np.array(df['c'], dtype=float)
+            volumes = np.array(df['v'], dtype=float)
+            sr_levels = find_support_resistance(closes, window=20, delta=0.005)
+            last_price = closes[-1]
+
+            best_signal = None
+
+            # ---- Перевірка breakout ----
+            for lvl in sr_levels:
+                if last_price > lvl * 1.01:  # пробій опору
+                    best_signal = f"🚀 LONG breakout: пробій опору {lvl:.4f}"
+                elif last_price < lvl * 0.99:  # пробій підтримки
+                    best_signal = f"⚡ SHORT breakout: пробій підтримки {lvl:.4f}"
+
+            # ---- Перевірка pre-top / pump ----
+            impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
+            vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
+            nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
+
+            if impulse > 0.08 and vol_spike and nearest_resistance:
+                pretop_signal = f"⚠️ Pre-top detected: можливий SHORT біля {nearest_resistance:.4f}"
+                # Якщо вже був breakout — додаємо pre-top як уточнення
+                if best_signal:
+                    best_signal += f"\n{pretop_signal}"
+                else:
+                    best_signal = pretop_signal
+
+            # Додаємо сигнал, якщо він є
+            if best_signal:
+                all_signals.append(f"<b>{symbol}</b>\n{best_signal}\n")
+
+        # ---- Формуємо відповідь ----
+        if all_signals:
+            text = "<b>📊 Smart Auto S/R сигнали:</b>\n\n" + "\n".join(all_signals)
+            bot.send_message(message.chat.id, text, parse_mode="HTML")
+        else:
+            bot.send_message(message.chat.id, "ℹ️ Сигналів зараз немає.")
 
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Error: {e}")
+        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
