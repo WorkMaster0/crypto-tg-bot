@@ -1649,6 +1649,125 @@ def ai_scanner_handler(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка сканера: {str(e)}")
 
+# ---------- Callback для повного аналізу ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('full_analyze_'))
+def full_analyze_callback(call):
+    """Повний AI аналіз токена"""
+    try:
+        # Відповідаємо на callback одразу
+        bot.answer_callback_query(call.id, "🧠 Роблю повний аналіз...")
+        
+        symbol = call.data.replace('full_analyze_', '')
+        
+        # Змінюємо текст повідомлення
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"🧠 Роблю повний AI аналіз {symbol}...",
+            parse_mode="HTML"
+        )
+        
+        # Робимо повний аналіз на всіх таймфреймах
+        response = [f"🎯 <b>Повний AI Аналіз {symbol}:</b>\n"]
+        
+        # Аналіз на різних таймфреймах
+        timeframes = [
+            ('15m', '🚀 Короткий термін'),
+            ('1h', '📈 Середній термін'), 
+            ('4h', '📊 Довгий термін'),
+            ('1d', '🎯 Тренд')
+        ]
+        
+        for interval, description in timeframes:
+            try:
+                signal_text = generate_signal_text(symbol, interval=interval)
+                lines = signal_text.split('\n')
+                
+                response.append(f"\n{description} [{interval}]:")
+                response.append(f"   {lines[0]}")
+                if len(lines) > 1:
+                    response.append(f"   {lines[1]}")
+                    
+            except Exception as e:
+                response.append(f"\n{interval}: Помилка аналізу - {str(e)}")
+        
+        # Додаємо рекомендації
+        response.append("\n💡 <b>AI Рекомендації:</b>")
+        
+        # Аналізуємо сигнали для рекомендацій
+        try:
+            signals_1h = generate_signal_text(symbol, interval="1h")
+            signals_4h = generate_signal_text(symbol, interval="4h")
+            
+            if "LONG" in signals_1h and "LONG" in signals_4h:
+                response.append("✅ <b>STRONG BUY</b> - консенсус на всіх TF")
+                response.append("🎯 Вхід на відкатах до підтримки")
+            elif "SHORT" in signals_1h and "SHORT" in signals_4h:
+                response.append("🔴 <b>STRONG SELL</b> - консенсус на всіх TF")  
+                response.append("🎯 Вхід на відскоках до опору")
+            else:
+                response.append("⚠️ <b>MIXED SIGNALS</b> - чекати чітких сигналів")
+                response.append("📊 Аналізуйте кожен TF окремо")
+                
+        except:
+            response.append("⚠️ Не вдалося згенерувати рекомендації")
+        
+        # Додаємо кнопки для дій
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("📊 Графік 1h", callback_data=f"chart_1h_{symbol}"),
+            types.InlineKeyboardButton("📊 Графік 4h", callback_data=f"chart_4h_{symbol}")
+        )
+        markup.row(
+            types.InlineKeyboardButton("🔄 Оновити аналіз", callback_data=f"full_analyze_{symbol}"),
+            types.InlineKeyboardButton("📋 Звіт PDF", callback_data=f"pdf_{symbol}")
+        )
+        
+        # Відправляємо результат
+        bot.send_message(call.message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+        
+    except Exception as e:
+        error_msg = f"❌ Помилка повного аналізу: {str(e)}"
+        bot.send_message(call.message.chat.id, error_msg)
+
+# ---------- Callback для графіків ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('chart_'))
+def chart_callback(call):
+    """Показати графік"""
+    try:
+        bot.answer_callback_query(call.id, "📊 Генерую графік...")
+        
+        data = call.data.split('_')
+        interval = data[1]
+        symbol = data[2]
+        
+        # Генеруємо графік
+        img = plot_candles(symbol, interval=interval, limit=100)
+        bot.send_photo(call.message.chat.id, img, 
+                      caption=f"📊 <b>{symbol} [{interval}]</b>", 
+                      parse_mode="HTML")
+        
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Помилка графіка: {str(e)}")
+
+# ---------- Callback для PDF ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('pdf_'))
+def pdf_callback(call):
+    """Генерація PDF звіту"""
+    try:
+        bot.answer_callback_query(call.id, "📋 Генерую PDF звіт...")
+        
+        symbol = call.data.replace('pdf_', '')
+        # Тут буде генерація PDF (заглушка)
+        
+        bot.send_message(call.message.chat.id, 
+                       f"📋 <b>PDF звіт для {symbol}</b>\n\nФункція в розробці...",
+                       parse_mode="HTML")
+        
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Помилка PDF: {str(e)}")
+
 # ---------- /ai_daily ----------
 @bot.message_handler(commands=['ai_daily'])
 def ai_daily_handler(message):
