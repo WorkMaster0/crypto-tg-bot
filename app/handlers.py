@@ -436,3 +436,218 @@ def smart_auto_handler(message):
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
+        
+        # ---------- /patern ----------
+@bot.message_handler(commands=['patern', 'pattern'])
+def pattern_handler(message):
+    """
+    Автоматичний пошук торгових патернів
+    Використання: /patern [SYMBOL] [INTERVAL]
+    """
+    try:
+        parts = message.text.split()
+        symbol = None
+        interval = None
+        
+        if len(parts) >= 2:
+            symbol = parts[1].upper()
+            if not symbol.endswith('USDT'):
+                symbol += 'USDT'
+        
+        if len(parts) >= 3 and parts[2] in ALLOWED_INTERVALS:
+            interval = parts[2]
+        else:
+            interval = _default_interval(message.chat.id)
+        
+        if not symbol:
+            # Сканування топ монет якщо символ не вказано
+            return scan_top_patterns(message)
+        
+        # Отримуємо дані
+        candles = get_klines(symbol, interval=interval, limit=100)
+        if not candles or len(candles['c']) < 20:
+            bot.reply_to(message, f"❌ Недостатньо даних для {symbol} [{interval}]")
+            return
+        
+        # Конвертуємо дані
+        opens = np.array(candles['o'], dtype=float)
+        highs = np.array(candles['h'], dtype=float)
+        lows = np.array(candles['l'], dtype=float)
+        closes = np.array(candles['c'], dtype=float)
+        volumes = np.array(candles['v'], dtype=float)
+        
+        patterns = []
+        
+        # 1. Перевірка на пробій рівнів
+        sr_levels = find_levels(candles)
+        current_price = closes[-1]
+        
+        # Перевірка пробою опору
+        for resistance in sr_levels['resistances']:
+            if current_price > resistance * 1.01 and current_price < resistance * 1.03:
+                patterns.append(("RESISTANCE_BREAKOUT", "LONG", f"Пробиття опору {resistance:.4f}"))
+                break
+        
+        # Перевірка пробою підтримки
+        for support in sr_levels['supports']:
+            if current_price < support * 0.99 and current_price > support * 0.97:
+                patterns.append(("SUPPORT_BREAKOUT", "SHORT", f"Пробиття підтримки {support:.4f}"))
+                break
+        
+        # 2. Перевірка на класичні свічкові патерни
+        # Бульish Engulfing
+        if len(closes) >= 3:
+            prev_open = opens[-2]
+            prev_close = closes[-2]
+            current_open = opens[-1]
+            current_close = closes[-1]
+            
+            # Бульish Engulfing
+            if prev_close < prev_open and current_close > current_open and current_close > prev_open and current_open < prev_close:
+                patterns.append(("BULLISH_ENGULFING", "LONG", "Бульish Engulfing патерн"))
+            
+            # Беарish Engulfing
+            if prev_close > prev_open and current_close < current_open and current_close < prev_open and current_open > prev_close:
+                patterns.append(("BEARISH_ENGULFING", "SHORT", "Беарish Engulfing патерн"))
+            
+            # Hammer
+            body_size = abs(current_close - current_open)
+            lower_wick = min(current_open, current_close) - lows[-1]
+            upper_wick = highs[-1] - max(current_open, current_close)
+            
+            if lower_wick > body_size * 2 and upper_wick < body_size * 0.5 and current_close > current_open:
+                patterns.append(("HAMMER", "LONG", "Hammer патерн"))
+            
+            # Shooting Star
+            if upper_wick > body_size * 2 and lower_wick < body_size * 0.5 and current_close < current_open:
+                patterns.append(("SHOOTING_STAR", "SHORT", "Shooting Star патерн"))
+        
+        # 3. Перевірка на трійне дно/вершину
+        if len(closes) >= 15:
+            # Проста перевірка на формування трійної вершини
+            last_15_highs = highs[-15:]
+            last_15_lows = lows[-15:]
+            
+            # Пошук локальних максимумів
+            peaks = []
+            for i in range(5, len(last_15_highs)-5):
+                if (last_15_highs[i] > last_15_highs[i-1] and 
+                    last_15_highs[i] > last_15_highs[i+1] and
+                    last_15_highs[i] > np.mean(last_15_highs)):
+                    peaks.append((i, last_15_highs[i]))
+            
+            # Пошук локальних мінімумів
+            troughs = []
+            for i in range(5, len(last_15_lows)-5):
+                if (last_15_lows[i] < last_15_lows[i-1] and 
+                    last_15_lows[i] < last_15_lows[i+1] and
+                    last_15_lows[i] < np.mean(last_15_lows)):
+                    troughs.append((i, last_15_lows[i]))
+            
+            # Перевірка на трійну вершину
+            if len(peaks) >= 3:
+                peaks.sort(key=lambda x: x[1], reverse=True)
+                if abs(peaks[0][1] - peaks[1][1]) / peaks[0][1] < 0.02 and abs(peaks[0][1] - peaks[2][1]) / peaks[0][1] < 0.02:
+                    patterns.append(("TRIPLE_TOP", "SHORT", "Трійна вершина"))
+            
+            # Перевірка на трійне дно
+            if len(troughs) >= 3:
+                troughs.sort(key=lambda x: x[1])
+                if abs(troughs[0][1] - troughs[1][1]) / troughs[0][1] < 0.02 and abs(troughs[0][1] - troughs[2][1]) / troughs[0][1] < 0.02:
+                    patterns.append(("TRIPLE_BOTTOM", "LONG", "Трійне дно"))
+        
+        # 4. Перевірка на прапори
+        if len(closes) > 20:
+            # Аналіз тренду
+            price_change = (closes[-1] - closes[-20]) / closes[-20]
+            
+            if abs(price_change) > 0.05:  # Мінімум 5% рух
+                # Аналіз консолідації
+                last_5_range = max(highs[-5:]) - min(lows[-5:])
+                prev_5_range = max(highs[-10:-5]) - min(lows[-10:-5])
+                
+                if last_5_range < prev_5_range * 0.6:  Консолідація
+                    if price_change > 0:
+                        patterns.append(("BULL_FLAG", "LONG", "Бичачий прапор"))
+                    else:
+                        patterns.append(("BEAR_FLAG", "SHORT", "Ведмежий прапор"))
+        
+        if not patterns:
+            bot.reply_to(message, f"🔍 Для {symbol} [{interval}] торгових патернів не знайдено")
+            return
+        
+        # Формуємо відповідь
+        response = [f"🎯 <b>Знайдені патерни для {symbol} [{interval}]:</b>\n"]
+        
+        for pattern_name, signal_type, description in patterns:
+            emoji = "🟢" if signal_type == "LONG" else "🔴"
+            response.append(f"{emoji} <b>{pattern_name}</b> → {signal_type}")
+            response.append(f"   📝 {description}")
+        
+        response.append(f"\n📊 <i>Загалом знайдено {len(patterns)} патерн(ів)</i>")
+        
+        # Відправляємо графік
+        try:
+            img = plot_candles(symbol, interval=interval, limit=100)
+            bot.send_photo(message.chat.id, img, caption="\n".join(response), parse_mode="HTML")
+        except:
+            bot.reply_to(message, "\n".join(response), parse_mode="HTML")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка при пошуку патернів: {str(e)}")
+
+def scan_top_patterns(message):
+    """
+    Сканує топ монети на наявність патернів
+    """
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        response = requests.get(url)
+        data = response.json()
+        
+        # Фільтруємо USDT пари з високим обсягом
+        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 10000000]
+        top_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)[:15]
+        
+        found_patterns = []
+        
+        for pair in top_pairs:
+            symbol = pair['symbol']
+            try:
+                candles = get_klines(symbol, interval="1h", limit=50)
+                if not candles or len(candles['c']) < 20:
+                    continue
+                
+                closes = np.array(candles['c'], dtype=float)
+                opens = np.array(candles['o'], dtype=float)
+                highs = np.array(candles['h'], dtype=float)
+                lows = np.array(candles['l'], dtype=float)
+                
+                current_price = closes[-1]
+                prev_close = closes[-2] if len(closes) >= 2 else current_price
+                
+                # Проста перевірка на пробій
+                price_change = (current_price - prev_close) / prev_close
+                
+                if abs(price_change) > 0.03:  # 3% зміна
+                    direction = "LONG" if price_change > 0 else "SHORT"
+                    found_patterns.append((symbol, "BREAKOUT", direction, f"{abs(price_change)*100:.1f}%"))
+                
+            except:
+                continue
+        
+        if not found_patterns:
+            bot.reply_to(message, "🔍 Торгових патернів не знайдено у топ монетах")
+            return
+        
+        # Формуємо відповідь
+        response = ["🔍 <b>Топ монети з торговими патернами (1h):</b>\n"]
+        
+        for symbol, pattern, direction, change in found_patterns[:10]:
+            emoji = "🟢" if direction == "LONG" else "🔴"
+            response.append(f"{emoji} {symbol}: {pattern} {direction} ({change})")
+        
+        bot.reply_to(message, "\n".join(response), parse_mode="HTML")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка при скануванні топ монет: {str(e)}")
