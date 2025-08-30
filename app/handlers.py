@@ -182,53 +182,63 @@ def setdefault_handler(message):
 @bot.message_handler(commands=['squeeze'])
 def squeeze_handler(message):
     try:
-        bot.send_message(message.chat.id, "⏳ Сканую ринок на squeeze...")
+        import requests
+        import numpy as np
+        import talib
 
-        # Беремо всі торгові пари USDT
-        tickers = client.get_ticker()
-        usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        data = requests.get(url).json()
 
-        # Фільтруємо тільки ліквідні (обсяг > 5 млн USDT за 24h)
-        filtered = [
-            t for t in usdt_pairs 
-            if float(t['quoteVolume']) > 5_000_000
+        # ✅ фільтруємо тільки USDT-пари з нормальним об'ємом
+        symbols = [
+            d for d in data
+            if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
         ]
 
-        # Сортуємо за % зміни за 24h
-        sorted_pairs = sorted(filtered, key=lambda x: float(x['priceChangePercent']), reverse=True)[:30]
+        # ✅ сортуємо за % зміни ціни (беремо топ рухомих монет)
+        symbols = sorted(
+            symbols,
+            key=lambda x: abs(float(x["priceChangePercent"])),
+            reverse=True
+        )
 
-        results = []
-        for t in sorted_pairs:
-            symbol = t['symbol']
+        # беремо топ-30 найактивніших
+        top_symbols = [s["symbol"] for s in symbols[:30]]
 
-            # Беремо історію (200 свічок по 1h)
-            df = get_klines(symbol, interval="1h", limit=200)
-            if not df or len(df.get('c', [])) < 50:
+        signals = []
+        for symbol in top_symbols:
+            try:
+                df = get_klines(symbol, interval="1h", limit=200)
+                if not df or len(df.get("c", [])) < 50:
+                    continue
+
+                closes = np.array(df["c"], dtype=float)
+                highs = np.array(df["h"], dtype=float)
+                lows = np.array(df["l"], dtype=float)
+
+                # ATR для волатильності
+                atr = talib.ATR(highs, lows, closes, timeperiod=14)
+                atr_ratio = atr[-1] / np.mean(atr[-20:])
+
+                # RSI для підтвердження
+                rsi_val = talib.RSI(closes, timeperiod=14)[-1]
+
+                if atr_ratio < 0.75:  # стиснення волатильності
+                    direction = "📈 LONG bias" if rsi_val > 55 else "📉 SHORT bias" if rsi_val < 45 else "⏳ Нейтрально"
+                    signals.append(
+                        f"<b>{symbol}</b>\n"
+                        f"ATR Ratio = {atr_ratio:.3f} (низька волатильність)\n"
+                        f"RSI = {rsi_val:.1f} → {direction}"
+                    )
+
+            except Exception:
                 continue
 
-            closes = np.array(df['c'], dtype=float)
-
-            # Bollinger Bands
-            upper, middle, lower = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-
-            # Bollinger Band Width
-            bbw = (upper - lower) / middle
-            squeeze = bbw[-1] < np.percentile(bbw[-50:], 20)  # нижче 20% перцентиля → стискання
-
-            # RSI
-            rsi = talib.RSI(closes, timeperiod=14)
-            rsi_last = rsi[-1]
-
-            if squeeze:
-                if rsi_last > 55:
-                    results.append(f"🚀 LONG squeeze: {symbol} (RSI {rsi_last:.1f})")
-                elif rsi_last < 45:
-                    results.append(f"⚡ SHORT squeeze: {symbol} (RSI {rsi_last:.1f})")
-
-        if results:
-            bot.send_message(message.chat.id, "📊 <b>Ринок стискається — потенційні сигнали:</b>\n\n" + "\n".join(results), parse_mode="HTML")
+        if not signals:
+            bot.send_message(message.chat.id, "ℹ️ Стиснення не знайдено.")
         else:
-            bot.send_message(message.chat.id, "ℹ️ Немає монет у squeeze прямо зараз.")
+            text = "<b>ATR Squeeze Scanner</b>\n\n" + "\n\n".join(signals)
+            bot.send_message(message.chat.id, text, parse_mode="HTML")
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Помилка сканера: {e}")
