@@ -345,7 +345,7 @@ def smart_sr_handler(message):
         bot.send_message(message.chat.id, f"❌ Error: {e}")
 
 # ---------- /smart_auto ----------
- @bot.message_handler(commands=['smart_auto'])
+@bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
     try:
         import requests
