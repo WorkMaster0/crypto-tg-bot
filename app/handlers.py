@@ -1234,7 +1234,7 @@ def ai_predict_handler(message):
             img = plot_candles(symbol, interval="4h", limit=50)
             bot.send_photo(message.chat.id, img, caption="\n".join(response), parse_mode="HTML")
         except:
-            bot.reply_to(message, "\n".join(response), parse_mode="HTML)
+            bot.reply_to(message, "\n".join(response), parse_mode="HTML")
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка AI прогнозу: {str(e)}")
