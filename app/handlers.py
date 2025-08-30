@@ -3,7 +3,7 @@ import numpy as np
 from app.bot import bot
 from app.analytics import (
     get_price, get_klines, generate_signal_text, trend_strength_text,
-    find_levels, top_movers, position_size, normalize_symbol, find_atr_squeeze  # <-- Додано find_atr_squeeze
+    find_levels, client, top_movers, position_size, normalize_symbol, find_atr_squeeze  # <-- Додано find_atr_squeeze
 )
 from app.chart import plot_candles
 from app.config import DEFAULT_INTERVAL, ALLOWED_INTERVALS
