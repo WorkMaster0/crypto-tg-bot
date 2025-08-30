@@ -653,110 +653,134 @@ def scan_top_patterns(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка при скануванні топ монет: {str(e)}")
         
-# ---------- /analyze_auto (ВИПРАВЛЕНА ВЕРСІЯ) ----------
+# ---------- /analyze_auto (З ФІЛЬТРОМ ПО ОБСЯГУ) ----------
 @bot.message_handler(commands=['analyze_auto'])
 def analyze_auto_handler(message):
     """
-    Автоматичне сканування топ токенів за зміною ціни 24h
+    Автоматичне сканування для пошуку СИЛЬНИХ сигналів (з фільтром обсягу)
     """
     try:
-        processing_msg = bot.send_message(message.chat.id, "🔍 Сканую топ токени за зміною ціни...")
+        processing_msg = bot.send_message(message.chat.id, "🔍 Шукаю сильні сигнали...")
         
-        # Отримуємо топ токени за зміною ціни (абсолютне значення)
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         data = response.json()
         
-        # Фільтруємо USDT пари і сортуємо за ABS(зміною ціни)
-        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT')]
+        # Фільтруємо: USDT пари + мінімальний обсяг 10M$ + мінімальна ціна 0.01$
+        usdt_pairs = [
+            d for d in data 
+            if (d['symbol'].endswith('USDT') and 
+                float(d['quoteVolume']) > 10000000 and  # 10M$ обсяг
+                float(d['lastPrice']) > 0.01)  # Ціна вище 0.01$
+        ]
+        
+        # Сортуємо за зміною ціни
         top_pairs = sorted(usdt_pairs, 
                           key=lambda x: abs(float(x['priceChangePercent'])), 
-                          reverse=True)[:25]  # Топ-25 за зміною ціни
+                          reverse=True)[:25]  # Топ-25
         
-        results = []
+        strong_signals = []
         
         for pair in top_pairs:
             symbol = pair['symbol']
             price_change = float(pair['priceChangePercent'])
+            volume = float(pair['quoteVolume']) / 1000000  # В мільйонах
             
             try:
-                symbol_signals = []
+                # Перевіряємо на різних таймфреймах для підтвердження
+                signals_1h = generate_signal_text(symbol, interval="1h")
+                signals_4h = generate_signal_text(symbol, interval="4h")
                 
-                # Перевіряємо тільки 1h таймфрейм для швидкості
-                try:
-                    signal_text = generate_signal_text(symbol, interval="1h")
-                    
-                    # Шукаємо сигнали в тексті
-                    is_long = any(keyword in signal_text for keyword in ['LONG', 'BUY', 'UP', 'BULL'])
-                    is_short = any(keyword in signal_text for keyword in ['SHORT', 'SELL', 'DOWN', 'BEAR'])
-                    
-                    if is_long or is_short:
-                        signal_type = "LONG" if is_long else "SHORT"
-                        symbol_signals.append(("1h", signal_type, signal_text))
-                        
-                except Exception:
-                    continue
+                # Шукаємо ЧІТКІ сигнали з ключовими словами
+                is_strong_long_1h = any(keyword in signals_1h for keyword in 
+                                      ['STRONG LONG', 'STRONG_BUY', 'сильний лонг', 'потенційний лонг'])
+                is_strong_short_1h = any(keyword in signals_1h for keyword in 
+                                       ['STRONG SHORT', 'STRONG_SELL', 'сильний шорт', 'потенційний шорт'])
                 
-                # Якщо знайшли сигнали для цього токена
-                if symbol_signals:
-                    results.append({
+                is_strong_long_4h = any(keyword in signals_4h for keyword in 
+                                      ['STRONG LONG', 'STRONG_BUY', 'сильний лонг', 'потенційний лонг'])
+                is_strong_short_4h = any(keyword in signals_4h for keyword in 
+                                       ['STRONG SHORT', 'STRONG_SELL', 'сильний шорт', 'потенційний шорт'])
+                
+                # Перевіряємо консенсус між таймфреймами
+                long_consensus = (is_strong_long_1h and is_strong_long_4h) or (is_strong_long_1h and not is_strong_short_4h) or (is_strong_long_4h and not is_strong_short_1h)
+                short_consensus = (is_strong_short_1h and is_strong_short_4h) or (is_strong_short_1h and not is_strong_long_4h) or (is_strong_short_4h and not is_strong_long_1h)
+                
+                if long_consensus or short_consensus:
+                    signal_type = "STRONG LONG" if long_consensus else "STRONG SHORT"
+                    
+                    # Аналізуємо згоду з ціновим рухом
+                    price_agreement = (price_change > 0 and long_consensus) or (price_change < 0 and short_consensus)
+                    agreement_emoji = "✅" if price_agreement else "⚠️"
+                    
+                    strong_signals.append({
                         'symbol': symbol,
                         'price_change': price_change,
-                        'signals': symbol_signals
+                        'volume': volume,
+                        'signal_type': signal_type,
+                        'agreement': price_agreement,
+                        'agreement_emoji': agreement_emoji,
+                        'signal_1h': signals_1h,
+                        'signal_4h': signals_4h
                     })
                     
             except Exception:
                 continue
         
-        # Видаляємо повідомлення про обробку
         try:
             bot.delete_message(message.chat.id, processing_msg.message_id)
         except:
             pass
         
-        if not results:
-            bot.reply_to(message, "🔍 Не знайдено токенів з сигналами")
+        if not strong_signals:
+            bot.reply_to(message, "🔍 Не знайдено сильних сигналів з консенсусом")
             return
         
-        # Сортуємо за зміною ціни (абсолютне значення)
-        results.sort(key=lambda x: abs(x['price_change']), reverse=True)
+        # Сортуємо за обсягом (щоб показувати ліквідніші першими)
+        strong_signals.sort(key=lambda x: x['volume'], reverse=True)
         
-        # Формуємо відповідь
-        response = ["🎯 <b>Токени з сигналами (за зміною ціни 24h):</b>\n"]
+        response = ["🎯 <b>СИЛЬНІ сигнали (обсяг >10M$, ціна >0.01$):</b>\n"]
         
-        for result in results[:15]:  # Показуємо топ-15
-            emoji = "🟢" if result['price_change'] > 0 else "🔴"
-            for interval, signal_type, signal_text in result['signals']:
-                # Беремо перші 2 рядки з сигналу
-                lines = signal_text.split('\n')
-                short_signal = ' | '.join(lines[:2]) if len(lines) > 1 else lines[0]
-                
-                response.append(
-                    f"\n{emoji} <b>{result['symbol']}</b> - {result['price_change']:+.2f}%"
-                )
-                response.append(f"   📶 {signal_type}: {short_signal}")
+        for signal in strong_signals[:10]:
+            emoji = "🟢" if "LONG" in signal['signal_type'] else "🔴"
+            response.append(
+                f"\n{emoji} <b>{signal['symbol']}</b> - {signal['price_change']:+.2f}%"
+            )
+            response.append(f"   📊 Обсяг: {signal['volume']:.1f}M")
+            response.append(f"   {signal['agreement_emoji']} {signal['signal_type']}")
+            
+            # Додаємо коротку інфо з 1h таймфрейму
+            lines_1h = signal['signal_1h'].split('\n')
+            response.append(f"   1h: {lines_1h[0][:50]}...")
         
         bot.reply_to(message, "\n".join(response), parse_mode="HTML")
         
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка при скануванні: {str(e)}")
+        bot.reply_to(message, f"❌ Помилка: {str(e)}")
 
-# ---------- /analyze_multi (ВИПРАВЛЕНА ВЕРСІЯ) ----------
+# ---------- /analyze_multi (З ФІЛЬТРОМ ПО ОБСЯГУ) ----------
 @bot.message_handler(commands=['analyze_multi'])
 def analyze_multi_handler(message):
     """
-    Швидке сканування топ токенів за зміною ціни
+    Сканування топ токенів за зміною ціни (з фільтром обсягу)
     """
     try:
         processing_msg = bot.send_message(message.chat.id, "🔍 Швидке сканування...")
         
-        # Отримуємо топ токени за зміною ціни
+        # Отримуємо топ токени
         url = "https://api.binance.com/api/v3/ticker/24hr"
         response = requests.get(url, timeout=10)
         data = response.json()
         
-        # Топ-20 за зміною ціни (абсолютне значення)
-        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT')]
+        # Фільтр: обсяг >20M$, ціна >0.05$
+        usdt_pairs = [
+            d for d in data 
+            if (d['symbol'].endswith('USDT') and 
+                float(d['quoteVolume']) > 20000000 and  # 20M$ обсяг
+                float(d['lastPrice']) > 0.05)  # Ціна вище 0.05$
+        ]
+        
+        # Топ-20 за зміною ціни
         top_pairs = sorted(usdt_pairs, 
                           key=lambda x: abs(float(x['priceChangePercent'])), 
                           reverse=True)[:20]
@@ -766,6 +790,7 @@ def analyze_multi_handler(message):
         for pair in top_pairs:
             symbol = pair['symbol']
             price_change = float(pair['priceChangePercent'])
+            volume = float(pair['quoteVolume']) / 1000000  # В мільйонах
             
             try:
                 signal_text = generate_signal_text(symbol, interval="1h")
@@ -781,7 +806,7 @@ def analyze_multi_handler(message):
                     lines = signal_text.split('\n')
                     short_info = ' | '.join(lines[:2]) if len(lines) > 1 else lines[0]
                     
-                    signals_found.append((symbol, price_change, signal_type, short_info))
+                    signals_found.append((symbol, price_change, volume, signal_type, short_info))
                     
             except Exception:
                 continue
@@ -792,18 +817,19 @@ def analyze_multi_handler(message):
             pass
         
         if not signals_found:
-            bot.reply_to(message, "🔍 Не знайдено сигналів у топ токенах")
+            bot.reply_to(message, "🔍 Не знайдено сигналів у ліквідних токенах")
             return
         
-        # Сортуємо за зміною ціни
-        signals_found.sort(key=lambda x: abs(x[1]), reverse=True)
+        # Сортуємо за обсягом (ліквідніші першими)
+        signals_found.sort(key=lambda x: x[2], reverse=True)
         
-        response = ["⚡ <b>Сигнали у топ токенах (за зміною ціни):</b>\n"]
+        response = ["⚡ <b>Сигнали у ліквідних токенах (обсяг >20M$):</b>\n"]
         
-        for symbol, price_change, signal_type, info in signals_found[:15]:
+        for symbol, price_change, volume, signal_type, info in signals_found[:15]:
             emoji = "🟢" if price_change > 0 else "🔴"
             signal_emoji = "🟢" if signal_type == "LONG" else "🔴"
             response.append(f"\n{emoji} <b>{symbol}</b> - {price_change:+.2f}%")
+            response.append(f"   📊 Vol: {volume:.1f}M")
             response.append(f"   {signal_emoji} {signal_type}: {info}")
         
         bot.reply_to(message, "\n".join(response), parse_mode="HTML")
@@ -811,58 +837,73 @@ def analyze_multi_handler(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка: {str(e)}")
 
-# ---------- /analyze_top (ВИПРАВЛЕНА ВЕРСІЯ) ----------
+# ---------- /analyze_top (З ФІЛЬТРОМ ПО ОБСЯГУ) ----------
 @bot.message_handler(commands=['analyze_top'])
 def analyze_top_handler(message):
     """
-    Сканування токенів з найбільшою зміною ціни + сигнали
+    Пошук токенів з конкретною кількістю сигналів (з фільтром обсягу)
     """
     try:
         parts = message.text.split()
-        min_change = 5.0  # Мінімальна зміна ціни 5%
+        min_signals = 3  # Мінімум 3 сигнали
         
         if len(parts) >= 2:
             try:
-                min_change = float(parts[1])
+                min_signals = int(parts[1])
+                min_signals = max(1, min(min_signals, 6))
             except:
                 pass
         
-        processing_msg = bot.send_message(message.chat.id, f"🔍 Шукаю токени зі зміною >{min_change}%...")
+        processing_msg = bot.send_message(message.chat.id, f"🔍 Шукаю токени з {min_signals}+ сигналами...")
         
-        # Отримуємо токени
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         data = response.json()
         
-        # Фільтруємо за мінімальною зміною ціни
-        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and abs(float(d['priceChangePercent'])) >= min_change]
-        # Сортуємо за абсолютною зміною
-        top_pairs = sorted(usdt_pairs, 
-                          key=lambda x: abs(float(x['priceChangePercent'])), 
-                          reverse=True)[:20]
+        # Фільтр: обсяг >50M$, ціна >0.10$
+        usdt_pairs = [
+            d for d in data 
+            if (d['symbol'].endswith('USDT') and 
+                float(d['quoteVolume']) > 50000000 and  # 50M$ обсяг
+                float(d['lastPrice']) > 0.10)  # Ціна вище 0.10$
+        ]
+        
+        # Топ-30 за обсягом
+        top_symbols = [pair['symbol'] for pair in sorted(usdt_pairs, 
+                                                       key=lambda x: float(x['quoteVolume']), 
+                                                       reverse=True)[:30]]
         
         results = []
         
-        for pair in top_pairs:
-            symbol = pair['symbol']
-            price_change = float(pair['priceChangePercent'])
-            volume = float(pair['quoteVolume']) / 1000000  # в мільйонах
-            
+        for symbol in top_symbols:
             try:
-                signal_text = generate_signal_text(symbol, interval="1h")
+                signal_count = 0
+                signal_details = []
                 
-                # Шукаємо сигнали
-                is_long = any(keyword in signal_text for keyword in ['LONG', 'BUY', 'UP', 'BULL'])
-                is_short = any(keyword in signal_text for keyword in ['SHORT', 'SELL', 'DOWN', 'BEAR'])
+                # Перевіряємо різні таймфрейми
+                for interval in ['15m', '1h', '4h', '1d']:
+                    try:
+                        signal_text = generate_signal_text(symbol, interval=interval)
+                        
+                        if any(keyword in signal_text for keyword in ['LONG', 'SHORT', 'BUY', 'SELL']):
+                            signal_type = "LONG" if any(kw in signal_text for kw in ['LONG', 'BUY']) else "SHORT"
+                            signal_count += 1
+                            signal_details.append((interval, signal_type))
+                            
+                    except Exception:
+                        continue
                 
-                if is_long or is_short:
-                    signal_type = "LONG" if is_long else "SHORT"
+                if signal_count >= min_signals:
+                    pair_data = [d for d in data if d['symbol'] == symbol][0]
+                    price_change = float(pair_data['priceChangePercent'])
+                    volume = float(pair_data['quoteVolume']) / 1000000
+                    
                     results.append({
                         'symbol': symbol,
+                        'signal_count': signal_count,
                         'price_change': price_change,
                         'volume': volume,
-                        'signal_type': signal_type,
-                        'signal_text': signal_text
+                        'details': signal_details
                     })
                     
             except Exception:
@@ -874,64 +915,76 @@ def analyze_top_handler(message):
             pass
         
         if not results:
-            bot.reply_to(message, f"🔍 Не знайдено токенів зі зміною >{min_change}% та сигналами")
+            bot.reply_to(message, f"🔍 Не знайдено токенів з {min_signals}+ сигналами")
             return
         
-        # Сортуємо за зміною ціни
-        results.sort(key=lambda x: abs(x['price_change']), reverse=True)
+        # Сортуємо за обсягом
+        results.sort(key=lambda x: x['volume'], reverse=True)
         
-        response = [f"🏆 <b>Топ токени зі зміною >{min_change}%:</b>\n"]
+        response = [f"🏆 <b>Токени з {min_signals}+ сигналами (обсяг >50M$):</b>\n"]
         
         for result in results:
             emoji = "🟢" if result['price_change'] > 0 else "🔴"
-            signal_emoji = "🟢" if result['signal_type'] == "LONG" else "🔴"
             
-            # Беремо перші 2 рядки сигналу
-            lines = result['signal_text'].split('\n')
-            short_signal = ' | '.join(lines[:2]) if len(lines) > 1 else lines[0]
+            # Групуємо сигнали по типах
+            long_count = sum(1 for _, sig_type in result['details'] if sig_type == "LONG")
+            short_count = sum(1 for _, sig_type in result['details'] if sig_type == "SHORT")
             
             response.append(
-                f"\n{emoji} <b>{result['symbol']}</b> - {result['price_change']:+.2f}% "
-                f"(Vol: {result['volume']:.1f}M)"
+                f"\n{emoji} <b>{result['symbol']}</b> - {result['signal_count']} сигн. "
+                f"({result['price_change']:+.2f}%)"
             )
-            response.append(f"   {signal_emoji} {result['signal_type']}: {short_signal}")
+            response.append(f"   📊 Vol: {result['volume']:.1f}M")
+            response.append(f"   🟢 {long_count} лонгів | 🔴 {short_count} шортів")
+            
+            # Додаємо деталі по таймфреймах
+            for interval, signal_type in result['details'][:4]:
+                sig_emoji = "🟢" if signal_type == "LONG" else "🔴"
+                response.append(f"   {sig_emoji} {interval}")
         
         bot.reply_to(message, "\n".join(response), parse_mode="HTML")
         
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка: {str(e)}")
 
-# ---------- /analyze_hot ----------
-@bot.message_handler(commands=['analyze_hot'])
-def analyze_hot_handler(message):
+# ---------- /analyze_liquid ----------
+@bot.message_handler(commands=['analyze_liquid'])
+def analyze_liquid_handler(message):
     """
-    Топ токени за зміною ціни (без сигналів, тільки ціна)
+    Показує тільки найліквідніші токени (без сигналів)
     """
     try:
-        processing_msg = bot.send_message(message.chat.id, "🔥 Шукаю найгарячіші токени...")
+        processing_msg = bot.send_message(message.chat.id, "🔍 Отримую список ліквідних токенів...")
         
         url = "https://api.binance.com/api/v3/ticker/24hr"
         response = requests.get(url, timeout=10)
         data = response.json()
         
-        # Топ-15 за зміною ціни
-        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT')]
-        top_pairs = sorted(usdt_pairs, 
-                          key=lambda x: abs(float(x['priceChangePercent'])), 
-                          reverse=True)[:15]
+        # Фільтр: обсяг >100M$, ціна >0.50$
+        liquid_pairs = [
+            d for d in data 
+            if (d['symbol'].endswith('USDT') and 
+                float(d['quoteVolume']) > 100000000 and  # 100M$ обсяг
+                float(d['lastPrice']) > 0.50)  # Ціна вище 0.50$
+        ]
         
-        response = ["🔥 <b>Найгарячіші токени (24h):</b>\n"]
+        # Топ-20 за обсягом
+        top_liquid = sorted(liquid_pairs, 
+                           key=lambda x: float(x['quoteVolume']), 
+                           reverse=True)[:20]
         
-        for i, pair in enumerate(top_pairs, 1):
+        response = ["💎 <b>Найліквідніші токени (обсяг >100M$):</b>\n"]
+        
+        for i, pair in enumerate(top_liquid, 1):
             symbol = pair['symbol']
             price = float(pair['lastPrice'])
             change = float(pair['priceChangePercent'])
-            volume = float(pair['quoteVolume']) / 1000000
+            volume = float(pair['quoteVolume']) / 1000000  # В мільйонах
             
             emoji = "🟢" if change > 0 else "🔴"
             response.append(
                 f"\n{i}. {emoji} <b>{symbol}</b> - ${price:,.2f} "
-                f"{change:+.2f}% | Vol: {volume:,.1f}M"
+                f"{change:+.2f}% | Vol: {volume:,.0f}M"
             )
         
         try:
