@@ -351,27 +351,30 @@ def smart_auto_handler(message):
         import requests
         import numpy as np
 
-        # 1. Тягнемо всі пари з Binance
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url).json()
 
-        # 2. Фільтруємо тільки USDT пари і прибираємо сміття
-        usdt_pairs = [
-            x for x in data
-            if x["symbol"].endswith("USDT") 
-            and not x["symbol"].endswith("BUSD")   # щоб не було дублів
-            and float(x["quoteVolume"]) > 5_000_000  # мінімум $5M обсягу
+        # ✅ фільтруємо тільки USDT-пари з нормальним об'ємом (щоб уникнути сміттєвих монет)
+        symbols = [
+            d for d in data
+            if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
         ]
 
-        # 3. Беремо топ-30 по обсягу
-        top_pairs = sorted(usdt_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)[:30]
-        symbols = [x["symbol"] for x in top_pairs]
+        # ✅ сортуємо за % зміни ціни за 24 години (топ рухомі монети)
+        symbols = sorted(
+            symbols,
+            key=lambda x: abs(float(x["priceChangePercent"])),
+            reverse=True
+        )
 
-        results = []
-        for symbol in symbols:
+        # беремо топ-30 найактивніших
+        top_symbols = [s["symbol"] for s in symbols[:30]]
+
+        signals = []
+        for symbol in top_symbols:
             try:
                 df = get_klines(symbol, interval="1h", limit=200)
-                if not df or len(df.get("c", [])) == 0:
+                if not df or len(df.get("c", [])) < 50:
                     continue
 
                 closes = np.array(df["c"], dtype=float)
@@ -383,31 +386,29 @@ def smart_auto_handler(message):
                 signal = None
                 for lvl in sr_levels:
                     if last_price > lvl * 1.01:
-                        signal = f"🚀 LONG breakout: {symbol} пробив {lvl:.4f}"
+                        signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
+                        break
                     elif last_price < lvl * 0.99:
-                        signal = f"⚡ SHORT breakout: {symbol} пробив {lvl:.4f}"
+                        signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
+                        break
+
+                impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
+                vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
+                nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
+                if impulse > 0.08 and vol_spike and nearest_res is not None:
+                    signal = f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}"
 
                 if signal:
-                    # Перевірка на pump (pre-top)
-                    if len(closes) >= 4:
-                        impulse = (closes[-1] - closes[-4]) / closes[-4]
-                    else:
-                        impulse = 0
-                    vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
-                    nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-                    if impulse > 0.08 and vol_spike and nearest_resistance is not None:
-                        signal += f"\n⚠️ Pre-top detected: можливий SHORT біля {nearest_resistance:.4f}"
+                    signals.append(f"<b>{symbol}</b>\n{signal}")
 
-                    results.append(signal)
-
-            except Exception as e:
-                print(f"Error on {symbol}: {e}")
+            except Exception:
                 continue
 
-        if results:
-            bot.send_message(message.chat.id, "\n\n".join(results))
+        if not signals:
+            bot.send_message(message.chat.id, "ℹ️ Жодних сигналів не знайдено.")
         else:
-            bot.send_message(message.chat.id, "ℹ️ Сигналів не знайдено.")
+            text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(signals)
+            bot.send_message(message.chat.id, text, parse_mode="HTML")
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
