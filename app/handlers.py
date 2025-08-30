@@ -1919,3 +1919,218 @@ def rescan_ai_callback(call):
     except:
         bot.send_message(call.message.chat.id, "🔄 Запускаю нове сканування...")
         ai_scanner_handler(call.message)
+        
+        # ---------- /ai_alert ----------
+@bot.message_handler(commands=['ai_alert'])
+def ai_alert_handler(message):
+    """
+    Автоматичні алерти з конкретними рівнями входу/виходу
+    """
+    try:
+        parts = message.text.split()
+        symbol = "BTCUSDT"  # default
+        
+        if len(parts) >= 2:
+            symbol = parts[1].upper()
+            if not symbol.endswith('USDT'):
+                symbol += 'USDT'
+        
+        processing_msg = bot.send_message(message.chat.id, f"🎯 AI розраховує рівні для {symbol}...")
+        
+        # Отримуємо поточні дані
+        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+        response = requests.get(url, timeout=10)
+        data = response.json() if response.status_code == 200 else {}
+        
+        current_price = float(data.get('lastPrice', 0))
+        if current_price == 0:
+            # Якщо API не дав ціну, пробуємо через get_price
+            try:
+                current_price = get_price(symbol)
+            except:
+                bot.reply_to(message, f"❌ Не вдалося отримати ціну для {symbol}")
+                return
+        
+        # Отримуємо сигнал для аналізу
+        signal_text = generate_signal_text(symbol, interval="1h")
+        
+        # Визначаємо напрямок сигналу
+        is_bullish = any(keyword in signal_text for keyword in ['LONG', 'BUY', 'UP', 'BULL'])
+        is_bearish = any(keyword in signal_text for keyword in ['SHORT', 'SELL', 'DOWN', 'BEAR'])
+        
+        if not (is_bullish or is_bearish):
+            bot.reply_to(message, f"🔍 Для {symbol} немає чітких сигналів")
+            return
+        
+        # Розраховуємо рівні
+        if is_bullish:
+            entry_price = round(current_price * 0.98, 6)  # -2% для входу на відкаті
+            stop_loss = round(entry_price * 0.98, 6)      # -2% від входу
+            take_profit = round(entry_price * 1.06, 6)    # +6% ціль (RRR 1:3)
+            direction = "LONG"
+            emoji = "🟢"
+        else:
+            entry_price = round(current_price * 1.02, 6)  # +2% для входу на відскоку
+            stop_loss = round(entry_price * 1.02, 6)      # +2% від входу  
+            take_profit = round(entry_price * 0.94, 6)    # -6% ціль (RRR 1:3)
+            direction = "SHORT"
+            emoji = "🔴"
+        
+        # Розраховуємо розмір позиції
+        risk_per_trade = 100  # $100 ризик на угоду
+        risk_amount = abs(entry_price - stop_loss)
+        position_size = round(risk_per_trade / risk_amount, 2)
+        
+        # Формуємо детальний план
+        response = [
+            f"{emoji} <b>AI Trading Plan for {symbol}</b>",
+            f"",
+            f"📊 <b>Current Price:</b> ${current_price:.6f}",
+            f"🎯 <b>Signal:</b> {direction}",
+            f"",
+            f"💰 <b>Trading Levels:</b>",
+            f"• Entry: ${entry_price:.6f}",
+            f"• Stop Loss: ${stop_loss:.6f}", 
+            f"• Take Profit: ${take_profit:.6f}",
+            f"• Risk/Reward: 1:3",
+            f"",
+            f"📈 <b>Position Size:</b>",
+            f"• Risk Amount: ${risk_per_trade}",
+            f"• Position Size: {position_size} {symbol.replace('USDT', '')}",
+            f"• Investment: ${entry_price * position_size:.2f}",
+            f"",
+            f"💡 <b>AI Recommendations:</b>",
+            f"• Wait for price to reach entry level",
+            f"• Set limit orders for better execution",
+            f"• Monitor 1h timeframe for confirmation",
+            f"",
+            f"⚠️ <i>Based on current market conditions</i>"
+        ]
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        # Додаємо кнопки для швидких дій
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("📊 Графік 1h", callback_data=f"chart_1h_{symbol}"),
+            types.InlineKeyboardButton("🔄 Оновити", callback_data=f"alert_{symbol}")
+        )
+        
+        bot.send_message(message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+
+# ---------- /ai_auto_alert ----------
+@bot.message_handler(commands=['ai_auto_alert'])
+def ai_auto_alert_handler(message):
+    """
+    Автоматичний пошук найкращих сигналів з готовими рівнями
+    """
+    try:
+        processing_msg = bot.send_message(message.chat.id, "🔍 AI шукає найкращі сигнали...")
+        
+        # Отримуємо топ токени
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        
+        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT') and float(d['quoteVolume']) > 10000000]
+        top_pairs = sorted(usdt_pairs, key=lambda x: abs(float(x['priceChangePercent'])), reverse=True)[:10]
+        
+        best_alerts = []
+        
+        for pair in top_pairs:
+            symbol = pair['symbol']
+            current_price = float(pair['lastPrice'])
+            
+            try:
+                signal_text = generate_signal_text(symbol, interval="1h")
+                
+                is_bullish = any(keyword in signal_text for keyword in ['LONG', 'BUY', 'UP', 'BULL'])
+                is_bearish = any(keyword in signal_text for keyword in ['SHORT', 'SELL', 'DOWN', 'BEAR'])
+                
+                if is_bullish or is_bearish:
+                    # Розраховуємо рівні
+                    if is_bullish:
+                        entry = round(current_price * 0.98, 6)
+                        sl = round(entry * 0.98, 6)
+                        tp = round(entry * 1.06, 6)
+                        direction = "LONG"
+                        emoji = "🟢"
+                    else:
+                        entry = round(current_price * 1.02, 6)
+                        sl = round(entry * 1.02, 6)
+                        tp = round(entry * 0.94, 6)
+                        direction = "SHORT" 
+                        emoji = "🔴"
+                    
+                    best_alerts.append({
+                        'symbol': symbol,
+                        'direction': direction,
+                        'emoji': emoji,
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'current': current_price
+                    })
+                    
+            except Exception:
+                continue
+        
+        try:
+            bot.delete_message(message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
+        if not best_alerts:
+            bot.reply_to(message, "🔍 Не знайдено сильних сигналів")
+            return
+        
+        # Формуємо звіт
+        response = ["🚀 <b>AI Auto Alerts - Найкращі сигнали:</b>\n"]
+        
+        for alert in best_alerts[:5]:
+            response.append(
+                f"\n{alert['emoji']} <b>{alert['symbol']}</b> - {alert['direction']}"
+            )
+            response.append(f"   Current: ${alert['current']:.6f}")
+            response.append(f"   Entry: ${alert['entry']:.6f}")
+            response.append(f"   SL: ${alert['sl']:.6f} | TP: ${alert['tp']:.6f}")
+        
+        response.append("\n💡 <i>Використовуйте /ai_alert SYMBOL для деталей</i>")
+        
+        bot.reply_to(message, "\n".join(response), parse_mode="HTML")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+
+# ---------- Callback для оновлення алертів ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('alert_'))
+def alert_callback(call):
+    """Оновити алерт"""
+    try:
+        symbol = call.data.replace('alert_', '')
+        bot.answer_callback_query(call.id, f"🔄 Оновлюю {symbol}...")
+        
+        # Видаляємо старе повідомлення і робимо новий аналіз
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except:
+            pass
+        
+        # Створюємо фейкове повідомлення для обробки
+        class FakeMessage:
+            def __init__(self, chat_id, text):
+                self.chat_id = chat_id
+                self.text = text
+        
+        fake_msg = FakeMessage(call.message.chat.id, f"/ai_alert {symbol}")
+        ai_alert_handler(fake_msg)
+        
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Помилка: {str(e)}")
