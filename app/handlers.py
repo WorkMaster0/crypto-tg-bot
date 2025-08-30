@@ -380,11 +380,15 @@ def smart_auto_handler(message):
                 last_price = closes[-1]
 
                 signal = ""
-                for lvl in sr_levels:
-                    if last_price > lvl * 1.01:
-                        signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
-                    elif last_price < lvl * 0.99:
-                        signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
+
+# шукаємо найближчий рівень до ціни
+nearest_level = min(sr_levels, key=lambda x: abs(x - last_price), default=None)
+
+if nearest_level:
+    if last_price > nearest_level * 1.01:
+        signal = f"🚀 LONG breakout: ціна пробила опір {nearest_level:.4f}"
+    elif last_price < nearest_level * 0.99:
+        signal = f"⚡ SHORT breakout: ціна пробила підтримку {nearest_level:.4f}"
 
                 # --- Pre-top (pump detect) ---
                 impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
