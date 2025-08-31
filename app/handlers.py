@@ -2231,3 +2231,244 @@ def alert_callback(call):
         
     except Exception as e:
         bot.send_message(call.message.chat.id, f"❌ Помилка: {str(e)}")
+        
+        # ---------- /ai_notify ----------
+@bot.message_handler(commands=['ai_notify'])
+def ai_notify_handler(message):
+    """
+    Налаштування smart-сповіщень про ідеальні входы
+    """
+    try:
+        # Перевіряємо чи користувач вже налаштував сповіщення
+        user_id = message.from_user.id
+        user_settings = notify_settings.get(user_id, {})
+        
+        if not user_settings:
+            # Перше налаштування
+            response = [
+                "🔔 <b>AI Smart Notifications Setup</b>",
+                "",
+                "📊 <b>Поточні налаштування:</b>",
+                "• Сповіщення: ❌ ВИМКНЕНО",
+                "• Тип сигналів: ВСІ",
+                "• Мінімальна впевненість: 70%",
+                "• Час активності: Цілодобово",
+                "",
+                "🎯 <b>Оберіть опції:</b>"
+            ]
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Увімкнути сповіщення", callback_data="notify_enable"),
+                types.InlineKeyboardButton("⚙️ Налаштувати", callback_data="notify_settings")
+            )
+            
+        else:
+            # Показуємо поточні налаштування
+            response = [
+                "🔔 <b>Поточні налаштування сповіщень:</b>",
+                "",
+                f"• Статус: {'✅ УВІМКНЕНО' if user_settings.get('enabled', False) else '❌ ВИМКНЕНО'}",
+                f"• Мінімальна впевненість: {user_settings.get('min_confidence', 70)}%",
+                f"• Типи сигналів: {', '.join(user_settings.get('signal_types', ['ALL']))}",
+                f"• Час активності: {user_settings.get('active_hours', '00:00-23:59')}",
+                f"• Улюблені монети: {len(user_settings.get('favorite_coins', []))}",
+                "",
+                "🎯 <b>Оберіть дію:</b>"
+            ]
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("🔕 Вимкнути" if user_settings.get('enabled') else "🔔 Увімкнути", 
+                                         callback_data="notify_toggle"),
+                types.InlineKeyboardButton("⚙️ Змінити налаштування", callback_data="notify_settings")
+            )
+            markup.row(
+                types.InlineKeyboardButton("📊 Тестове сповіщення", callback_data="notify_test"),
+                types.InlineKeyboardButton("📋 Мої улюблені", callback_data="notify_favorites")
+            )
+        
+        bot.send_message(message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+
+# Глобальний словник для налаштувань сповіщень
+notify_settings = {}
+
+# ---------- Callback для налаштувань сповіщень ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('notify_'))
+def notify_callback(call):
+    """Обробка налаштувань сповіщень"""
+    try:
+        user_id = call.from_user.id
+        data = call.data
+        
+        if data == "notify_enable":
+            # Увімкнути сповіщення з налаштуваннями за замовчуванням
+            notify_settings[user_id] = {
+                'enabled': True,
+                'min_confidence': 70,
+                'signal_types': ['BREAKOUT', 'SQUEEZE', 'TREND'],
+                'active_hours': '00:00-23:59',
+                'favorite_coins': []
+            }
+            
+            bot.answer_callback_query(call.id, "✅ Сповіщення увімкнено!")
+            ai_notify_handler(call.message)
+            
+        elif data == "notify_toggle":
+            # Перемкнути статус
+            if user_id in notify_settings:
+                notify_settings[user_id]['enabled'] = not notify_settings[user_id].get('enabled', False)
+                status = "увімкнено" if notify_settings[user_id]['enabled'] else "вимкнено"
+                bot.answer_callback_query(call.id, f"✅ Сповіщення {status}!")
+            ai_notify_handler(call.message)
+            
+        elif data == "notify_test":
+            # Тестове сповіщення
+            bot.answer_callback_query(call.id, "📋 Відправляю тестове сповіщення...")
+            send_notification(user_id, "TEST_SIGNAL", "BTCUSDT", 85, "Тестове сповіщення працює!")
+            
+        elif data == "notify_settings":
+            # Меню налаштувань
+            show_settings_menu(call)
+            
+        elif data == "notify_favorites":
+            # Керування улюбленими монетами
+            show_favorites_menu(call)
+            
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
+
+# ---------- Функція відправки сповіщень ----------
+def send_notification(user_id, signal_type, symbol, confidence, message_text):
+    """Відправка smart-сповіщення"""
+    try:
+        if user_id not in notify_settings or not notify_settings[user_id].get('enabled', False):
+            return False
+        
+        settings = notify_settings[user_id]
+        
+        # Перевіряємо фільтри
+        if confidence < settings['min_confidence']:
+            return False
+            
+        if signal_type not in settings['signal_types'] and 'ALL' not in settings['signal_types']:
+            return False
+            
+        # Перевіряємо час активності
+        if not is_active_time(settings['active_hours']):
+            return False
+            
+        # Перевіряємо улюблені монети
+        if settings['favorite_coins'] and symbol not in settings['favorite_coins']:
+            return False
+        
+        # Формуємо сповіщення
+        emoji = "🟢" if "BUY" in message_text else "🔴" if "SELL" in message_text else "🎯"
+        notification = [
+            f"{emoji} <b>AI NOTIFICATION</b>",
+            f"📊 {symbol} | Впевненість: {confidence}%",
+            f"",
+            f"📢 {message_text}",
+            f"",
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+            f"",
+            f"💡 <i>/ai_alert {symbol} для деталей</i>"
+        ]
+        
+        # Відправляємо сповіщення
+        bot.send_message(user_id, "\n".join(notification), parse_mode="HTML")
+        return True
+        
+    except Exception as e:
+        print(f"Notification error: {e}")
+        return False
+
+# ---------- Функція перевірки часу ----------
+def is_active_time(time_range):
+    """Перевіряє чи поточний час в активному діапазоні"""
+    try:
+        if time_range == '00:00-23:59':
+            return True
+            
+        start_str, end_str = time_range.split('-')
+        now = datetime.now().time()
+        start_time = datetime.strptime(start_str, '%H:%M').time()
+        end_time = datetime.strptime(end_str, '%H:%M').time()
+        
+        return start_time <= now <= end_time
+    except:
+        return True
+
+# ---------- Автоматичний моніторинг ----------
+def start_notification_monitor():
+    """Фоновий моніторинг для сповіщень"""
+    def monitor():
+        while True:
+            try:
+                # Отримуємо топ сигналів
+                url = "https://api.binance.com/api/v3/ticker/24hr"
+                response = requests.get(url, timeout=10)
+                data = response.json()
+                
+                # Аналізуємо топ-20 монет
+                usdt_pairs = [d for d in data if d['symbol'].endswith('USDT')]
+                top_pairs = sorted(usdt_pairs, key=lambda x: abs(float(x['priceChangePercent'])), reverse=True)[:20]
+                
+                for pair in top_pairs:
+                    symbol = pair['symbol']
+                    price_change = float(pair['priceChangePercent'])
+                    
+                    # Аналіз сигналів
+                    if abs(price_change) > 5.0:
+                        signal_text = generate_signal_text(symbol, interval="1h")
+                        
+                        # Визначаємо тип сигналу
+                        if "STRONG LONG" in signal_text and price_change > 0:
+                            for user_id in notify_settings:
+                                send_notification(
+                                    user_id, 
+                                    "TREND", 
+                                    symbol, 
+                                    80, 
+                                    f"STRONG BULLISH TREND detected! Price: +{price_change:.2f}%"
+                                )
+                        
+                        elif "STRONG SHORT" in signal_text and price_change < 0:
+                            for user_id in notify_settings:
+                                send_notification(
+                                    user_id,
+                                    "TREND",
+                                    symbol,
+                                    80, 
+                                    f"STRONG BEARISH TREND detected! Price: {price_change:.2f}%"
+                                )
+                
+                # Спимо 5 хвилин між перевірками
+                time.sleep(300)
+                
+            except Exception as e:
+                print(f"Monitor error: {e}")
+                time.sleep(60)
+    
+    # Запускаємо в окремому потоці
+    import threading
+    thread = threading.Thread(target=monitor, daemon=True)
+    thread.start()
+
+# Запускаємо моніторинг при старті
+start_notification_monitor()
+
+# Додаткові функції для меню налаштувань
+def show_settings_menu(call):
+    """Меню налаштувань сповіщень"""
+    # [Код для меню налаштувань...]
+    pass
+
+def show_favorites_menu(call):
+    """Меню улюблених монет"""
+    # [Код для меню улюблених...]
+    pass
