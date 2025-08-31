@@ -2617,3 +2617,122 @@ def send_test_notification(user_id):
 # Глобальні змінні
 notify_settings = {}
 user_settings_state = {}  # Стан користувачів для текстового вводу
+# ---------- Додаємо новий обробник для видалення ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('remove_'))
+def remove_favorite_callback(call):
+    """Видалити монету з улюблених"""
+    try:
+        user_id = call.from_user.id
+        symbol = call.data.replace('remove_', '')
+        
+        if user_id in notify_settings and 'favorite_coins' in notify_settings[user_id]:
+            if symbol in notify_settings[user_id]['favorite_coins']:
+                notify_settings[user_id]['favorite_coins'].remove(symbol)
+                bot.answer_callback_query(call.id, f"✅ {symbol} видалено з улюблених")
+                
+                # Оновлюємо список улюблених
+                show_favorites_menu(call)
+            else:
+                bot.answer_callback_query(call.id, f"❌ {symbol} не знайдено в улюблених")
+        else:
+            bot.answer_callback_query(call.id, "❌ Список улюблених порожній")
+            
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
+
+# ---------- Оновлюємо функцію show_favorites_menu ----------
+def show_favorites_menu(call):
+    """Меню улюблених монет з кнопками видалення"""
+    user_id = call.from_user.id
+    favorites = notify_settings.get(user_id, {}).get('favorite_coins', [])
+    
+    if favorites:
+        response = ["💎 <b>Улюблені монети:</b>\n\n"]
+        markup = types.InlineKeyboardMarkup()
+        
+        for coin in favorites:
+            response.append(f"• {coin}")
+            # Додаємо кнопку видалення для кожної монети
+            markup.add(types.InlineKeyboardButton(f"❌ Видалити {coin}", callback_data=f"remove_{coin}"))
+        
+        response.append("\n\n🎯 Натисніть на монету для видалення")
+        
+    else:
+        response = ["💎 <b>Улюблені монети:</b>\n", "• Список порожній"]
+        markup = types.InlineKeyboardMarkup()
+    
+    # Додаємо кнопку повернення
+    markup.row(types.InlineKeyboardButton("🔙 Назад", callback_data="notify_config"))
+    
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="\n".join(response),
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except:
+        bot.send_message(call.message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
+
+# ---------- Оновлюємо обробник текстовых повідомлень для очищення ----------
+@bot.message_handler(func=lambda message: True)
+def handle_text_messages(message):
+    """Обробка текстовых повідомлень для налаштувань"""
+    try:
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        # Перевіряємо чи користувач в процесі налаштування
+        if user_id in user_settings_state:
+            state, callback_message = user_settings_state[user_id]
+            
+            # Додаємо команду для очищення
+            if text.lower() == '/clear':
+                if user_id in notify_settings and 'favorite_coins' in notify_settings[user_id]:
+                    notify_settings[user_id]['favorite_coins'] = []
+                    bot.send_message(user_id, "✅ Список улюблених очищено!")
+                    show_config_menu(callback_message)
+                    del user_settings_state[user_id]
+                return
+                
+            if state == 'waiting_confidence':
+                # [існуючий код...]
+                
+            elif state == 'waiting_time':
+                # [існуючий код...]
+                    
+            elif state == 'waiting_favorites':
+                # Обробка улюблених монет
+                if text.lower() == 'clear':
+                    if user_id in notify_settings and 'favorite_coins' in notify_settings[user_id]:
+                        notify_settings[user_id]['favorite_coins'] = []
+                        bot.send_message(user_id, "✅ Список улюблених очищено!")
+                    else:
+                        bot.send_message(user_id, "❌ Список улюблених вже порожній")
+                    show_config_menu(callback_message)
+                    del user_settings_state[user_id]
+                    return
+                
+                coins = [coin.strip().upper() for coin in text.split(',')]
+                valid_coins = []
+                
+                for coin in coins:
+                    if coin.endswith('USDT') and len(coin) > 4:
+                        valid_coins.append(coin)
+                
+                if valid_coins:
+                    if user_id not in notify_settings:
+                        notify_settings[user_id] = {'enabled': True}
+                    notify_settings[user_id]['favorite_coins'] = valid_coins
+                    bot.send_message(user_id, f"✅ Улюблені монети додані: {', '.join(valid_coins)}")
+                else:
+                    bot.send_message(user_id, "❌ Не знайдено валідних монет. Приклад: BTCUSDT,ETHUSDT\nАбо напишіть 'clear' для очищення списку")
+                    return
+                
+                show_config_menu(callback_message)
+                del user_settings_state[user_id]
+                
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Помилка: {str(e)}")
