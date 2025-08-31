@@ -2291,10 +2291,10 @@ def ai_notify_handler(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка: {str(e)}")
 
-# ---------- Callback для налаштувань сповіщень ----------
+# ---------- Головний обробник кнопок ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith('notify_'))
 def notify_callback(call):
-    """Обробка налаштувань сповіщень"""
+    """Обробка всіх кнопок сповіщень"""
     try:
         user_id = call.from_user.id
         data = call.data
@@ -2309,9 +2309,7 @@ def notify_callback(call):
                 'favorite_coins': []
             }
             bot.answer_callback_query(call.id, "✅ Сповіщення увімкнено!")
-            # Оновлюємо повідомлення
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            ai_notify_handler(call.message)
+            update_notify_message(call)
             
         elif data == "notify_toggle":
             # Перемкнути статус
@@ -2319,8 +2317,7 @@ def notify_callback(call):
                 notify_settings[user_id]['enabled'] = not notify_settings[user_id].get('enabled', False)
                 status = "увімкнено" if notify_settings[user_id]['enabled'] else "вимкнено"
                 bot.answer_callback_query(call.id, f"✅ Сповіщення {status}!")
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-                ai_notify_handler(call.message)
+                update_notify_message(call)
             else:
                 bot.answer_callback_query(call.id, "❌ Спочатку налаштуйте сповіщення!")
             
@@ -2328,8 +2325,7 @@ def notify_callback(call):
             # Тестове сповіщення
             if user_id in notify_settings and notify_settings[user_id].get('enabled', False):
                 bot.answer_callback_query(call.id, "📋 Відправляю тестове сповіщення...")
-                send_notification(user_id, "TEST", "BTCUSDT", 85, 
-                                "✅ Тестове сповіщення! Система працює коректно!")
+                send_test_notification(user_id)
             else:
                 bot.answer_callback_query(call.id, "❌ Спочатку увімкніть сповіщення!")
             
@@ -2347,138 +2343,184 @@ def notify_callback(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
 
-# ---------- Меню конфігурації ----------
-def show_config_menu(call):
-    """Меню налаштувань"""
-    try:
-        user_id = call.from_user.id
-        user_settings = notify_settings.get(user_id, {})
-        
-        response = [
-            "⚙️ <b>Налаштування сповіщень:</b>",
-            "",
-            "Оберіть опцію для зміни:"
-        ]
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("🎯 Впевненість", callback_data="config_confidence"),
-            types.InlineKeyboardButton("📊 Типи сигналів", callback_data="config_types")
-        )
-        markup.row(
-            types.InlineKeyboardButton("⏰ Час активності", callback_data="config_time"),
-            types.InlineKeyboardButton("💎 Улюблені монети", callback_data="config_favorites")
-        )
-        markup.row(
-            types.InlineKeyboardButton("🔙 Назад", callback_data="notify_back")
-        )
-        
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="\n".join(response),
-            parse_mode="HTML",
-            reply_markup=markup
-        )
-        
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
-
-# ---------- Обробка конфігурації ----------
+# ---------- Меню налаштувань ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith('config_'))
 def config_callback(call):
-    """Обробка налаштувань конфігурації"""
+    """Обробка налаштувань"""
     try:
         data = call.data
         
         if data == "config_confidence":
             bot.answer_callback_query(call.id, "🎯 Налаштування впевненості...")
-            set_confidence_level(call)
+            ask_confidence_level(call)
             
         elif data == "config_types":
             bot.answer_callback_query(call.id, "📊 Налаштування типів сигналів...")
-            set_signal_types(call)
+            show_signal_types_menu(call)
             
         elif data == "config_time":
             bot.answer_callback_query(call.id, "⏰ Налаштування часу...")
-            set_active_time(call)
+            ask_active_time(call)
             
         elif data == "config_favorites":
             bot.answer_callback_query(call.id, "💎 Керування улюбленими...")
-            manage_favorites(call)
+            ask_favorites(call)
             
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
+
+# ---------- Обробник типів сигналів ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('type_'))
+def signal_types_callback(call):
+    """Обробка вибору типів сигналів"""
+    try:
+        user_id = call.from_user.id
+        data = call.data
+        
+        if user_id not in notify_settings:
+            bot.answer_callback_query(call.id, "❌ Спочатку увімкніть сповіщення!")
+            return
+            
+        if data == "type_all":
+            notify_settings[user_id]['signal_types'] = ['ALL']
+            bot.answer_callback_query(call.id, "✅ Всі типи сигналів")
+        elif data == "type_breakout":
+            notify_settings[user_id]['signal_types'] = ['BREAKOUT']
+            bot.answer_callback_query(call.id, "✅ Тільки пробої")
+        elif data == "type_trend":
+            notify_settings[user_id]['signal_types'] = ['TREND']
+            bot.answer_callback_query(call.id, "✅ Тільки тренди")
+        elif data == "type_squeeze":
+            notify_settings[user_id]['signal_types'] = ['SQUEEZE']
+            bot.answer_callback_query(call.id, "✅ Тільки сквізи")
+            
+        update_config_menu(call)
+        
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
 
 # ---------- Назад до головного меню ----------
 @bot.callback_query_handler(func=lambda call: call.data == 'notify_back')
-def notify_back_callback(call):
+def back_callback(call):
     """Повернення до головного меню"""
     try:
+        update_notify_message(call)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
+
+# ---------- ДОПОМІЖНІ ФУНКЦІЇ ----------
+def update_notify_message(call):
+    """Оновити головне меню сповіщень"""
+    try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        ai_notify_handler(call.message)
     except:
-        ai_notify_handler(call.message)
+        pass
+    ai_notify_handler(call.message)
 
-# ---------- Допоміжні функції (заглушки) ----------
-def set_confidence_level(call):
-    """Налаштування рівня впевненості"""
-    bot.send_message(call.message.chat.id, 
-                   "🎯 <b>Налаштування мінімальної впевненості:</b>\n\n"
-                   "Введіть число від 50 до 90 (рекомендовано 70-80)",
-                   parse_mode="HTML")
-
-def set_signal_types(call):
-    """Налаштування типів сигналів"""
+def show_config_menu(call):
+    """Показати меню налаштувань"""
+    response = [
+        "⚙️ <b>Налаштування сповіщень:</b>",
+        "",
+        "Оберіть опцію для зміни:"
+    ]
+    
     markup = types.InlineKeyboardMarkup()
     markup.row(
-        types.InlineKeyboardButton("🎯 ВСІ сигнали", callback_data="type_all"),
-        types.InlineKeyboardButton("🚀 Тільки BREAKOUT", callback_data="type_breakout")
+        types.InlineKeyboardButton("🎯 Впевненість", callback_data="config_confidence"),
+        types.InlineKeyboardButton("📊 Типи сигналів", callback_data="config_types")
     )
     markup.row(
-        types.InlineKeyboardButton("📈 Тільки TREND", callback_data="type_trend"),
-        types.InlineKeyboardButton("🔍 Тільки SQUEEZE", callback_data="type_squeeze")
+        types.InlineKeyboardButton("⏰ Час активності", callback_data="config_time"),
+        types.InlineKeyboardButton("💎 Улюблені монети", callback_data="config_favorites")
+    )
+    markup.row(
+        types.InlineKeyboardButton("🔙 Назад", callback_data="notify_back")
     )
     
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text="📊 <b>Оберіть типи сигналів:</b>",
+        text="\n".join(response),
         parse_mode="HTML",
         reply_markup=markup
     )
 
-def set_active_time(call):
-    """Налаштування часу активності"""
-    bot.send_message(call.message.chat.id,
-                   "⏰ <b>Налаштування часу активності:</b>\n\n"
-                   "Введіть у форматі HH:MM-HH:MM\n"
-                   "Наприклад: 09:00-18:00\n"
-                   "Або '00:00-23:59' для цілодобового",
-                   parse_mode="HTML")
+def show_signal_types_menu(call):
+    """Меню вибору типів сигналів"""
+    user_id = call.from_user.id
+    current_types = notify_settings.get(user_id, {}).get('signal_types', ['ALL'])
+    
+    response = ["📊 <b>Оберіть типи сигналів:</b>\n"]
+    
+    if 'ALL' in current_types:
+        response.append("• 🟢 ВСІ сигнали")
+    else:
+        response.append("• ⚪️ ВСІ сигнали")
+        
+    response.append("• 🟢 BREAKOUT - Пробої" if 'BREAKOUT' in current_types else "• ⚪️ BREAKOUT - Пробої")
+    response.append("• 🟢 TREND - Тренди" if 'TREND' in current_types else "• ⚪️ TREND - Тренди") 
+    response.append("• 🟢 SQUEEZE - Сквизи" if 'SQUEEZE' in current_types else "• ⚪️ SQUEEZE - Сквизи")
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ ВСІ", callback_data="type_all"),
+        types.InlineKeyboardButton("🚀 ПРОБОЇ", callback_data="type_breakout")
+    )
+    markup.row(
+        types.InlineKeyboardButton("📈 ТРЕНДИ", callback_data="type_trend"),
+        types.InlineKeyboardButton("🔍 СКВІЗИ", callback_data="type_squeeze")
+    )
+    markup.row(
+        types.InlineKeyboardButton("🔙 Назад", callback_data="notify_config")
+    )
+    
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="\n".join(response),
+        parse_mode="HTML",
+        reply_markup=markup
+    )
 
-def manage_favorites(call):
-    """Керування улюбленими монетами"""
-    bot.send_message(call.message.chat.id,
-                   "💎 <b>Керування улюбленими монетами:</b>\n\n"
-                   "Введіть символи через кому:\n"
-                   "Наприклад: BTCUSDT,ETHUSDT,SOLUSDT",
-                   parse_mode="HTML")
+def update_config_menu(call):
+    """Оновити меню налаштувань"""
+    show_config_menu(call)
+
+def send_test_notification(user_id):
+    """Відправити тестове сповіщення"""
+    notification = [
+        "🎯 <b>TEST NOTIFICATION</b>",
+        "📊 BTCUSDT | Впевненість: 85%",
+        "",
+        "✅ Тестове сповіщення працює!",
+        "Система сповіщень активована.",
+        "",
+        f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+        "",
+        "💡 Ви будете отримувати сповіщення про найкращі торгові можливості!"
+    ]
+    
+    bot.send_message(user_id, "\n".join(notification), parse_mode="HTML")
+
+# Спрощені функції для текстового вводу
+def ask_confidence_level(call):
+    bot.send_message(call.message.chat.id, "🎯 Введіть мінімальну впевненість (50-90):")
+
+def ask_active_time(call):
+    bot.send_message(call.message.chat.id, "⏰ Введіть час активності (наприклад 09:00-18:00):")
+
+def ask_favorites(call):
+    bot.send_message(call.message.chat.id, "💎 Введіть улюблені монети через кому (BTCUSDT,ETHUSDT):")
 
 def show_favorites_menu(call):
-    """Меню улюблених монет"""
     user_id = call.from_user.id
-    user_settings = notify_settings.get(user_id, {})
-    favorites = user_settings.get('favorite_coins', [])
-    
-    response = ["💎 <b>Улюблені монети:</b>\n"]
+    favorites = notify_settings.get(user_id, {}).get('favorite_coins', [])
     
     if favorites:
-        response.append("\n".join(f"• {coin}" for coin in favorites))
+        response = ["💎 <b>Улюблені монети:</b>\n"] + [f"• {coin}" for coin in favorites]
     else:
-        response.append("\n❌ Список порожній")
-    
-    response.append("\n\n✏️ Введіть нові монети через кому")
+        response = ["💎 <b>Улюблені монети:</b>\n", "• Список порожній"]
     
     bot.send_message(call.message.chat.id, "\n".join(response), parse_mode="HTML")
 
