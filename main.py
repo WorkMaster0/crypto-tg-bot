@@ -1,6 +1,5 @@
 # main.py
 import os
-import threading
 from flask import Flask
 from app.bot import bot
 import app.handlers
