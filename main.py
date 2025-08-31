@@ -38,8 +38,7 @@ def setup_webhook():
             bot.set_webhook(url=webhook_url)
             print(f"✅ Webhook set to: {webhook_url}")
         else:
-            print("⚠️  RENDER_EXTERNAL_URL not set, using polling for development")
-            bot.remove_webhook()
+            print("⚠️  RENDER_EXTERNAL_URL not set - running in development mode")
     except Exception as e:
         print(f"❌ Webhook setup error: {e}")
 
