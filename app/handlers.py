@@ -1,5 +1,7 @@
 import requests
 from telebot import types
+import re
+from datetime import datetime
 import numpy as np
 from app.bot import bot
 from app.analytics import (
@@ -2232,6 +2234,9 @@ def alert_callback(call):
     except Exception as e:
         bot.send_message(call.message.chat.id, f"❌ Помилка: {str(e)}")
         
+import re
+from datetime import datetime
+
 # ---------- /ai_notify ----------
 @bot.message_handler(commands=['ai_notify'])
 def ai_notify_handler(message):
@@ -2262,21 +2267,25 @@ def ai_notify_handler(message):
             )
             
         else:
+            # Отримуємо актуальні налаштування
+            current_settings = notify_settings[user_id]
+            favorites_count = len(current_settings.get('favorite_coins', []))
+            
             response = [
                 "🔔 <b>Поточні налаштування сповіщень:</b>",
                 "",
-                f"• Статус: {'✅ УВІМКНЕНО' if user_settings.get('enabled', False) else '❌ ВИМКНЕНО'}",
-                f"• Мінімальна впевненість: {user_settings.get('min_confidence', 70)}%",
-                f"• Типи сигналів: {', '.join(user_settings.get('signal_types', ['ALL']))}",
-                f"• Час активності: {user_settings.get('active_hours', '00:00-23:59')}",
-                f"• Улюблені монети: {len(user_settings.get('favorite_coins', []))}",
+                f"• Статус: {'✅ УВІМКНЕНО' if current_settings.get('enabled', False) else '❌ ВИМКНЕНО'}",
+                f"• Мінімальна впевненість: {current_settings.get('min_confidence', 70)}%",
+                f"• Типи сигналів: {', '.join(current_settings.get('signal_types', ['ALL']))}",
+                f"• Час активності: {current_settings.get('active_hours', '00:00-23:59')}",
+                f"• Улюблені монети: {favorites_count}",
                 "",
                 "🎯 <b>Оберіть дію:</b>"
             ]
             
             markup = types.InlineKeyboardMarkup()
             markup.row(
-                types.InlineKeyboardButton("🔕 Вимкнути" if user_settings.get('enabled') else "🔔 Увімкнути", 
+                types.InlineKeyboardButton("🔕 Вимкнути" if current_settings.get('enabled') else "🔔 Увімкнути", 
                                          callback_data="notify_toggle"),
                 types.InlineKeyboardButton("⚙️ Змінити налаштування", callback_data="notify_config")
             )
@@ -2285,6 +2294,10 @@ def ai_notify_handler(message):
                 types.InlineKeyboardButton("📋 Мої улюблені", callback_data="notify_favorites")
             )
         
+        # Видаляємо попередні повідомлення з станом
+        if user_id in user_settings_state:
+            del user_settings_state[user_id]
+            
         bot.send_message(message.chat.id, "\n".join(response), 
                         parse_mode="HTML", reply_markup=markup)
         
@@ -2301,7 +2314,7 @@ def handle_text_messages(message):
         
         # Перевіряємо чи користувач в процесі налаштування
         if user_id in user_settings_state:
-            state = user_settings_state[user_id]
+            state, callback_message = user_settings_state[user_id]
             
             if state == 'waiting_confidence':
                 # Обробка впевненості
@@ -2309,25 +2322,29 @@ def handle_text_messages(message):
                     confidence = int(text)
                     if 50 <= confidence <= 90:
                         if user_id not in notify_settings:
-                            notify_settings[user_id] = {}
+                            notify_settings[user_id] = {'enabled': True}
                         notify_settings[user_id]['min_confidence'] = confidence
                         bot.send_message(user_id, f"✅ Мінімальна впевненість встановлена: {confidence}%")
-                        user_settings_state[user_id] = None
+                        # Повертаємо до меню налаштувань
+                        show_config_menu(callback_message)
                     else:
                         bot.send_message(user_id, "❌ Будь ласка, введіть число від 50 до 90")
+                        return
                 except ValueError:
                     bot.send_message(user_id, "❌ Будь ласка, введіть число")
+                    return
                     
             elif state == 'waiting_time':
                 # Обробка часу
                 if re.match(r'^\d{2}:\d{2}-\d{2}:\d{2}$', text):
                     if user_id not in notify_settings:
-                        notify_settings[user_id] = {}
+                        notify_settings[user_id] = {'enabled': True}
                     notify_settings[user_id]['active_hours'] = text
                     bot.send_message(user_id, f"✅ Час активності встановлений: {text}")
-                    user_settings_state[user_id] = None
+                    show_config_menu(callback_message)
                 else:
                     bot.send_message(user_id, "❌ Неправильний формат. Приклад: 09:00-18:00")
+                    return
                     
             elif state == 'waiting_favorites':
                 # Обробка улюблених монет
@@ -2340,13 +2357,16 @@ def handle_text_messages(message):
                 
                 if valid_coins:
                     if user_id not in notify_settings:
-                        notify_settings[user_id] = {}
+                        notify_settings[user_id] = {'enabled': True}
                     notify_settings[user_id]['favorite_coins'] = valid_coins
                     bot.send_message(user_id, f"✅ Улюблені монети додані: {', '.join(valid_coins)}")
                 else:
                     bot.send_message(user_id, "❌ Не знайдено валідних монет. Приклад: BTCUSDT,ETHUSDT")
                 
-                user_settings_state[user_id] = None
+                show_config_menu(callback_message)
+            
+            # Видаляємо стан після обробки
+            del user_settings_state[user_id]
                 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Помилка: {str(e)}")
@@ -2397,7 +2417,12 @@ def handle_enable(call):
         'favorite_coins': []
     }
     bot.answer_callback_query(call.id, "✅ Сповіщення увімкнено!")
-    update_message(call)
+    # Оновлюємо повідомлення
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
+    ai_notify_handler(call.message)
 
 def handle_toggle(call):
     """Перемкнути статус"""
@@ -2443,21 +2468,21 @@ def handle_back(call):
 def handle_config_confidence(call):
     """Налаштування впевненості"""
     user_id = call.from_user.id
-    user_settings_state[user_id] = 'waiting_confidence'
+    user_settings_state[user_id] = ('waiting_confidence', call)
     bot.send_message(call.message.chat.id, "🎯 Введіть мінімальну впевненість (50-90):")
     bot.answer_callback_query(call.id, "Введіть число від 50 до 90")
 
 def handle_config_time(call):
     """Налаштування часу"""
     user_id = call.from_user.id
-    user_settings_state[user_id] = 'waiting_time'
+    user_settings_state[user_id] = ('waiting_time', call)
     bot.send_message(call.message.chat.id, "⏰ Введіть час активності (наприклад 09:00-18:00):")
     bot.answer_callback_query(call.id, "Введіть час у форматі HH:MM-HH:MM")
 
 def handle_config_favorites(call):
     """Налаштування улюблених"""
     user_id = call.from_user.id
-    user_settings_state[user_id] = 'waiting_favorites'
+    user_settings_state[user_id] = ('waiting_favorites', call)
     bot.send_message(call.message.chat.id, "💎 Введіть улюблені монети через кому (BTCUSDT,ETHUSDT):")
     bot.answer_callback_query(call.id, "Введіть монети через кому")
 
@@ -2524,13 +2549,17 @@ def show_config_menu(call):
         types.InlineKeyboardButton("🔙 Назад", callback_data="notify_back")
     )
     
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="\n".join(response),
-        parse_mode="HTML",
-        reply_markup=markup
-    )
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="\n".join(response),
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except:
+        bot.send_message(call.message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
 
 def show_signal_types_menu(call):
     """Меню типів сигналів"""
@@ -2557,13 +2586,17 @@ def show_signal_types_menu(call):
         types.InlineKeyboardButton("🔙 Назад", callback_data="notify_config")
     )
     
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="\n".join(response),
-        parse_mode="HTML",
-        reply_markup=markup
-    )
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="\n".join(response),
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except:
+        bot.send_message(call.message.chat.id, "\n".join(response), 
+                        parse_mode="HTML", reply_markup=markup)
 
 def send_test_notification(user_id):
     """Відправити тестове сповіщення"""
