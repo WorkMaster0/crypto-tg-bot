@@ -1,8 +1,10 @@
 # main.py
 import os
+import traceback
 from flask import Flask, request
 from app.bot import bot
 import app.handlers  # Імпортуємо всі обробники
+import telebot  # ⬅️ ДОДАЄМО ЦЕЙ ІМПОРТ!
 
 app = Flask(__name__)
 
@@ -17,13 +19,17 @@ def webhook():
         try:
             # Отримуємо оновлення від Telegram
             json_data = request.get_json()
+            print(f"Received update: {json_data}")  # Додаємо лог
+            
             update = telebot.types.Update.de_json(json_data)
             
             # Передаємо оновлення боту
             bot.process_new_updates([update])
             return 'OK'
         except Exception as e:
-            print(f"Webhook error: {e}")
+            # Детальний лог помилки
+            error_msg = f"Webhook error: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
             return 'ERROR', 500
     return 'Invalid method', 400
 
@@ -47,5 +53,5 @@ if __name__ == "__main__":
     setup_webhook()
     
     # Запускаємо Flask
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
