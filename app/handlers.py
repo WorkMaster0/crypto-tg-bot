@@ -2689,7 +2689,7 @@ def handle_text_messages(message):
             state, callback_message = user_settings_state[user_id]
             
             # Додаємо команду для очищення
-            if text.lower() == '/clear':
+            if text.lower() == 'clear':
                 if user_id in notify_settings and 'favorite_coins' in notify_settings[user_id]:
                     notify_settings[user_id]['favorite_coins'] = []
                     bot.send_message(user_id, "✅ Список улюблених очищено!")
@@ -2698,10 +2698,34 @@ def handle_text_messages(message):
                 return
                 
             if state == 'waiting_confidence':
-                # [існуючий код...]
-                
+                # Обробка впевненості
+                try:
+                    confidence = int(text)
+                    if 50 <= confidence <= 90:
+                        if user_id not in notify_settings:
+                            notify_settings[user_id] = {'enabled': True}
+                        notify_settings[user_id]['min_confidence'] = confidence
+                        bot.send_message(user_id, f"✅ Мінімальна впевненість встановлена: {confidence}%")
+                        # Повертаємо до меню налаштувань
+                        show_config_menu(callback_message)
+                    else:
+                        bot.send_message(user_id, "❌ Будь ласка, введіть число від 50 до 90")
+                        return
+                except ValueError:
+                    bot.send_message(user_id, "❌ Будь ласка, введіть число")
+                    return
+                    
             elif state == 'waiting_time':
-                # [існуючий код...]
+                # Обробка часу
+                if re.match(r'^\d{2}:\d{2}-\d{2}:\d{2}$', text):
+                    if user_id not in notify_settings:
+                        notify_settings[user_id] = {'enabled': True}
+                    notify_settings[user_id]['active_hours'] = text
+                    bot.send_message(user_id, f"✅ Час активності встановлений: {text}")
+                    show_config_menu(callback_message)
+                else:
+                    bot.send_message(user_id, "❌ Неправильний формат. Приклад: 09:00-18:00")
+                    return
                     
             elif state == 'waiting_favorites':
                 # Обробка улюблених монет
