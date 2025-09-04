@@ -55,31 +55,59 @@ def help_cmd(message):
         f"Доступні інтервали: {', '.join(sorted(ALLOWED_INTERVALS))}"
     ))
 
+# ===== Глобальні словники =====
+_user_settings = {}
+user_settings_state = {}
+
+# ===== Допоміжні функції =====
+def _parse_args(text: str):
+    """
+    Парсинг аргументів після команди.
+    Завжди повертає (symbol, interval, extra).
+    """
+    parts = text.split()
+    symbol = parts[1] if len(parts) > 1 else None
+    interval = parts[2] if len(parts) > 2 else None
+    extra = parts[3] if len(parts) > 3 else None
+    return symbol, interval, extra
+
+def _default_interval(user_id):
+    return _user_settings.get(user_id, {}).get("interval", "1h")
+
+def _default_min_volume(user_id):
+    return _user_settings.get(user_id, {}).get("min_volume", 5_000_000)
+
+# Заглушки (тут має бути твоя логіка)
+def get_klines(symbol, interval="1h", limit=200): return {"c":[100+i for i in range(limit)],"v":[1000]*limit}
+def calculate_rsi(closes): return 50.0
+def find_levels(df): return {"supports":[closes[-1]*0.95],"resistances":[closes[-1]*1.05]}
+def generate_signal_text(symbol, interval="1h"): return "LONG сигнал (приклад)"
+def generate_strategy(signal_type, last_price, sr_levels): return f"Торгувати {signal_type}"
+def plot_candles(symbol, interval="1h", limit=100): return open("chart.png","rb")  # заглушка
+
 # ---------- /smart_details ----------
 @bot.message_handler(commands=['smart_details'])
 def smart_details_handler(message):
-    """
-    Детальний аналіз активу
-    Використання: /smart_details SYMBOL [INTERVAL]
-    """
     try:
         symbol, interval, _ = _parse_args(message.text)
         if not symbol:
-            return bot.reply_to(message, "⚠️ Приклад: <code>/smart_details BTCUSDT</code>")
+            return bot.reply_to(message, "⚠️ Приклад: <code>/smart_details BTCUSDT</code>", parse_mode="HTML")
 
         interval = interval or _default_interval(message.from_user.id)
         df = get_klines(symbol, interval=interval, limit=200)
-        if not df or len(df.get("c", [])) < 50:
-            return bot.reply_to(message, f"❌ Недостатньо даних для {symbol}")
-
         closes = np.array(df["c"], dtype=float)
         volumes = np.array(df["v"], dtype=float)
+        if len(closes) < 50:
+            return bot.reply_to(message, f"❌ Недостатньо даних для {symbol}")
+
         rsi = calculate_rsi(closes)
         sr_levels = find_levels(df)
         last_price = closes[-1]
 
         signals_1h = generate_signal_text(symbol, interval="1h")
         signals_4h = generate_signal_text(symbol, interval="4h")
+
+        # логіка сигналу
         signal_type = "NEUTRAL"
         confidence = 50
         for lvl in sr_levels["resistances"]:
@@ -102,8 +130,8 @@ def smart_details_handler(message):
             f"📊 1h: {signals_1h.splitlines()[0][:50]}...",
             f"📊 4h: {signals_4h.splitlines()[0][:50]}...",
             f"💡 Стратегія: {strategy}",
-            f"🔎 Рівні підтримки: {', '.join(f'{x:.4f}' for x in sr_levels['supports'][:3])}",
-            f"🔎 Рівні опору: {', '.join(f'{x:.4f}' for x in sr_levels['resistances'][:3])}"
+            f"🔎 Підтримка: {', '.join(f'{x:.4f}' for x in sr_levels['supports'][:3])}",
+            f"🔎 Опір: {', '.join(f'{x:.4f}' for x in sr_levels['resistances'][:3])}"
         ]
 
         markup = InlineKeyboardMarkup()
@@ -117,35 +145,29 @@ def smart_details_handler(message):
             bot.reply_to(message, "\n".join(response), parse_mode="HTML", reply_markup=markup)
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+        bot.reply_to(message, f"❌ Помилка у smart_details: {str(e)}")
 
 # ---------- /smart_alert ----------
 @bot.message_handler(commands=['smart_alert'])
 def smart_alert_handler(message):
-    """
-    Налаштування алерту для активу
-    Використання: /smart_alert SYMBOL
-    """
     try:
         symbol, _, _ = _parse_args(message.text)
         if not symbol:
-            return bot.reply_to(message, "⚠️ Приклад: <code>/smart_alert BTCUSDT</code>")
+            return bot.reply_to(message, "⚠️ Приклад: <code>/smart_alert BTCUSDT</code>", parse_mode="HTML")
 
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        current_price = float(data.get("lastPrice", 0))
-        if current_price == 0:
+        response = requests.get(url, timeout=10).json()
+        current_price = float(response.get("lastPrice", 0))
+        if not current_price:
             return bot.reply_to(message, f"❌ Не вдалося отримати ціну для {symbol}")
 
         signals_1h = generate_signal_text(symbol, interval="1h")
-        is_bullish = any(keyword in signals_1h for keyword in ["LONG", "BUY", "UP", "BULL"])
-        is_bearish = any(keyword in signals_1h for keyword in ["SHORT", "SELL", "DOWN", "BEAR"])
+        is_bullish = any(k in signals_1h for k in ["LONG", "BUY", "UP", "BULL"])
+        is_bearish = any(k in signals_1h for k in ["SHORT", "SELL", "DOWN", "BEAR"])
 
         if not (is_bullish or is_bearish):
             return bot.reply_to(message, f"🔍 Для {symbol} немає чітких сигналів")
 
-        # Розрахунок рівнів
         entry_price = round(current_price * (0.98 if is_bullish else 1.02), 6)
         stop_loss = round(entry_price * (0.98 if is_bullish else 1.02), 6)
         take_profit = round(entry_price * (1.06 if is_bullish else 0.94), 6)
@@ -170,14 +192,11 @@ def smart_alert_handler(message):
         bot.reply_to(message, "\n".join(response), parse_mode="HTML", reply_markup=markup)
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+        bot.reply_to(message, f"❌ Помилка у smart_alert: {str(e)}")
 
 # ---------- /smart_config ----------
 @bot.message_handler(commands=['smart_config'])
 def smart_config_handler(message):
-    """
-    Налаштування параметрів сканера
-    """
     try:
         user_id = message.from_user.id
         settings = _user_settings.get(user_id, {"interval": "1h", "min_volume": 5000000, "favorites": []})
@@ -200,16 +219,12 @@ def smart_config_handler(message):
         bot.reply_to(message, "\n".join(response), parse_mode="HTML", reply_markup=markup)
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+        bot.reply_to(message, f"❌ Помилка у smart_config: {str(e)}")
 
 # ---------- /smart_stats ----------
 @bot.message_handler(commands=['smart_stats'])
 def smart_stats_handler(message):
-    """
-    Статистика ефективності сигналів
-    """
     try:
-        # Імітація статистики (в реальності потрібна база даних)
         signals_count = random.randint(20, 50)
         success_rate = random.uniform(60, 80)
         avg_profit = random.uniform(3, 8)
@@ -225,32 +240,24 @@ def smart_stats_handler(message):
         bot.reply_to(message, "\n".join(response), parse_mode="HTML")
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+        bot.reply_to(message, f"❌ Помилка у smart_stats: {str(e)}")
 
 # ---------- /smart_trend ----------
 @bot.message_handler(commands=['smart_trend'])
 def smart_trend_handler(message):
-    """
-    Аналіз трендів для топ-активів
-    """
     try:
         processing_msg = bot.send_message(message.chat.id, "🔍 Аналізую тренди...")
         user_id = message.from_user.id
         interval = "4h"
 
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        response = requests.get(url, timeout=10)
-        data = response.json()
+        data = requests.get(url, timeout=10).json()
 
         usdt_pairs = [
             d for d in data
             if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > _default_min_volume(user_id)
         ]
-        top_pairs = sorted(
-            usdt_pairs,
-            key=lambda x: float(x["quoteVolume"]),
-            reverse=True
-        )[:10]
+        top_pairs = sorted(usdt_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)[:10]
 
         trends = []
         for pair in top_pairs:
@@ -263,19 +270,16 @@ def smart_trend_handler(message):
                     trends.append({
                         "symbol": symbol,
                         "trend": trend,
-                        "volume": float(pair["quoteVolume"]) / 1000000
+                        "volume": float(pair["quoteVolume"]) / 1e6
                     })
             except:
                 continue
 
-        try:
-            bot.delete_message(message.chat.id, processing_msg.message_id)
-        except:
-            pass
+        try: bot.delete_message(message.chat.id, processing_msg.message_id)
+        except: pass
 
         if not trends:
-            bot.reply_to(message, "🔍 Сильних трендів не знайдено")
-            return
+            return bot.reply_to(message, "🔍 Сильних трендів не знайдено")
 
         response = ["📈 <b>Smart Trend Analysis</b>\n"]
         for trend in trends[:5]:
@@ -285,14 +289,11 @@ def smart_trend_handler(message):
         bot.reply_to(message, "\n".join(response), parse_mode="HTML")
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {str(e)}")
+        bot.reply_to(message, f"❌ Помилка у smart_trend: {str(e)}")
 
 # ---------- Callback обробники ----------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
-    """
-    Обробка всіх callback-запитів
-    """
     try:
         data = call.data
         user_id = call.from_user.id
@@ -344,7 +345,7 @@ def handle_callbacks(call):
             smart_config_handler(call.message)
 
     except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ Помилка: {str(e)}")
+        bot.answer_callback_query(call.id, f"❌ Callback помилка: {str(e)}")
 
 # ---------- Обробка текстових повідомлень для налаштувань ----------
 @bot.message_handler(func=lambda message: True)
