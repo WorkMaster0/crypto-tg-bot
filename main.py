@@ -29,7 +29,7 @@ class Config:
     DEXSCREENER_API = "https://api.dexscreener.com/latest/dex"
     
     # Торгові налаштування
-    ORDER_VOLUME = 5000  # Обсяг в USDT
+    ORDER_VOLUME = 50  # Обсяг в USDT
     PRICE_PREMIUM = 0.0001  # 0.01% вище ринкової ціни
     MIN_TRADE_AMOUNT = 3000  # Мінімальна сума угоди для реакції
     
