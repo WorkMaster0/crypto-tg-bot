@@ -405,13 +405,44 @@ def run_scanner():
 
 if __name__ == "__main__":
     logging.info("🚀 Arbitrage Bot з DexScreener запущено!")
-    logging.info(f"Мережі: {Config.ALLOWED_CHAINS}")
-    logging.info(f"Мін. угода: ${Config.MIN_TRADE_AMOUNT}")
     
-    # Запускаємо сканер в окремому потоці
-    scanner_thread = threading.Thread(target=run_scanner, daemon=True)
+    # Очищаємо всі попередні webhook
+    try:
+        import requests
+        requests.get(f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/deleteWebhook")
+        time.sleep(2)
+    except Exception as e:
+        logging.warning(f"Не вдалося очистити webhook: {e}")
+    
+    # Запускаємо сканер
+    def start_scanner():
+        async def run():
+            await arbitrage_bot.start_auto_scan()
+        asyncio.run(run())
+    
+    scanner_thread = threading.Thread(target=start_scanner, daemon=True)
     scanner_thread.start()
     
-    # Запускаємо Telegram бота
-    logging.info("Запуск Telegram бота...")
-    bot.infinity_polling()
+    # Спроба запустити polling
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logging.info(f"Спроба {attempt + 1} запустити бота...")
+            bot.infinity_polling()
+            break
+        except Exception as e:
+            logging.error(f"Помилка запуску (спроба {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                # Запускаємо у веб-режимі
+                logging.info("Запуск у веб-режимі...")
+                from flask import Flask
+                app = Flask(__name__)
+                
+                @app.route('/')
+                def home():
+                    return "🤖 Bot is running in web mode", 200
+                
+                port = int(os.environ.get('PORT', 10000))
+                app.run(host='0.0.0.0', port=port)
