@@ -1,8 +1,6 @@
 import requests
-import telebot
 import asyncio
 import aiohttp
-import json
 import time
 import hmac
 import hashlib
@@ -42,8 +40,33 @@ class Config:
     ALLOWED_CHAINS = ["solana", "bsc"]  # Тільки Solana та BSC
     BLACKLIST_TOKENS = ["shitcoin", "scam", "test", "meme", "fake", "pump", "dump"]
 
-# Ініціалізація бота
-bot = telebot.TeleBot(Config.TELEGRAM_TOKEN)
+class TelegramClient:
+    """Простий клієнт для Telegram без polling"""
+    
+    def __init__(self, token: str, chat_id: str):
+        self.token = token
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{token}"
+    
+    def send_message(self, text: str, parse_mode: str = None) -> bool:
+        """Надсилання повідомлення через Telegram API"""
+        try:
+            url = f"{self.base_url}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': text
+            }
+            if parse_mode:
+                payload['parse_mode'] = parse_mode
+            
+            response = requests.post(url, json=payload, timeout=10)
+            return response.status_code == 200
+        except Exception as e:
+            logging.error(f"Помилка відправки повідомлення: {e}")
+            return False
+
+# Ініціалізація клієнтів
+telegram_client = TelegramClient(Config.TELEGRAM_TOKEN, Config.TELEGRAM_CHAT_ID)
 
 class TokenFilter:
     """Клас для фільтрації токенів"""
@@ -77,11 +100,11 @@ class TokenFilter:
             
             # Додаткові перевірки якості
             price_change = abs(token_data.get('price_change_24h', 0))
-            if price_change > 50:  # Більше 50% зміна ціни за добу
+            if price_change > 50:
                 return False
                 
             liquidity = token_data.get('liquidity', 0)
-            if liquidity < 100000:  # Менше 100K$ ліквідності
+            if liquidity < 100000:
                 return False
                 
             logging.info(f"✅ Токен {symbol} пройшов фільтрацію")
@@ -229,6 +252,12 @@ class ArbitrageBot:
         self.is_scanning = True
         logging.info("🔍 Запуск автосканування угод на Solana та BSC")
         
+        # Відправляємо повідомлення про запуск
+        telegram_client.send_message(
+            "🤖 Бот запущено! Початок сканування угод...",
+            parse_mode="Markdown"
+        )
+        
         while self.is_scanning:
             try:
                 # Отримуємо угоди з обох мереж
@@ -249,7 +278,7 @@ class ArbitrageBot:
                     await self.process_trade_signal(trade)
                 
                 # Пауза між скануваннями
-                await asyncio.sleep(10)
+                await asyncio.sleep(15)
                 
             except Exception as e:
                 logging.error(f"Помилка автосканування: {e}")
@@ -259,6 +288,7 @@ class ArbitrageBot:
         """Зупинка автоматичного сканування"""
         self.is_scanning = False
         logging.info("⏹️ Зупинка автосканування")
+        telegram_client.send_message("⏹️ Сканування зупинено!")
     
     async def process_trade_signal(self, trade: Dict):
         """Обробка сигналу про велику угоду"""
@@ -268,11 +298,13 @@ class ArbitrageBot:
             
             # Уникаємо дублювання обробки
             trade_key = f"{chain}_{token_address}"
+            current_time = time.time()
+            
             if trade_key in self.last_processed:
-                if time.time() - self.last_processed[trade_key] < 300:  # 5 хвилин
+                if current_time - self.last_processed[trade_key] < 300:
                     return
             
-            self.last_processed[trade_key] = time.time()
+            self.last_processed[trade_key] = current_time
             
             logging.info(f"🔍 Обробляю угоду: {trade['token_symbol']} на {chain} за ${trade['amount_usd']}")
             
@@ -331,7 +363,7 @@ class ArbitrageBot:
                 f"🔗 *[DEX Screener]({trade['dex_url']})*"
             )
             
-            bot.send_message(Config.TELEGRAM_CHAT_ID, message, parse_mode="Markdown")
+            telegram_client.send_message(message, parse_mode="Markdown")
             
         except Exception as e:
             logging.error(f"Помилка відправки сповіщення: {e}")
@@ -339,63 +371,62 @@ class ArbitrageBot:
 # Глобальний екземпляр бота
 arbitrage_bot = ArbitrageBot()
 
-# Команди для Telegram бота
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    help_text = (
-        "🤖 *DexScreener/LBank Arbitrage Bot*\n\n"
-        "Цей бот сканує великі угоди на Solana та BSC:\n"
-        "• Моніторить DexScreener для угод >$3000\n"
-        "• Фільтрує токени за критеріями\n"
-        "• Автоматично купує на LBank\n"
-        "• Ціна: +0.01% до ринкової\n\n"
-        "⚙️ *Фільтри:*\n"
-        f"• Капіталізація: ${Config.MIN_MARKET_CAP:,} - ${Config.MAX_MARKET_CAP:,}\n"
-        f"• Обсяг: >${Config.MIN_VOLUME:,}/24h\n"
-        f"• Мережі: {', '.join(Config.ALLOWED_CHAINS).upper()}\n"
-        f"• Мін. угода: ${Config.MIN_TRADE_AMOUNT}\n\n"
-        "📊 *Команди:*\n"
-        "/scan_start - Почати сканування\n"
-        "/scan_stop - Зупинити сканування\n"
-        "/status - Статус бота"
-    )
-    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['scan_start'])
-def start_scan(message):
-    """Почати автоматичне сканування"""
-    def start():
-        asyncio.run(arbitrage_bot.start_auto_scan())
-    
-    if not arbitrage_bot.is_scanning:
-        thread = threading.Thread(target=start, daemon=True)
-        thread.start()
-        bot.reply_to(message, "🔍 Сканування запущено! Шукаю великі угоди...")
-    else:
-        bot.reply_to(message, "⚠️ Сканування вже запущено!")
-
-@bot.message_handler(commands=['scan_stop'])
-def stop_scan(message):
-    """Зупинити автоматичне сканування"""
-    async def stop():
-        await arbitrage_bot.stop_auto_scan()
-    
-    asyncio.run(stop())
-    bot.reply_to(message, "⏹️ Сканування зупинено!")
-
-@bot.message_handler(commands=['status'])
-def show_status(message):
-    """Показати статус бота"""
-    status_text = (
-        "📊 *Статус бота:*\n\n"
-        f"• Сканування: {'✅ Активне' if arbitrage_bot.is_scanning else '❌ Неактивне'}\n"
-        f"• Мережі: {', '.join(Config.ALLOWED_CHAINS).upper()}\n"
-        f"• Оброблено угод: {len(arbitrage_bot.last_processed)}\n"
-        f"• Мін. сума угоди: ${Config.MIN_TRADE_AMOUNT}\n"
-        f"• Обсяг ордера: ${Config.ORDER_VOLUME}\n\n"
-        f"⏰ *Час:* {datetime.now().strftime('%H:%M:%S')}"
-    )
-    bot.send_message(message.chat.id, status_text, parse_mode="Markdown")
+def send_telegram_command(command: str, chat_id: str = None):
+    """Обробка Telegram команд"""
+    try:
+        if not chat_id:
+            chat_id = Config.TELEGRAM_CHAT_ID
+            
+        if command == '/start' or command == '/help':
+            help_text = (
+                "🤖 *DexScreener/LBank Arbitrage Bot*\n\n"
+                "Цей бот сканує великі угоди на Solana та BSC:\n"
+                "• Моніторить DexScreener для угод >$3000\n"
+                "• Фільтрує токени за критеріями\n"
+                "• Автоматично купує на LBank\n"
+                "• Ціна: +0.01% до ринкової\n\n"
+                "⚙️ *Фільтри:*\n"
+                f"• Капіталізація: ${Config.MIN_MARKET_CAP:,} - ${Config.MAX_MARKET_CAP:,}\n"
+                f"• Обсяг: >${Config.MIN_VOLUME:,}/24h\n"
+                f"• Мережі: {', '.join(Config.ALLOWED_CHAINS).upper()}\n"
+                f"• Мін. угода: ${Config.MIN_TRADE_AMOUNT}\n\n"
+                "📊 *Команди:*\n"
+                "/scan_start - Почати сканування\n"
+                "/scan_stop - Зупинити сканування\n"
+                "/status - Статус бота"
+            )
+            telegram_client.send_message(help_text, parse_mode="Markdown")
+            
+        elif command == '/scan_start':
+            if not arbitrage_bot.is_scanning:
+                def start():
+                    asyncio.run(arbitrage_bot.start_auto_scan())
+                thread = threading.Thread(target=start, daemon=True)
+                thread.start()
+                telegram_client.send_message("🔍 Сканування запущено! Шукаю великі угоди...")
+            else:
+                telegram_client.send_message("⚠️ Сканування вже запущено!")
+                
+        elif command == '/scan_stop':
+            async def stop():
+                await arbitrage_bot.stop_auto_scan()
+            asyncio.run(stop())
+            telegram_client.send_message("⏹️ Сканування зупинено!")
+            
+        elif command == '/status':
+            status_text = (
+                "📊 *Статус бота:*\n\n"
+                f"• Сканування: {'✅ Активне' if arbitrage_bot.is_scanning else '❌ Неактивне'}\n"
+                f"• Мережі: {', '.join(Config.ALLOWED_CHAINS).upper()}\n"
+                f"• Оброблено угод: {len(arbitrage_bot.last_processed)}\n"
+                f"• Мін. сума угоди: ${Config.MIN_TRADE_AMOUNT}\n"
+                f"• Обсяг ордера: ${Config.ORDER_VOLUME}\n\n"
+                f"⏰ *Час:* {datetime.now().strftime('%H:%M:%S')}"
+            )
+            telegram_client.send_message(status_text, parse_mode="Markdown")
+            
+    except Exception as e:
+        logging.error(f"Помилка обробки команди: {e}")
 
 def run_scanner():
     """Запуск сканера в окремому потоці"""
@@ -405,44 +436,44 @@ def run_scanner():
 
 if __name__ == "__main__":
     logging.info("🚀 Arbitrage Bot з DexScreener запущено!")
+    logging.info(f"Мережі: {Config.ALLOWED_CHAINS}")
+    logging.info(f"Мін. угода: ${Config.MIN_TRADE_AMOUNT}")
     
     # Очищаємо всі попередні webhook
     try:
-        import requests
-        requests.get(f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/deleteWebhook")
+        requests.get(f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/deleteWebhook", timeout=5)
         time.sleep(2)
     except Exception as e:
         logging.warning(f"Не вдалося очистити webhook: {e}")
     
     # Запускаємо сканер
-    def start_scanner():
-        async def run():
-            await arbitrage_bot.start_auto_scan()
-        asyncio.run(run())
-    
-    scanner_thread = threading.Thread(target=start_scanner, daemon=True)
+    scanner_thread = threading.Thread(target=run_scanner, daemon=True)
     scanner_thread.start()
     
-    # Спроба запустити polling
-    max_retries = 3
-    for attempt in range(max_retries):
+    # Простий веб-сервер для команд
+    from flask import Flask, request
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def home():
+        return "🤖 Arbitrage Bot is Running! Use /command endpoint to send commands.", 200
+    
+    @app.route('/command', methods=['POST'])
+    def command_handler():
         try:
-            logging.info(f"Спроба {attempt + 1} запустити бота...")
-            bot.infinity_polling()
-            break
-        except Exception as e:
-            logging.error(f"Помилка запуску (спроба {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(5)
+            data = request.get_json()
+            command = data.get('command', '')
+            chat_id = data.get('chat_id', Config.TELEGRAM_CHAT_ID)
+            
+            if command:
+                send_telegram_command(command, chat_id)
+                return {'status': 'success', 'message': 'Command processed'}
             else:
-                # Запускаємо у веб-режимі
-                logging.info("Запуск у веб-режимі...")
-                from flask import Flask
-                app = Flask(__name__)
+                return {'status': 'error', 'message': 'No command provided'}, 400
                 
-                @app.route('/')
-                def home():
-                    return "🤖 Bot is running in web mode", 200
-                
-                port = int(os.environ.get('PORT', 10000))
-                app.run(host='0.0.0.0', port=port)
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}, 500
+    
+    # Запускаємо Flask
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
