@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Конфігурація
 class Config:
     # Telegram
-    TELEGRAM_TOKEN = "8307873209:AAGtH1H4scuomk4VCAJeMSSk0dVtRi15xoU"
+    TELEGRAM_TOKEN = "8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g"
     TELEGRAM_CHAT_ID = "6053907025"
     
     # LBank API
