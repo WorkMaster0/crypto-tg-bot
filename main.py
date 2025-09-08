@@ -421,4 +421,19 @@ if __name__ == "__main__":
     logging.info(f"Мережі: {Config.ALLOWED_CHAINS}")
     logging.info(f"Мін. угода: ${Config.MIN_TRADE_AMOUNT}")
     
-    bot.infinity_polling()
+    # Додайте webhook для Render:
+    from flask import Flask, request
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def index():
+        return "Bot is running!", 200
+    
+    @app.route('/webhook', methods=['POST'])
+    def webhook():
+        update = telebot.types.Update.de_json(request.stream.read().decode('utf-8'))
+        bot.process_new_updates([update])
+        return 'ok', 200
+    
+    # Запускаємо Flask
+    app.run(host='0.0.0.0', port=10000, debug=False)
