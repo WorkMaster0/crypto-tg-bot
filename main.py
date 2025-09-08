@@ -9,6 +9,8 @@ import hashlib
 import base64
 from datetime import datetime
 import logging
+import threading
+import os
 from typing import Dict, List, Optional
 
 # Налаштування логування
@@ -36,6 +38,7 @@ class Config:
     # Фільтри токенів
     MIN_MARKET_CAP = 3000000  # 3M$ мінімальна капіталізація
     MAX_MARKET_CAP = 100000000  # 100M$ максимальна капіталізація
+    MIN_VOLUME = 500000  # 500K$ мінімальний обсяг
     ALLOWED_CHAINS = ["solana", "bsc"]  # Тільки Solana та BSC
     BLACKLIST_TOKENS = ["shitcoin", "scam", "test", "meme", "fake", "pump", "dump"]
 
@@ -52,19 +55,16 @@ class TokenFilter:
             # Перевірка капіталізації
             market_cap = token_data.get('market_cap', 0)
             if not (Config.MIN_MARKET_CAP <= market_cap <= Config.MAX_MARKET_CAP):
-                logging.debug(f"Токен {token_data.get('symbol')} не підходить по капіталізації: {market_cap}")
                 return False
             
             # Перевірка обсягу торгів
             volume = token_data.get('volume_24h', 0)
             if volume < Config.MIN_VOLUME:
-                logging.debug(f"Токен {token_data.get('symbol')} не підходить по обсягу: {volume}")
                 return False
             
             # Перевірка блокчейну
             chain = token_data.get('chain', '').lower()
             if chain not in Config.ALLOWED_CHAINS:
-                logging.debug(f"Токен {token_data.get('symbol')} не підходить по блокчейну: {chain}")
                 return False
             
             # Перевірка чорного списку
@@ -73,12 +73,15 @@ class TokenFilter:
             
             for blacklisted in Config.BLACKLIST_TOKENS:
                 if blacklisted in symbol or blacklisted in name:
-                    logging.debug(f"Токен {symbol} в чорному списку: {blacklisted}")
                     return False
             
             # Додаткові перевірки якості
-            if TokenFilter.is_low_quality_token(token_data):
-                logging.debug(f"Токен {symbol} низької якості")
+            price_change = abs(token_data.get('price_change_24h', 0))
+            if price_change > 50:  # Більше 50% зміна ціни за добу
+                return False
+                
+            liquidity = token_data.get('liquidity', 0)
+            if liquidity < 100000:  # Менше 100K$ ліквідності
                 return False
                 
             logging.info(f"✅ Токен {symbol} пройшов фільтрацію")
@@ -87,50 +90,37 @@ class TokenFilter:
         except Exception as e:
             logging.error(f"Помилка фільтрації токена: {e}")
             return False
-    
-    @staticmethod
-    def is_low_quality_token(token_data: Dict) -> bool:
-        """Додаткові перевірки якості токена"""
-        # Перевірка на надто високу волатильність
-        price_change = abs(token_data.get('price_change_24h', 0))
-        if price_change > 50:  # Більше 50% зміна ціни за добу
-            return True
-            
-        # Перевірка на дуже низьку ліквідність
-        liquidity = token_data.get('liquidity', 0)
-        if liquidity < 100000:  # Менше 100K$ ліквідності
-            return True
-            
-        return False
 
 class DexScreenerClient:
     """Клієнт для роботи з DexScreener API"""
     
     @staticmethod
-    async def get_recent_trades(chain: str, limit: int = 20) -> List[Dict]:
+    async def get_recent_trades(chain: str, limit: int = 10) -> List[Dict]:
         """Отримання останніх угод з DexScreener"""
         try:
             url = f"{Config.DEXSCREENER_API}/transactions/{chain}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as response:
+                    if response.status != 200:
+                        return []
                     data = await response.json()
                     
                     large_trades = []
                     for trade in data.get('transactions', [])[:limit]:
-                        amount_usd = float(trade.get('volumeUsd', 0))
-                        
-                        # Фільтруємо тільки великі угоди
-                        if amount_usd >= Config.MIN_TRADE_AMOUNT:
-                            large_trades.append({
-                                'chain': chain,
-                                'token_address': trade.get('baseToken', {}).get('address', ''),
-                                'token_symbol': trade.get('baseToken', {}).get('symbol', '').upper(),
-                                'amount_usd': amount_usd,
-                                'price': float(trade.get('priceUsd', 0)),
-                                'timestamp': trade.get('timestamp', 0),
-                                'tx_hash': trade.get('txnHash', ''),
-                                'dex_url': trade.get('url', '')
-                            })
+                        try:
+                            amount_usd = float(trade.get('volumeUsd', 0))
+                            if amount_usd >= Config.MIN_TRADE_AMOUNT:
+                                large_trades.append({
+                                    'chain': chain,
+                                    'token_address': trade.get('baseToken', {}).get('address', ''),
+                                    'token_symbol': trade.get('baseToken', {}).get('symbol', '').upper(),
+                                    'amount_usd': amount_usd,
+                                    'price': float(trade.get('priceUsd', 0)),
+                                    'timestamp': trade.get('timestamp', 0),
+                                    'dex_url': trade.get('url', '')
+                                })
+                        except (ValueError, TypeError):
+                            continue
                     
                     return large_trades
                     
@@ -145,6 +135,8 @@ class DexScreenerClient:
             url = f"{Config.DEXSCREENER_API}/tokens/{chain}/{token_address}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as response:
+                    if response.status != 200:
+                        return None
                     data = await response.json()
                     
                     pair = data.get('pair', {})
@@ -164,9 +156,9 @@ class DexScreenerClient:
         return None
 
 class LBankClient:
-    def __init__(self, api_key: str, secret_key: str):
-        self.api_key = api_key
-        self.secret_key = secret_key
+    def __init__(self):
+        self.api_key = Config.LBANK_API_KEY
+        self.secret_key = Config.LBANK_SECRET_KEY
         self.base_url = Config.LBANK_BASE_URL
         
     def _generate_signature(self, params: Dict) -> str:
@@ -182,12 +174,13 @@ class LBankClient:
     async def get_ticker_price(self, symbol: str) -> Optional[float]:
         """Отримання поточної ціни з LBank"""
         try:
-            # Конвертуємо символ у формат LBank (наприклад: SOL_USDT)
-            lbank_symbol = f"{symbol.split('_')[0]}_usdt"
-            
+            lbank_symbol = f"{symbol}_usdt"
             url = f"{self.base_url}/v2/ticker.do?symbol={lbank_symbol}"
+            
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=2) as response:
+                async with session.get(url, timeout=5) as response:
+                    if response.status != 200:
+                        return None
                     data = await response.json()
                     if data.get('result') and 'ticker' in data:
                         return float(data['ticker'][0])
@@ -198,9 +191,7 @@ class LBankClient:
     async def place_limit_order(self, symbol: str, price: float, amount: float) -> Dict:
         """Розміщення лімітного ордера"""
         try:
-            # Конвертуємо символ у формат LBank
-            lbank_symbol = f"{symbol.split('_')[0]}_usdt"
-            
+            lbank_symbol = f"{symbol}_usdt"
             params = {
                 'api_key': self.api_key,
                 'symbol': lbank_symbol,
@@ -216,7 +207,7 @@ class LBankClient:
                 async with session.post(
                     f"{self.base_url}/v2/create_order.do",
                     data=params,
-                    timeout=3
+                    timeout=5
                 ) as response:
                     result = await response.json()
                     return result
@@ -227,7 +218,7 @@ class LBankClient:
 
 class ArbitrageBot:
     def __init__(self):
-        self.lbank_client = LBankClient(Config.LBANK_API_KEY, Config.LBANK_SECRET_KEY)
+        self.lbank_client = LBankClient()
         self.dex_client = DexScreenerClient()
         self.token_filter = TokenFilter()
         self.last_processed = {}
@@ -240,24 +231,29 @@ class ArbitrageBot:
         
         while self.is_scanning:
             try:
-                # Отримуємо угоди з обох мереж паралельно
-                solana_trades, bsc_trades = await asyncio.gather(
+                # Отримуємо угоди з обох мереж
+                tasks = [
                     self.dex_client.get_recent_trades("solana"),
                     self.dex_client.get_recent_trades("bsc")
-                )
+                ]
                 
-                all_trades = solana_trades + bsc_trades
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                all_trades = []
+                
+                for result in results:
+                    if isinstance(result, list):
+                        all_trades.extend(result)
                 
                 # Обробляємо кожну велику угоду
                 for trade in all_trades:
                     await self.process_trade_signal(trade)
                 
                 # Пауза між скануваннями
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
                 
             except Exception as e:
                 logging.error(f"Помилка автосканування: {e}")
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)
     
     async def stop_auto_scan(self):
         """Зупинка автоматичного сканування"""
@@ -271,21 +267,18 @@ class ArbitrageBot:
             chain = trade['chain']
             
             # Уникаємо дублювання обробки
-            trade_key = f"{chain}_{token_address}_{trade['timestamp']}"
+            trade_key = f"{chain}_{token_address}"
             if trade_key in self.last_processed:
-                return
+                if time.time() - self.last_processed[trade_key] < 300:  # 5 хвилин
+                    return
             
             self.last_processed[trade_key] = time.time()
-            
-            # Очищаємо стару історію
-            self._clean_processed_history()
             
             logging.info(f"🔍 Обробляю угоду: {trade['token_symbol']} на {chain} за ${trade['amount_usd']}")
             
             # Отримуємо детальну інформацію про токен
             token_info = await self.dex_client.get_token_info(chain, token_address)
             if not token_info:
-                logging.warning(f"Не вдалося отримати інфо для {trade['token_symbol']}")
                 return
             
             # Перевіряємо чи токен підходить під фільтри
@@ -295,7 +288,6 @@ class ArbitrageBot:
             # Перевіряємо чи токен доступний на LBank
             lbank_price = await self.lbank_client.get_ticker_price(token_info['symbol'])
             if not lbank_price:
-                logging.warning(f"Токен {token_info['symbol']} не знайдено на LBank")
                 return
             
             # Розміщуємо ордер
@@ -314,22 +306,12 @@ class ArbitrageBot:
         except Exception as e:
             logging.error(f"Помилка обробки угоди: {e}")
     
-    def _clean_processed_history(self):
-        """Очищення старої історії оброблених угод"""
-        current_time = time.time()
-        keys_to_remove = []
-        
-        for key, timestamp in self.last_processed.items():
-            if current_time - timestamp > 300:  # 5 хвилин
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            del self.last_processed[key]
-    
     async def send_trade_notification(self, trade: Dict, token_info: Dict, 
                                     market_price: float, order_price: float, order_result: Dict):
         """Відправка сповіщення про угоду"""
         try:
+            success = order_result.get('result', False)
+            
             message = (
                 f"🚀 *Велика угода виявлена!*\n\n"
                 f"📊 *Деталі угоди:*\n"
@@ -344,13 +326,12 @@ class ArbitrageBot:
                 f"• Ціна ордера: `${order_price:.6f}`\n"
                 f"• Premium: `{Config.PRICE_PREMIUM*100:.2f}%`\n\n"
                 f"🛒 *Ордер на LBank:*\n"
-                f"• Статус: `{'✅ Успішно' if order_result.get('result') else '❌ Помилка'}`\n"
-                f"• ID: `{order_result.get('order_id', 'N/A')}`\n"
+                f"• Статус: `{'✅ Успішно' if success else '❌ Помилка'}`\n"
                 f"• Час: `{datetime.now().strftime('%H:%M:%S')}`\n\n"
                 f"🔗 *[DEX Screener]({trade['dex_url']})*"
             )
             
-            await bot.send_message(Config.TELEGRAM_CHAT_ID, message, parse_mode="Markdown")
+            bot.send_message(Config.TELEGRAM_CHAT_ID, message, parse_mode="Markdown")
             
         except Exception as e:
             logging.error(f"Помилка відправки сповіщення: {e}")
@@ -383,23 +364,24 @@ def send_welcome(message):
 @bot.message_handler(commands=['scan_start'])
 def start_scan(message):
     """Почати автоматичне сканування"""
-    async def start():
-        if not arbitrage_bot.is_scanning:
-            await arbitrage_bot.start_auto_scan()
-            bot.send_message(message.chat.id, "🔍 Сканування запущено! Шукаю великі угоди...")
-        else:
-            bot.send_message(message.chat.id, "⚠️ Сканування вже запущено!")
+    def start():
+        asyncio.run(arbitrage_bot.start_auto_scan())
     
-    asyncio.create_task(start())
+    if not arbitrage_bot.is_scanning:
+        thread = threading.Thread(target=start, daemon=True)
+        thread.start()
+        bot.reply_to(message, "🔍 Сканування запущено! Шукаю великі угоди...")
+    else:
+        bot.reply_to(message, "⚠️ Сканування вже запущено!")
 
 @bot.message_handler(commands=['scan_stop'])
 def stop_scan(message):
     """Зупинити автоматичне сканування"""
     async def stop():
         await arbitrage_bot.stop_auto_scan()
-        bot.send_message(message.chat.id, "⏹️ Сканування зупинено!")
     
-    asyncio.create_task(stop())
+    asyncio.run(stop())
+    bot.reply_to(message, "⏹️ Сканування зупинено!")
 
 @bot.message_handler(commands=['status'])
 def show_status(message):
@@ -415,25 +397,21 @@ def show_status(message):
     )
     bot.send_message(message.chat.id, status_text, parse_mode="Markdown")
 
+def run_scanner():
+    """Запуск сканера в окремому потоці"""
+    async def start():
+        await arbitrage_bot.start_auto_scan()
+    asyncio.run(start())
+
 if __name__ == "__main__":
-    # Запускаємо Telegram бота
     logging.info("🚀 Arbitrage Bot з DexScreener запущено!")
     logging.info(f"Мережі: {Config.ALLOWED_CHAINS}")
     logging.info(f"Мін. угода: ${Config.MIN_TRADE_AMOUNT}")
     
-    # Додайте webhook для Render:
-    from flask import Flask, request
-    app = Flask(__name__)
+    # Запускаємо сканер в окремому потоці
+    scanner_thread = threading.Thread(target=run_scanner, daemon=True)
+    scanner_thread.start()
     
-    @app.route('/')
-    def index():
-        return "Bot is running!", 200
-    
-    @app.route('/webhook', methods=['POST'])
-    def webhook():
-        update = telebot.types.Update.de_json(request.stream.read().decode('utf-8'))
-        bot.process_new_updates([update])
-        return 'ok', 200
-    
-    # Запускаємо Flask
-    app.run(host='0.0.0.0', port=10000, debug=False)
+    # Запускаємо Telegram бота
+    logging.info("Запуск Telegram бота...")
+    bot.infinity_polling()
