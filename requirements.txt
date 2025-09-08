@@ -1,7 +1,5 @@
-pytelegrambotapi==4.14.0
-python-dotenv==1.0.0
+telebot==0.0.5
+aiohttp==3.9.1
 requests==2.31.0
-matplotlib==3.8.2
-numpy==1.26.4
-Flask==3.0.3
-cachetools==5.3.1  # <-- Додайте цей рядок
+Flask==2.3.3
+python-dotenv==1.0.0
