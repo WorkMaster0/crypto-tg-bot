@@ -10,6 +10,7 @@ import logging
 import threading
 import os
 from typing import Dict, List, Optional
+import json
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,7 +28,6 @@ class Config:
     
     # Безкоштовні API URLs
     GEKKOTERM_API_URL = "https://api.geckoterminal.com/api/v2"
-    DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex"
     
     # Торгові налаштування
     ORDER_VOLUME = 50  # Обсяг в USDT
@@ -40,6 +40,10 @@ class Config:
     MIN_VOLUME = 500000  # 500K$ мінімальний обсяг
     ALLOWED_CHAINS = ["solana", "bsc"]  # Тільки Solana та BSC
     BLACKLIST_TOKENS = ["shitcoin", "scam", "test", "meme", "fake", "pump", "dump"]
+    
+    # Обмеження запитів
+    REQUEST_DELAY = 2  # Затримка між запитами в секундах
+    MAX_REQUESTS_PER_MINUTE = 30  # Максимальна кількість запитів на хвилину
 
 class TelegramClient:
     """Простий клієнт для Telegram без polling"""
@@ -60,7 +64,7 @@ class TelegramClient:
             if parse_mode:
                 payload['parse_mode'] = parse_mode
             
-            response = requests.post(url, json=payload, timeout=10)
+            response = requests.post(url, data=payload, timeout=10)
             return response.status_code == 200
         except Exception as e:
             logging.error(f"Помилка відправки повідомлення: {e}")
@@ -124,14 +128,44 @@ class TokenFilter:
 class DexDataClient:
     """Клієнт для роботи з безкоштовними API"""
     
-    @staticmethod
-    async def get_recent_trades(chain: str, limit: int = 20) -> List[Dict]:
+    def __init__(self):
+        self.last_request_time = 0
+        self.request_count = 0
+        self.minute_start = time.time()
+    
+    async def _rate_limit(self):
+        """Обмеження кількості запитів"""
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+        
+        # Перевіряємо ліміт запитів на хвилину
+        if current_time - self.minute_start >= 60:
+            self.request_count = 0
+            self.minute_start = current_time
+        
+        if self.request_count >= Config.MAX_REQUESTS_PER_MINUTE:
+            wait_time = 60 - (current_time - self.minute_start)
+            logging.warning(f"⏳ Досягнуто ліміт запитів. Очікую {wait_time:.1f} секунд")
+            await asyncio.sleep(wait_time)
+            self.request_count = 0
+            self.minute_start = time.time()
+        
+        # Затримка між запитами
+        if elapsed < Config.REQUEST_DELAY:
+            await asyncio.sleep(Config.REQUEST_DELAY - elapsed)
+        
+        self.last_request_time = time.time()
+        self.request_count += 1
+    
+    async def get_recent_trades(self, chain: str, limit: int = 10) -> List[Dict]:
         """Отримання останніх угод з безкоштовних API"""
         try:
+            await self._rate_limit()
+            
             if chain == "solana":
-                return await DexDataClient._get_solana_trades(limit)
+                return await self._get_network_trades("solana", limit)
             elif chain == "bsc":
-                return await DexDataClient._get_bsc_trades(limit)
+                return await self._get_network_trades("bsc", limit)
             else:
                 return []
                 
@@ -139,14 +173,12 @@ class DexDataClient:
             logging.error(f"❌ Помилка отримання угод з {chain}: {e}")
             return []
     
-    @staticmethod
-    async def _get_solana_trades(limit: int) -> List[Dict]:
-        """Отримання угод з Solana через GeckoTerminal API"""
+    async def _get_network_trades(self, network: str, limit: int) -> List[Dict]:
+        """Отримання угод з мережі через GeckoTerminal API"""
         try:
-            # Використовуємо новий endpoint для топ пулів
-            url = f"{Config.GEKKOTERM_API_URL}/networks/solana/new_pools"
+            url = f"{Config.GEKKOTERM_API_URL}/networks/{network}/pools"
             
-            logging.info("🔗 Запит до GeckoTerminal API для Solana (new_pools)")
+            logging.info(f"🔗 Запит до GeckoTerminal API для {network}")
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=15) as response:
@@ -164,109 +196,102 @@ class DexDataClient:
                             
                             if volume_24h >= Config.MIN_TRADE_AMOUNT:
                                 base_token = pool.get('relationships', {}).get('base_token', {}).get('data', {})
-                                token_address = base_token.get('id', '').split('_')[-1] if base_token else ''
+                                token_address = base_token.get('address', '') if base_token else ''
                                 
                                 trades.append({
-                                    'chain': 'solana',
+                                    'chain': network,
                                     'token_address': token_address,
                                     'token_symbol': attributes.get('base_token_symbol', '').upper(),
                                     'amount_usd': volume_24h,
                                     'price': float(attributes.get('price_usd', 0)),
                                     'timestamp': int(time.time()),
-                                    'dex_url': f"https://www.geckoterminal.com/solana/pools/{pool.get('id', '')}"
+                                    'dex_url': f"https://www.geckoterminal.com/{network}/pools/{pool.get('id', '')}",
+                                    'pool_id': pool.get('id', '')
                                 })
                         except (ValueError, TypeError) as e:
+                            logging.debug(f"Помилка обробки пулу: {e}")
                             continue
                     
-                    logging.info(f"✅ Solana: знайдено {len(trades)} великих пулів")
+                    logging.info(f"✅ {network.upper()}: знайдено {len(trades)} великих пулів")
                     return trades
                     
         except Exception as e:
-            logging.error(f"❌ Помилка GeckoTerminal API: {e}")
+            logging.error(f"❌ Помилка GeckoTerminal API для {network}: {e}")
             return []
     
-    @staticmethod
-    async def _get_bsc_trades(limit: int) -> List[Dict]:
-        """Отримання угод з BSC через GeckoTerminal API"""
+    async def get_token_info(self, chain: str, token_address: str, pool_id: str = None) -> Optional[Dict]:
+        """Отримання детальної інформації про токен через GeckoTerminal"""
         try:
-            # Використовуємо новий endpoint для топ пулів
-            url = f"{Config.GEKKOTERM_API_URL}/networks/bsc/new_pools"
+            await self._rate_limit()
             
-            logging.info("🔗 Запит до GeckoTerminal API для BSC (new_pools)")
+            # Спочатку пробуємо отримати інформацію через pool ID
+            if pool_id:
+                pool_info = await self._get_pool_info(pool_id)
+                if pool_info:
+                    return pool_info
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=15) as response:
-                    if response.status != 200:
-                        logging.warning(f"❌ GeckoTerminal API статус: {response.status}")
-                        return []
-                    
-                    data = await response.json()
-                    trades = []
-                    
-                    for pool in data.get('data', [])[:limit]:
-                        try:
-                            attributes = pool.get('attributes', {})
-                            volume_24h = float(attributes.get('volume_usd', {}).get('h24', 0))
-                            
-                            if volume_24h >= Config.MIN_TRADE_AMOUNT:
-                                base_token = pool.get('relationships', {}).get('base_token', {}).get('data', {})
-                                token_address = base_token.get('id', '').split('_')[-1] if base_token else ''
-                                
-                                trades.append({
-                                    'chain': 'bsc',
-                                    'token_address': token_address,
-                                    'token_symbol': attributes.get('base_token_symbol', '').upper(),
-                                    'amount_usd': volume_24h,
-                                    'price': float(attributes.get('price_usd', 0)),
-                                    'timestamp': int(time.time()),
-                                    'dex_url': f"https://www.geckoterminal.com/bsc/pools/{pool.get('id', '')}"
-                                })
-                        except (ValueError, TypeError) as e:
-                            continue
-                    
-                    logging.info(f"✅ BSC: знайдено {len(trades)} великих пулів")
-                    return trades
-                    
-        except Exception as e:
-            logging.error(f"❌ Помилка GeckoTerminal API для BSC: {e}")
-            return []
-    
-    @staticmethod
-    async def get_token_info(chain: str, token_address: str) -> Optional[Dict]:
-        """Отримання детальної інформації про токен через DexScreener"""
-        try:
-            # Використовуємо DexScreener як альтернативу
-            url = f"{Config.DEXSCREENER_API_URL}/tokens/{chain}/{token_address}"
+            # Якщо не вдалося, пробуємо через token address
+            url = f"{Config.GEKKOTERM_API_URL}/networks/{chain}/tokens/{token_address}"
             
-            logging.info(f"🔗 Отримую інфо токена через DexScreener: {chain}/{token_address}")
+            logging.info(f"🔗 Отримую інфо токена через GeckoTerminal: {chain}/{token_address}")
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as response:
                     if response.status != 200:
-                        logging.warning(f"❌ DexScreener статус: {response.status}")
+                        logging.warning(f"❌ GeckoTerminal статус: {response.status}")
                         return None
                     
                     data = await response.json()
-                    pairs = data.get('pairs', [])
+                    token_data = data.get('data', {}).get('attributes', {})
                     
-                    if pairs:
-                        pair = pairs[0]  # Беремо першу пару
-                        return {
-                            'symbol': pair.get('baseToken', {}).get('symbol', '').upper(),
-                            'name': pair.get('baseToken', {}).get('name', ''),
-                            'price': float(pair.get('priceUsd', 0)),
-                            'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
-                            'market_cap': float(pair.get('marketCap', 0)),
-                            'liquidity': float(pair.get('liquidity', {}).get('usd', 0)),
-                            'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
-                            'chain': chain
-                        }
-                    else:
-                        logging.warning("❌ Не знайдено даних про токен")
-                        return None
+                    return {
+                        'symbol': token_data.get('symbol', '').upper(),
+                        'name': token_data.get('name', ''),
+                        'price': float(token_data.get('price_usd', 0)),
+                        'volume_24h': float(token_data.get('volume_usd', {}).get('h24', 0)),
+                        'market_cap': float(token_data.get('fdv_usd', 0)),
+                        'liquidity': float(token_data.get('reserve_in_usd', 0)),
+                        'price_change_24h': float(token_data.get('price_change_percentage', {}).get('h24', 0)),
+                        'chain': chain
+                    }
                         
         except Exception as e:
             logging.error(f"❌ Помилка отримання інфо токена: {e}")
+            return None
+    
+    async def _get_pool_info(self, pool_id: str) -> Optional[Dict]:
+        """Отримання інформації про пул через GeckoTerminal"""
+        try:
+            await self._rate_limit()
+            
+            # Розбираємо pool_id на мережу та адресу
+            if '_' in pool_id:
+                network, address = pool_id.split('_', 1)
+                url = f"{Config.GEKKOTERM_API_URL}/networks/{network}/pools/{address}"
+            else:
+                return None
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status != 200:
+                        return None
+                    
+                    data = await response.json()
+                    pool_data = data.get('data', {}).get('attributes', {})
+                    
+                    return {
+                        'symbol': pool_data.get('base_token_symbol', '').upper(),
+                        'name': pool_data.get('base_token_name', ''),
+                        'price': float(pool_data.get('price_usd', 0)),
+                        'volume_24h': float(pool_data.get('volume_usd', {}).get('h24', 0)),
+                        'market_cap': float(pool_data.get('fdv_usd', 0)),
+                        'liquidity': float(pool_data.get('reserve_in_usd', 0)),
+                        'price_change_24h': float(pool_data.get('price_change_percentage', {}).get('h24', 0)),
+                        'chain': network
+                    }
+                        
+        except Exception as e:
+            logging.error(f"Помилка отримання інфо пулу: {e}")
             return None
 
 class LBankClient:
@@ -277,18 +302,23 @@ class LBankClient:
         
     def _generate_signature(self, params: Dict) -> str:
         """Генерація підпису для LBank API"""
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-        signature = hmac.new(
-            self.secret_key.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).digest()
-        return base64.b64encode(signature).decode('utf-8')
+        try:
+            # Формуємо рядок для підпису
+            query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items()) if k != 'sign'])
+            signature = hmac.new(
+                self.secret_key.encode('utf-8'),
+                query_string.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+            return base64.b64encode(signature).decode('utf-8')
+        except Exception as e:
+            logging.error(f"Помилка генерації підпису: {e}")
+            return ""
     
     async def get_ticker_price(self, symbol: str) -> Optional[float]:
         """Отримання поточної ціни з LBank"""
         try:
-            lbank_symbol = f"{symbol}_usdt"
+            lbank_symbol = f"{symbol.lower()}_usdt"
             url = f"{self.base_url}/v2/ticker.do?symbol={lbank_symbol}"
             logging.info(f"🔗 Перевіряю ціну на LBank: {lbank_symbol}")
             
@@ -299,12 +329,13 @@ class LBankClient:
                         return None
                     
                     data = await response.json()
-                    if data.get('result') and 'ticker' in data:
-                        price = float(data['ticker'][0])
+                    if data.get('result') and 'data' in data and data['data']:
+                        ticker_data = data['data'][0]
+                        price = float(ticker_data.get('ticker', {}).get('latest', 0))
                         logging.info(f"💰 LBank ціна {symbol}: ${price:.6f}")
                         return price
                     else:
-                        logging.warning(f"❌ Токен {symbol} не знайдено на LBank")
+                        logging.warning(f"❌ Токен {symbol} не знайдено на LBank: {data}")
                         return None
                         
         except Exception as e:
@@ -314,25 +345,32 @@ class LBankClient:
     async def place_limit_order(self, symbol: str, price: float, amount: float) -> Dict:
         """Розміщення лімітного ордера"""
         try:
-            lbank_symbol = f"{symbol}_usdt"
+            lbank_symbol = f"{symbol.lower()}_usdt"
+            timestamp = str(int(time.time() * 1000))
+            
             params = {
                 'api_key': self.api_key,
                 'symbol': lbank_symbol,
                 'type': 'buy',
                 'price': str(price),
                 'amount': str(amount),
-                'timestamp': str(int(time.time() * 1000))
+                'timestamp': timestamp
             }
             
             params['sign'] = self._generate_signature(params)
             
             logging.info(f"🛒 Розміщую ордер на LBank: {symbol} {amount} по ${price:.6f}")
             
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.base_url}/v2/create_order.do",
                     data=params,
-                    timeout=10
+                    headers=headers,
+                    timeout=15
                 ) as response:
                     result = await response.json()
                     if result.get('result'):
@@ -358,12 +396,9 @@ class ArbitrageBot:
         try:
             logging.info("🔗 Перевіряю з'єднання з API...")
             
-            # Перевірка DexScreener API
-            test_info = await self.dex_client.get_token_info("solana", "So11111111111111111111111111111111111111112")
-            if test_info:
-                logging.info(f"✅ DexScreener API доступний")
-            else:
-                logging.warning("⚠️ DexScreener не відповідає")
+            # Перевірка GeckoTerminal API
+            test_trades = await self.dex_client.get_recent_trades("solana", 2)
+            logging.info(f"✅ GeckoTerminal API доступний. Знайдено пулів: {len(test_trades)}")
             
             # Перевірка LBank
             test_price = await self.lbank_client.get_ticker_price("BTC")
@@ -403,8 +438,8 @@ class ArbitrageBot:
                 
                 # Отримуємо пули з обох мереж
                 tasks = [
-                    self.dex_client.get_recent_trades("solana"),
-                    self.dex_client.get_recent_trades("bsc")
+                    self.dex_client.get_recent_trades("solana", 5),
+                    self.dex_client.get_recent_trades("bsc", 5)
                 ]
                 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -425,12 +460,14 @@ class ArbitrageBot:
                 for trade in all_trades:
                     if await self.process_trade_signal(trade):
                         processed_count += 1
+                    # Додаємо затримку між обробкою пулів
+                    await asyncio.sleep(1)
                 
                 logging.info(f"✅ Оброблено пулів: {processed_count}/{len(all_trades)}")
                 
                 # Пауза між скануваннями
-                logging.info("⏸️ Очікую 30 секунд...")
-                await asyncio.sleep(30)
+                logging.info("⏸️ Очікую 60 секунд...")
+                await asyncio.sleep(60)
                 
             except Exception as e:
                 logging.error(f"🔥 Критична помилка: {e}")
@@ -448,6 +485,12 @@ class ArbitrageBot:
             token_address = trade['token_address']
             chain = trade['chain']
             symbol = trade['token_symbol']
+            pool_id = trade.get('pool_id', '')
+            
+            # Перевіряємо чи символ не пустий
+            if not symbol or symbol == 'UNKNOWN':
+                logging.warning(f"❌ Пропускаємо пул з пустим символом: {token_address}")
+                return False
             
             # Уникаємо дублювання обробки
             trade_key = f"{chain}_{token_address}"
@@ -463,7 +506,7 @@ class ArbitrageBot:
             logging.info(f"🔍 Обробляю пул: {symbol} на {chain} з обсягом ${trade['amount_usd']:,.2f}")
             
             # Отримуємо детальну інформацію про токен
-            token_info = await self.dex_client.get_token_info(chain, token_address)
+            token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
             if not token_info:
                 logging.warning(f"❌ Не вдалося отримати інфо для {symbol}")
                 return False
@@ -563,7 +606,9 @@ def send_telegram_command(command: str, chat_id: str = None):
         elif command == '/scan_start':
             if not arbitrage_bot.is_scanning:
                 def start():
-                    asyncio.run(arbitrage_bot.start_auto_scan())
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(arbitrage_bot.start_auto_scan())
                 thread = threading.Thread(target=start, daemon=True)
                 thread.start()
                 telegram_client.send_message("🔍 Сканування запущено! Шукаю великі пули...")
@@ -573,7 +618,9 @@ def send_telegram_command(command: str, chat_id: str = None):
         elif command == '/scan_stop':
             async def stop():
                 await arbitrage_bot.stop_auto_scan()
-            asyncio.run(stop())
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(stop())
             telegram_client.send_message("⏹️ Сканування зупинено!")
             
         elif command == '/status':
@@ -622,7 +669,7 @@ if __name__ == "__main__":
     scanner_thread.start()
     
     # Простий веб-сервер для команд
-    from flask import Flask, request
+    from flask import Flask, request, jsonify
     app = Flask(__name__)
     
     @app.route('/')
@@ -638,14 +685,28 @@ if __name__ == "__main__":
             
             if command:
                 send_telegram_command(command, chat_id)
-                return {'status': 'success', 'message': 'Command processed'}
+                return jsonify({'status': 'success', 'message': 'Command processed'})
             else:
-                return {'status': 'error', 'message': 'No command provided'}, 400
+                return jsonify({'status': 'error', 'message': 'No command provided'}), 400
                 
         except Exception as e:
-            return {'status': 'error', 'message': str(e)}, 500
+            return jsonify({'status': 'error', 'message': str(e)}), 500
     
     # Запускаємо Flask
     port = int(os.environ.get('PORT', 10000))
     logging.info(f"🌐 Запускаю веб-сервер на порті {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    
+    # Запускаємо Flask в окремому потоці
+    def run_flask():
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Чекаємо завершення потоків
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("⏹️ Зупинка бота...")
+        arbitrage_bot.is_scanning = False
