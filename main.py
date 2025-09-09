@@ -127,7 +127,8 @@ class DexScreenerClient:
     async def get_recent_trades(chain: str, limit: int = 20) -> List[Dict]:
         """Отримання останніх угод з DexScreener"""
         try:
-            url = f"{Config.DEXSCREENER_API}/transactions/{chain}"
+            # Використовуємо правильний endpoint для транзакцій
+            url = f"https://api.dexscreener.com/latest/dex/transactions/{chain}"
             logging.info(f"🔗 Запит до DexScreener: {chain}")
             
             async with aiohttp.ClientSession() as session:
@@ -170,7 +171,8 @@ class DexScreenerClient:
     async def get_token_info(chain: str, token_address: str) -> Optional[Dict]:
         """Отримання детальної інформації про токен"""
         try:
-            url = f"{Config.DEXSCREENER_API}/tokens/{chain}/{token_address}"
+            # Використовуємо правильний endpoint для інформації про токен
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{chain}/{token_address}"
             logging.info(f"🔗 Отримую інфо токена: {chain}/{token_address}")
             
             async with aiohttp.ClientSession() as session:
@@ -180,17 +182,18 @@ class DexScreenerClient:
                         return None
                     
                     data = await response.json()
-                    pair = data.get('pair', {})
+                    pairs = data.get('pairs', [])
                     
-                    if pair:
+                    if pairs:
+                        pair = pairs[0]  # Беремо першу пару
                         token_info = {
                             'symbol': pair.get('baseToken', {}).get('symbol', '').upper(),
                             'name': pair.get('baseToken', {}).get('name', ''),
                             'price': float(pair.get('priceUsd', 0)),
-                            'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
+                            'volume_24h': float(pair.get('volume', {}).get('h24', 0)) if isinstance(pair.get('volume'), dict) else float(pair.get('volume', 0)),
                             'market_cap': float(pair.get('marketCap', 0)),
-                            'liquidity': float(pair.get('liquidity', {}).get('usd', 0)),
-                            'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
+                            'liquidity': float(pair.get('liquidity', {}).get('usd', 0)) if isinstance(pair.get('liquidity'), dict) else float(pair.get('liquidity', 0)),
+                            'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)) if isinstance(pair.get('priceChange'), dict) else float(pair.get('priceChange', 0)),
                             'chain': chain
                         }
                         logging.info(f"📋 Інфо токена {token_info['symbol']}: капіталізація ${token_info['market_cap']:,.0f}, обсяг ${token_info['volume_24h']:,.0f}")
