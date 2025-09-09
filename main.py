@@ -493,7 +493,7 @@ class ArbitrageBot:
             
             # Спробуємо отримати символ через детальну інформацію про пул
             logging.info(f"🔍 Спроба отримати символ через детальну інформацію пулу...")
-            token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
+        token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
             
             if token_info and token_info.get('symbol'):
                 symbol = token_info['symbol']
