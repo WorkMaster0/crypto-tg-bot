@@ -480,28 +480,39 @@ class ArbitrageBot:
         telegram_client.send_message("⏹️ Сканування зупинено!")
     
     async def process_trade_signal(self, trade: Dict) -> bool:
-        """Обробка сигналу про великий пул"""
-        try:
-            token_address = trade['token_address']
-            chain = trade['chain']
-            symbol = trade['token_symbol']
-            pool_id = trade.get('pool_id', '')
+    """Обробка сигналу про великий пул"""
+    try:
+        token_address = trade['token_address']
+        chain = trade['chain']
+        symbol = trade['token_symbol']
+        pool_id = trade.get('pool_id', '')
+        
+        # Перевіряємо чи символ не пустий
+        if not symbol or symbol == 'UNKNOWN' or symbol.strip() == '':
+            logging.warning(f"❌ Пропускаємо пул з пустим символом: {token_address}")
             
-            # Перевіряємо чи символ не пустий
-            if not symbol or symbol == 'UNKNOWN':
-                logging.warning(f"❌ Пропускаємо пул з пустим символом: {token_address}")
+            # Спробуємо отримати символ через детальну інформацію про пул
+            logging.info(f"🔍 Спроба отримати символ через детальну інформацію пулу...")
+            token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
+            
+            if token_info and token_info.get('symbol'):
+                symbol = token_info['symbol']
+                trade['token_symbol'] = symbol
+                logging.info(f"✅ Символ знайдено через детальну інформацію: {symbol}")
+            else:
+                logging.warning(f"❌ Не вдалося отримати символ для токена {token_address}")
                 return False
-            
-            # Уникаємо дублювання обробки
-            trade_key = f"{chain}_{token_address}"
-            current_time = time.time()
-            
-            if trade_key in self.last_processed:
-                if current_time - self.last_processed[trade_key] < 600:  # 10 хвилин
-                    logging.debug(f"⏭️ Пропускаємо дубль пулу: {symbol}")
-                    return False
-            
-            self.last_processed[trade_key] = current_time
+        
+        # Уникаємо дублювання обробки
+        trade_key = f"{chain}_{token_address}"
+        current_time = time.time()
+        
+        if trade_key in self.last_processed:
+            if current_time - self.last_processed[trade_key] < 600:  # 10 хвилин
+                logging.debug(f"⏭️ Пропускаємо дубль пулу: {symbol}")
+                return False
+        
+        self.last_processed[trade_key] = current_time
             
             logging.info(f"🔍 Обробляю пул: {symbol} на {chain} з обсягом ${trade['amount_usd']:,.2f}")
             
