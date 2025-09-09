@@ -6,3 +6,7 @@ python-dotenv==1.0.0
 numpy
 pandas
 ccxt
+python-telegram-bot
+matplotlib
+scikit-learn
+seaborn
