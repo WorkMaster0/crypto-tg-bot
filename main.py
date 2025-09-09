@@ -517,7 +517,7 @@ class ArbitrageBot:
         logging.info(f"🔍 Обробляю пул: {symbol} на {chain} з обсягом ${trade['amount_usd']:,.2f}")
             
             # Отримуємо детальну інформацію про токен
-            token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
+        token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
             if not token_info:
                 logging.warning(f"❌ Не вдалося отримати інфо для {symbol}")
                 return False
