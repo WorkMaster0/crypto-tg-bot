@@ -12,10 +12,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 import asyncio
 from flask import Flask, request, jsonify
 import threading
-import talib
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
+import math
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +36,8 @@ class AdvancedPumpDumpBot:
             'market_cap_min': 500000,
             'liquidity_min': 50000,
             'rsi_threshold': 65,
-            'buy_pressure_ratio': 1.5
+            'buy_pressure_ratio': 1.5,
+            'macd_signal': 0.001
         }
         
         # Пороги для дампу
@@ -46,7 +47,8 @@ class AdvancedPumpDumpBot:
             'price_change_5m': -2.5,
             'rsi_threshold': 35,
             'sell_pressure_ratio': 1.8,
-            'support_break': True
+            'support_break': True,
+            'macd_signal': -0.001
         }
         
         self.coin_blacklist = set()
@@ -133,6 +135,11 @@ class AdvancedPumpDumpBot:
             orderbook_response = requests.get(orderbook_url, timeout=10)
             orderbook_data = orderbook_response.json()
             
+            # Trades data for recent activity
+            trades_url = f"https://api.binance.com/api/v3/trades?symbol={symbol}USDT&limit=50"
+            trades_response = requests.get(trades_url, timeout=10)
+            trades_data = trades_response.json()
+            
             return {
                 'symbol': symbol,
                 'price': float(data['lastPrice']),
@@ -142,11 +149,68 @@ class AdvancedPumpDumpBot:
                 'low': float(data['lowPrice']),
                 'quote_volume': float(data['quoteVolume']),
                 'klines': klines_data,
-                'orderbook': orderbook_data
+                'orderbook': orderbook_data,
+                'trades': trades_data
             }
         except Exception as e:
             logger.error(f"Error getting market data for {symbol}: {e}")
             return None
+
+    def calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
+        """Власна реалізація RSI"""
+        if len(prices) < period + 1:
+            return 50.0
+        
+        deltas = np.diff(prices)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        
+        avg_gain = np.mean(gains[-period:])
+        avg_loss = np.mean(losses[-period:])
+        
+        if avg_loss == 0:
+            return 100.0
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
+
+    def calculate_macd(self, prices: np.ndarray, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> float:
+        """Власна реалізація MACD"""
+        if len(prices) < slow_period + signal_period:
+            return 0.0
+        
+        # EMA для швидкого періоду
+        def ema(data, period):
+            weights = np.exp(np.linspace(-1., 0., period))
+            weights /= weights.sum()
+            return np.convolve(data, weights, mode='valid')[-1]
+        
+        fast_ema = ema(prices[-fast_period:], fast_period)
+        slow_ema = ema(prices[-slow_period:], slow_period)
+        macd_line = fast_ema - slow_ema
+        
+        return macd_line
+
+    def calculate_bollinger_bands(self, prices: np.ndarray, period: int = 20, std_dev: int = 2) -> Tuple[float, float, float]:
+        """Власна реалізація Bollinger Bands"""
+        if len(prices) < period:
+            return prices[-1], prices[-1], prices[-1]
+        
+        sma = np.mean(prices[-period:])
+        std = np.std(prices[-period:])
+        
+        upper_band = sma + (std * std_dev)
+        lower_band = sma - (std * std_dev)
+        
+        return upper_band, sma, lower_band
+
+    def calculate_sma(self, data: np.ndarray, period: int) -> float:
+        """Проста ковзна середня"""
+        if len(data) < period:
+            return np.mean(data) if len(data) > 0 else 0
+        return np.mean(data[-period:])
 
     async def calculate_technical_indicators(self, klines_data: List) -> Dict:
         closes = np.array([float(x[4]) for x in klines_data])
@@ -155,26 +219,33 @@ class AdvancedPumpDumpBot:
         volumes = np.array([float(x[5]) for x in klines_data])
         
         # RSI
-        rsi = talib.RSI(closes, timeperiod=14)[-1] if len(closes) >= 14 else 50
+        rsi = self.calculate_rsi(closes)
         
         # MACD
-        macd, macd_signal, macd_hist = talib.MACD(closes)
-        macd_value = macd[-1] if len(macd) > 0 else 0
+        macd = self.calculate_macd(closes)
         
         # Bollinger Bands
-        upper_bb, middle_bb, lower_bb = talib.BBANDS(closes, timeperiod=20)
-        bb_position = (closes[-1] - lower_bb[-1]) / (upper_bb[-1] - lower_bb[-1]) if upper_bb[-1] != lower_bb[-1] else 0.5
+        upper_bb, middle_bb, lower_bb = self.calculate_bollinger_bands(closes)
+        bb_position = (closes[-1] - lower_bb) / (upper_bb - lower_bb) if upper_bb != lower_bb else 0.5
         
         # Volume SMA
-        volume_sma = talib.SMA(volumes, timeperiod=20)[-1] if len(volumes) >= 20 else np.mean(volumes)
+        volume_sma = self.calculate_sma(volumes, 20)
+        volume_ratio = volumes[-1] / volume_sma if volume_sma > 0 else 1
+        
+        # Price changes
+        price_change_1h = ((closes[-1] - closes[-12]) / closes[-12]) * 100 if len(closes) >= 12 else 0
+        price_change_5m = ((closes[-1] - closes[-1]) / closes[-2]) * 100 if len(closes) >= 2 else 0
         
         return {
             'rsi': rsi,
-            'macd': macd_value,
+            'macd': macd,
             'bb_position': bb_position,
-            'volume_ratio': volumes[-1] / volume_sma if volume_sma > 0 else 1,
+            'volume_ratio': volume_ratio,
             'current_price': closes[-1],
-            'price_5m_ago': closes[-6] if len(closes) >= 6 else closes[0]
+            'price_5m_ago': closes[-2] if len(closes) >= 2 else closes[0],
+            'price_1h_ago': closes[-12] if len(closes) >= 12 else closes[0],
+            'price_change_1h': price_change_1h,
+            'price_change_5m': price_change_5m
         }
 
     async def detect_pump_pattern(self, market_data: Dict, tech_indicators: Dict) -> Dict:
@@ -188,16 +259,19 @@ class AdvancedPumpDumpBot:
             signals.append(f"Volume x{volume_ratio:.1f}")
         
         # Price momentum
-        price_change_5m = ((tech_indicators['current_price'] - tech_indicators['price_5m_ago']) / 
-                          tech_indicators['price_5m_ago']) * 100
-        if price_change_5m > self.pump_thresholds['price_change_5m']:
+        if tech_indicators['price_change_5m'] > self.pump_thresholds['price_change_5m']:
             score += 0.2
-            signals.append(f"+{price_change_5m:.1f}% 5m")
+            signals.append(f"+{tech_indicators['price_change_5m']:.1f}% 5m")
         
         # RSI condition
         if tech_indicators['rsi'] > self.pump_thresholds['rsi_threshold']:
             score += 0.1
             signals.append(f"RSI {tech_indicators['rsi']:.1f}")
+        
+        # MACD condition
+        if tech_indicators['macd'] > self.pump_thresholds['macd_signal']:
+            score += 0.1
+            signals.append(f"MACD {tech_indicators['macd']:.4f}")
         
         # Order book analysis
         ob_analysis = self.analyze_orderbook(market_data['orderbook'])
@@ -208,7 +282,7 @@ class AdvancedPumpDumpBot:
         # Whale detection
         whale_volume = self.detect_whale_orders(market_data['orderbook'])
         if whale_volume > market_data['quote_volume'] * 0.01:
-            score += 0.2
+            score += 0.1
             signals.append(f"Whale order: ${whale_volume:,.0f}")
         
         return {'score': min(score, 1.0), 'signals': signals, 'confidence': 'high' if score > 0.6 else 'medium'}
@@ -224,16 +298,19 @@ class AdvancedPumpDumpBot:
             signals.append(f"Sell volume x{volume_ratio:.1f}")
         
         # Price decline
-        price_change_5m = ((tech_indicators['current_price'] - tech_indicators['price_5m_ago']) / 
-                          tech_indicators['price_5m_ago']) * 100
-        if price_change_5m < self.dump_thresholds['price_change_5m']:
+        if tech_indicators['price_change_5m'] < self.dump_thresholds['price_change_5m']:
             score += 0.2
-            signals.append(f"{price_change_5m:.1f}% 5m")
+            signals.append(f"{tech_indicators['price_change_5m']:.1f}% 5m")
         
         # RSI condition (oversold)
         if tech_indicators['rsi'] < self.dump_thresholds['rsi_threshold']:
             score += 0.1
             signals.append(f"RSI {tech_indicators['rsi']:.1f}")
+        
+        # MACD condition
+        if tech_indicators['macd'] < self.dump_thresholds['macd_signal']:
+            score += 0.1
+            signals.append(f"MACD {tech_indicators['macd']:.4f}")
         
         # Order book analysis (sell pressure)
         ob_analysis = self.analyze_orderbook(market_data['orderbook'])
@@ -243,14 +320,14 @@ class AdvancedPumpDumpBot:
         
         # Support break detection
         if self.check_support_break(tech_indicators, market_data['klines']['15m']):
-            score += 0.2
+            score += 0.1
             signals.append("Support broken")
         
         return {'score': min(score, 1.0), 'signals': signals, 'confidence': 'high' if score > 0.6 else 'medium'}
 
     def analyze_orderbook(self, orderbook: Dict) -> Dict:
-        bids = np.array([float(bid[1]) for bid in orderbook['bids']])
-        asks = np.array([float(ask[1]) for ask in orderbook['asks']])
+        bids = np.array([float(bid[1]) for bid in orderbook['bids'][:10]])  # Топ 10 bid
+        asks = np.array([float(ask[1]) for ask in orderbook['asks'][:10]])  # Топ 10 ask
         
         total_bids = np.sum(bids)
         total_asks = np.sum(asks)
@@ -261,7 +338,7 @@ class AdvancedPumpDumpBot:
         return {
             'buy_pressure': buy_pressure,
             'sell_pressure': sell_pressure,
-            'imbalance': abs(total_bids - total_asks) / (total_bids + total_asks)
+            'imbalance': abs(total_bids - total_asks) / (total_bids + total_asks) if (total_bids + total_asks) > 0 else 0
         }
 
     def detect_whale_orders(self, orderbook: Dict) -> float:
@@ -276,15 +353,27 @@ class AdvancedPumpDumpBot:
 
     def check_support_break(self, tech_indicators: Dict, klines: List) -> bool:
         """Check if price broke through support level"""
-        closes = np.array([float(x[4]) for x in klines])
-        if len(closes) < 20:
+        if len(klines) < 20:
             return False
         
-        # Simple support as recent low
+        closes = np.array([float(x[4]) for x in klines])
+        
+        # Support as lowest price in last 10 periods
         support_level = np.min(closes[-10:])
         current_price = tech_indicators['current_price']
         
         return current_price < support_level * 0.99  # 1% below support
+
+    def detect_volume_spike(self, volumes: np.ndarray, window: int = 20) -> bool:
+        """Detect unusual volume spikes"""
+        if len(volumes) < window + 1:
+            return False
+        
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-window:-1])
+        std_volume = np.std(volumes[-window:-1])
+        
+        return current_volume > (avg_volume + 2 * std_volume)
 
     async def scan_top_coins(self, scan_type: str = 'both'):
         try:
@@ -322,7 +411,8 @@ class AdvancedPumpDumpBot:
                             'signals': pump_result['signals'],
                             'confidence': pump_result['confidence'],
                             'price': market_data['price'],
-                            'volume': market_data['volume']
+                            'volume': market_data['volume'],
+                            'price_change_24h': market_data['price_change']
                         })
                 
                 # Детекція дампу
@@ -335,7 +425,8 @@ class AdvancedPumpDumpBot:
                             'signals': dump_result['signals'],
                             'confidence': dump_result['confidence'],
                             'price': market_data['price'],
-                            'volume': market_data['volume']
+                            'volume': market_data['volume'],
+                            'price_change_24h': market_data['price_change']
                         })
             
             # Сортування результатів
@@ -360,6 +451,7 @@ class AdvancedPumpDumpBot:
         
         message += f"{emoji} Монета: {symbol}\n"
         message += f"💰 Ціна: ${signal_data['price']:.6f}\n"
+        message += f"📈 24h change: {signal_data['price_change_24h']:.1f}%\n"
         message += f"📊 Впевненість: {signal_data['confidence']}\n"
         message += f"⚡ Score: {signal_data['score']:.2%}\n\n"
         message += "📶 Сигнали:\n"
@@ -382,36 +474,64 @@ class AdvancedPumpDumpBot:
             parse_mode='HTML'
         )
 
+    async def scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда для ручного сканування"""
+        await update.message.reply_text("🔍 Запускаю сканування...")
+        results = await self.scan_top_coins('both')
+        
+        message = "📊 Результати сканування:\n\n"
+        for signal_type in ['pump', 'dump']:
+            message += f"{'🚀' if signal_type == 'pump' else '📉'} {signal_type.upper()}:\n"
+            for i, signal in enumerate(results[signal_type][:3], 1):
+                message += f"{i}. {signal['symbol']} - {signal['score']:.2%}\n"
+            message += "\n"
+            
+        await update.message.reply_text(message)
+
+    async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда для перегляду налаштувань"""
+        settings_msg = self.get_settings_message()
+        await update.message.reply_text(settings_msg)
+
+    async def blacklist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда для керування чорним списком"""
+        if context.args:
+            coin = context.args[0].upper()
+            if coin in self.coin_blacklist:
+                self.coin_blacklist.remove(coin)
+                await update.message.reply_text(f"✅ {coin} видалено з чорного списку")
+            else:
+                self.coin_blacklist.add(coin)
+                await update.message.reply_text(f"✅ {coin} додано до чорного списку")
+        else:
+            blacklist_msg = "🚫 Чорний список:\n" + "\n".join(self.coin_blacklist) if self.coin_blacklist else "Чорний список порожній"
+            await update.message.reply_text(blacklist_msg)
+
     async def scan_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Фонова задача сканування"""
         results = await self.scan_top_coins('both')
         
         # Відправка топ-3 сигналів для кожного типу
         for signal_type in ['pump', 'dump']:
             for signal in results[signal_type][:3]:
                 await self.send_alert(context, signal, signal_type)
-                
-                # Cooldown для монети
                 await asyncio.sleep(1)
 
     def handle_webhook(self, data: Dict) -> str:
         """Обробка вебхук запитів"""
         try:
             if data.get('type') == 'manual_scan':
-                # Ручне сканування через вебхук
                 results = asyncio.run(self.scan_top_coins(data.get('scan_type', 'both')))
                 return jsonify(results)
-                
             elif data.get('type') == 'update_settings':
                 self.update_settings(data.get('settings', {}))
                 return jsonify({'status': 'success'})
-                
             return jsonify({'error': 'Unknown webhook type'})
-            
         except Exception as e:
             return jsonify({'error': str(e)})
 
     def update_settings(self, new_settings: Dict):
-        """Оновлення налаштувань через вебхук"""
+        """Оновлення налаштувань"""
         if 'pump' in new_settings:
             self.pump_thresholds.update(new_settings['pump'])
         if 'dump' in new_settings:
@@ -463,6 +583,10 @@ class AdvancedPumpDumpBot:
         print("🤖 Бот запущений...")
         print("🌐 Flask сервер запущений на порті 5000")
         print("📊 Доступні endpoints: /webhook, /stats, /update_settings")
+        
+        # Додавання фонової задачі
+        job_queue = self.app.job_queue
+        job_queue.run_repeating(self.scan_job, interval=300, first=10)  # Сканування кожні 5 хвилин
         
         self.app.run_polling()
 
