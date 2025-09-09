@@ -10,5 +10,4 @@ python-telegram-bot
 matplotlib
 scikit-learn
 seaborn
-threading
 logging
