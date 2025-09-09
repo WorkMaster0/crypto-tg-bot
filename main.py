@@ -480,7 +480,8 @@ class ArbitrageBot:
         telegram_client.send_message("⏹️ Сканування зупинено!")
     
     async def process_trade_signal(self, trade: Dict) -> bool:
-    try:
+        """Обробка сигналу про великий пул"""
+        try:
         token_address = trade['token_address']
         chain = trade['chain']
         symbol = trade['token_symbol']
