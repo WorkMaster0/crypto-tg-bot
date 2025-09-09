@@ -28,7 +28,6 @@ class Config:
     # Безкоштовні API URLs
     GEKKOTERM_API_URL = "https://api.geckoterminal.com/api/v2"
     DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex"
-    BIRDEYE_PUBLIC_API = "https://public-api.birdeye.so/public"
     
     # Торгові налаштування
     ORDER_VOLUME = 50  # Обсяг в USDT
@@ -144,21 +143,16 @@ class DexDataClient:
     async def _get_solana_trades(limit: int) -> List[Dict]:
         """Отримання угод з Solana через GeckoTerminal API"""
         try:
-            url = f"{Config.GEKKOTERM_API_URL}/networks/solana/pools"
-            params = {
-                'page': 1,
-                'include': 'base_token',
-                'sort': 'volume_usd.h24',
-                'limit': 50
-            }
+            # Використовуємо новий endpoint для топ пулів
+            url = f"{Config.GEKKOTERM_API_URL}/networks/solana/new_pools"
             
-            logging.info("🔗 Запит до GeckoTerminal API для Solana")
+            logging.info("🔗 Запит до GeckoTerminal API для Solana (new_pools)")
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=15) as response:
+                async with session.get(url, timeout=15) as response:
                     if response.status != 200:
                         logging.warning(f"❌ GeckoTerminal API статус: {response.status}")
-                        return await DexDataClient._get_solana_backup()
+                        return []
                     
                     data = await response.json()
                     trades = []
@@ -189,64 +183,19 @@ class DexDataClient:
                     
         except Exception as e:
             logging.error(f"❌ Помилка GeckoTerminal API: {e}")
-            return await DexDataClient._get_solana_backup()
-    
-    @staticmethod
-    async def _get_solana_backup() -> List[Dict]:
-        """Резервний метод для Solana через Birdeye public API"""
-        try:
-            url = f"{Config.BIRDEYE_PUBLIC_API}/pools"
-            params = {
-                'sort_by': 'volume',
-                'sort_order': 'desc',
-                'limit': 30
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=10) as response:
-                    if response.status != 200:
-                        return []
-                    
-                    data = await response.json()
-                    trades = []
-                    
-                    for pool in data.get('data', {}).get('items', [])[:10]:
-                        try:
-                            volume_24h = float(pool.get('volume', 0))
-                            if volume_24h >= Config.MIN_TRADE_AMOUNT:
-                                trades.append({
-                                    'chain': 'solana',
-                                    'token_address': pool.get('address', ''),
-                                    'token_symbol': pool.get('symbol', '').upper(),
-                                    'amount_usd': volume_24h,
-                                    'price': float(pool.get('price', 0)),
-                                    'timestamp': int(time.time()),
-                                    'dex_url': f"https://birdeye.so/token/{pool.get('address', '')}"
-                                })
-                        except (ValueError, TypeError):
-                            continue
-                    
-                    return trades
-                    
-        except Exception:
             return []
     
     @staticmethod
     async def _get_bsc_trades(limit: int) -> List[Dict]:
         """Отримання угод з BSC через GeckoTerminal API"""
         try:
-            url = f"{Config.GEKKOTERM_API_URL}/networks/bsc/pools"
-            params = {
-                'page': 1,
-                'include': 'base_token',
-                'sort': 'volume_usd.h24',
-                'limit': 50
-            }
+            # Використовуємо новий endpoint для топ пулів
+            url = f"{Config.GEKKOTERM_API_URL}/networks/bsc/new_pools"
             
-            logging.info("🔗 Запит до GeckoTerminal API для BSC")
+            logging.info("🔗 Запит до GeckoTerminal API для BSC (new_pools)")
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=15) as response:
+                async with session.get(url, timeout=15) as response:
                     if response.status != 200:
                         logging.warning(f"❌ GeckoTerminal API статус: {response.status}")
                         return []
@@ -284,75 +233,40 @@ class DexDataClient:
     
     @staticmethod
     async def get_token_info(chain: str, token_address: str) -> Optional[Dict]:
-        """Отримання детальної інформації про токен"""
+        """Отримання детальної інформації про токен через DexScreener"""
         try:
-            if chain == "solana":
-                return await DexDataClient._get_solana_token_info(token_address)
-            elif chain == "bsc":
-                return await DexDataClient._get_bsc_token_info(token_address)
-            else:
-                return None
-                
+            # Використовуємо DexScreener як альтернативу
+            url = f"{Config.DEXSCREENER_API_URL}/tokens/{chain}/{token_address}"
+            
+            logging.info(f"🔗 Отримую інфо токена через DexScreener: {chain}/{token_address}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status != 200:
+                        logging.warning(f"❌ DexScreener статус: {response.status}")
+                        return None
+                    
+                    data = await response.json()
+                    pairs = data.get('pairs', [])
+                    
+                    if pairs:
+                        pair = pairs[0]  # Беремо першу пару
+                        return {
+                            'symbol': pair.get('baseToken', {}).get('symbol', '').upper(),
+                            'name': pair.get('baseToken', {}).get('name', ''),
+                            'price': float(pair.get('priceUsd', 0)),
+                            'volume_24h': float(pair.get('volume', {}).get('h24', 0)),
+                            'market_cap': float(pair.get('marketCap', 0)),
+                            'liquidity': float(pair.get('liquidity', {}).get('usd', 0)),
+                            'price_change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
+                            'chain': chain
+                        }
+                    else:
+                        logging.warning("❌ Не знайдено даних про токен")
+                        return None
+                        
         except Exception as e:
             logging.error(f"❌ Помилка отримання інфо токена: {e}")
-            return None
-    
-    @staticmethod
-    async def _get_solana_token_info(token_address: str) -> Optional[Dict]:
-        """Отримання інформації про токен Solana через GeckoTerminal"""
-        try:
-            url = f"{Config.GEKKOTERM_API_URL}/networks/solana/tokens/{token_address}"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as response:
-                    if response.status != 200:
-                        return None
-                    
-                    data = await response.json()
-                    token_data = data.get('data', {}).get('attributes', {})
-                    
-                    return {
-                        'symbol': token_data.get('symbol', '').upper(),
-                        'name': token_data.get('name', ''),
-                        'price': float(token_data.get('price_usd', 0)),
-                        'volume_24h': float(token_data.get('volume_usd', {}).get('h24', 0)),
-                        'market_cap': float(token_data.get('fdv_usd', 0)),
-                        'liquidity': float(token_data.get('reserve_in_usd', 0)),
-                        'price_change_24h': float(token_data.get('price_change_percentage', {}).get('h24', 0)),
-                        'chain': 'solana'
-                    }
-                        
-        except Exception as e:
-            logging.error(f"❌ Помилка отримання інфо токена Solana: {e}")
-            return None
-    
-    @staticmethod
-    async def _get_bsc_token_info(token_address: str) -> Optional[Dict]:
-        """Отримання інформації про токен BSC через GeckoTerminal"""
-        try:
-            url = f"{Config.GEKKOTERM_API_URL}/networks/bsc/tokens/{token_address}"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as response:
-                    if response.status != 200:
-                        return None
-                    
-                    data = await response.json()
-                    token_data = data.get('data', {}).get('attributes', {})
-                    
-                    return {
-                        'symbol': token_data.get('symbol', '').upper(),
-                        'name': token_data.get('name', ''),
-                        'price': float(token_data.get('price_usd', 0)),
-                        'volume_24h': float(token_data.get('volume_usd', {}).get('h24', 0)),
-                        'market_cap': float(token_data.get('fdv_usd', 0)),
-                        'liquidity': float(token_data.get('reserve_in_usd', 0)),
-                        'price_change_24h': float(token_data.get('price_change_percentage', {}).get('h24', 0)),
-                        'chain': 'bsc'
-                    }
-                        
-        except Exception as e:
-            logging.error(f"❌ Помилка отримання інфо токена BSC: {e}")
             return None
 
 class LBankClient:
@@ -444,9 +358,12 @@ class ArbitrageBot:
         try:
             logging.info("🔗 Перевіряю з'єднання з API...")
             
-            # Перевірка GeckoTerminal API
-            test_trades = await self.dex_client.get_recent_trades("solana", 2)
-            logging.info(f"✅ GeckoTerminal API доступний. Знайдено пулів: {len(test_trades)}")
+            # Перевірка DexScreener API
+            test_info = await self.dex_client.get_token_info("solana", "So11111111111111111111111111111111111111112")
+            if test_info:
+                logging.info(f"✅ DexScreener API доступний")
+            else:
+                logging.warning("⚠️ DexScreener не відповідає")
             
             # Перевірка LBank
             test_price = await self.lbank_client.get_ticker_price("BTC")
