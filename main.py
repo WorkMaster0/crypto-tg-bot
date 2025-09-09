@@ -481,7 +481,7 @@ class ArbitrageBot:
     
     async def process_trade_signal(self, trade: Dict) -> bool:
         """Обробка сигналу про великий пул"""
-        try:
+    try:
         token_address = trade['token_address']
         chain = trade['chain']
         symbol = trade['token_symbol']
