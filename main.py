@@ -499,7 +499,7 @@ class ArbitrageBot:
                 symbol = token_info['symbol']
                 trade['token_symbol'] = symbol
                 logging.info(f"✅ Символ знайдено через детальну інформацію: {symbol}")
-            else:
+        else:
                 logging.warning(f"❌ Не вдалося отримати символ для токена {token_address}")
                 return False
         
