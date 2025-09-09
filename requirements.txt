@@ -10,6 +10,5 @@ python-telegram-bot
 matplotlib
 scikit-learn
 seaborn
-talib-binary
 threading
 logging
