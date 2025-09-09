@@ -480,7 +480,7 @@ class ArbitrageBot:
         telegram_client.send_message("⏹️ Сканування зупинено!")
     
     async def process_trade_signal(self, trade: Dict) -> bool:
-        """Обробка сигналу про великий пул"""
+    """Обробка сигналу про великий пул"""
     try:
         token_address = trade['token_address']
         chain = trade['chain']
@@ -493,13 +493,13 @@ class ArbitrageBot:
             
             # Спробуємо отримати символ через детальну інформацію про пул
             logging.info(f"🔍 Спроба отримати символ через детальну інформацію пулу...")
-        token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
+            token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
             
-        if token_info and token_info.get('symbol'):
+            if token_info and token_info.get('symbol'):
                 symbol = token_info['symbol']
                 trade['token_symbol'] = symbol
                 logging.info(f"✅ Символ знайдено через детальну інформацію: {symbol}")
-        else:
+            else:
                 logging.warning(f"❌ Не вдалося отримати символ для токена {token_address}")
                 return False
         
