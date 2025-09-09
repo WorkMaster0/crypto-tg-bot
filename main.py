@@ -480,7 +480,7 @@ class ArbitrageBot:
         telegram_client.send_message("⏹️ Сканування зупинено!")
     
     async def process_trade_signal(self, trade: Dict) -> bool:
-        """Обробка сигналу про великий пул"""
+    """Обробка сигналу про великий пул"""
     try:
         token_address = trade['token_address']
         chain = trade['chain']
@@ -513,47 +513,47 @@ class ArbitrageBot:
                 return False
         
         self.last_processed[trade_key] = current_time
-            
+        
         logging.info(f"🔍 Обробляю пул: {symbol} на {chain} з обсягом ${trade['amount_usd']:,.2f}")
-            
-            # Отримуємо детальну інформацію про токен
+        
+        # Отримуємо детальну інформацію про токен
         token_info = await self.dex_client.get_token_info(chain, token_address, pool_id)
-            if not token_info:
-                logging.warning(f"❌ Не вдалося отримати інфо для {symbol}")
-                return False
-            
-            # Перевіряємо чи токен підходить під фільтри
-            if not self.token_filter.is_token_allowed(token_info):
-                logging.info(f"⏭️ Токен {symbol} не пройшов фільтрацію")
-                return False
-            
-            # Перевіряємо чи токен доступний на LBank
-            lbank_price = await self.lbank_client.get_ticker_price(token_info['symbol'])
-            if not lbank_price:
-                logging.warning(f"❌ Токен {symbol} не знайдено на LBank")
-                return False
-            
-            # Розміщуємо ордер
-            order_price = round(lbank_price * (1 + Config.PRICE_PREMIUM), 6)
-            order_amount = round(Config.ORDER_VOLUME / order_price, 8)
-            
-            logging.info(f"🛒 Розміщую ордер: {symbol} {order_amount} по ${order_price:.6f}")
-            
-            order_result = await self.lbank_client.place_limit_order(
-                token_info['symbol'],
-                order_price,
-                order_amount
-            )
-            
-            # Відправляємо сповіщення
-            await self.send_trade_notification(trade, token_info, lbank_price, order_price, order_result)
-            
-            logging.info(f"✅ Пул успішно оброблено: {symbol}")
-            return True
-            
-        except Exception as e:
-            logging.error(f"❌ Помилка обробки пулу: {e}")
+        if not token_info:
+            logging.warning(f"❌ Не вдалося отримати інфо для {symbol}")
             return False
+        
+        # Перевіряємо чи токен підходить під фільтри
+        if not self.token_filter.is_token_allowed(token_info):
+            logging.info(f"⏭️ Токен {symbol} не пройшов фільтрацію")
+            return False
+        
+        # Перевіряємо чи токен доступний на LBank
+        lbank_price = await self.lbank_client.get_ticker_price(token_info['symbol'])
+        if not lbank_price:
+            logging.warning(f"❌ Токен {symbol} не знайдено на LBank")
+            return False
+        
+        # Розміщуємо ордер
+        order_price = round(lbank_price * (1 + Config.PRICE_PREMIUM), 6)
+        order_amount = round(Config.ORDER_VOLUME / order_price, 8)
+        
+        logging.info(f"🛒 Розміщую ордер: {symbol} {order_amount} по ${order_price:.6f}")
+        
+        order_result = await self.lbank_client.place_limit_order(
+            token_info['symbol'],
+            order_price,
+            order_amount
+        )
+        
+        # Відправляємо сповіщення
+        await self.send_trade_notification(trade, token_info, lbank_price, order_price, order_result)
+        
+        logging.info(f"✅ Пул успішно оброблено: {symbol}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"❌ Помилка обробки пулу: {e}")
+        return False
     
     async def send_trade_notification(self, trade: Dict, token_info: Dict, 
                                     market_price: float, order_price: float, order_result: Dict):
