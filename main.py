@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import IsolationForest
-from sklearn.cluster import DBSCAN
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import asyncio
@@ -16,6 +15,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 import logging
 import math
+import os
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
@@ -77,6 +77,10 @@ class AdvancedPumpDumpBot:
             data = request.json
             self.update_settings(data)
             return jsonify({'status': 'success'})
+            
+        @self.flask_app.route('/health', methods=['GET'])
+        def health():
+            return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
     
     def setup_handlers(self):
         self.app.add_handler(CommandHandler("start", self.start))
@@ -135,11 +139,6 @@ class AdvancedPumpDumpBot:
             orderbook_response = requests.get(orderbook_url, timeout=10)
             orderbook_data = orderbook_response.json()
             
-            # Trades data for recent activity
-            trades_url = f"https://api.binance.com/api/v3/trades?symbol={symbol}USDT&limit=50"
-            trades_response = requests.get(trades_url, timeout=10)
-            trades_data = trades_response.json()
-            
             return {
                 'symbol': symbol,
                 'price': float(data['lastPrice']),
@@ -149,8 +148,7 @@ class AdvancedPumpDumpBot:
                 'low': float(data['lowPrice']),
                 'quote_volume': float(data['quoteVolume']),
                 'klines': klines_data,
-                'orderbook': orderbook_data,
-                'trades': trades_data
+                'orderbook': orderbook_data
             }
         except Exception as e:
             logger.error(f"Error getting market data for {symbol}: {e}")
@@ -176,19 +174,25 @@ class AdvancedPumpDumpBot:
         
         return rsi
 
+    def calculate_ema(self, data: np.ndarray, period: int) -> float:
+        """Експоненційна ковзна середня"""
+        if len(data) < period:
+            return np.mean(data) if len(data) > 0 else 0
+        
+        weights = np.exp(np.linspace(-1., 0., period))
+        weights /= weights.sum()
+        
+        # Використовуємо згортку для EMA
+        ema = np.convolve(data, weights, mode='valid')
+        return ema[-1] if len(ema) > 0 else np.mean(data)
+
     def calculate_macd(self, prices: np.ndarray, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> float:
         """Власна реалізація MACD"""
         if len(prices) < slow_period + signal_period:
             return 0.0
         
-        # EMA для швидкого періоду
-        def ema(data, period):
-            weights = np.exp(np.linspace(-1., 0., period))
-            weights /= weights.sum()
-            return np.convolve(data, weights, mode='valid')[-1]
-        
-        fast_ema = ema(prices[-fast_period:], fast_period)
-        slow_ema = ema(prices[-slow_period:], slow_period)
+        fast_ema = self.calculate_ema(prices, fast_period)
+        slow_ema = self.calculate_ema(prices, slow_period)
         macd_line = fast_ema - slow_ema
         
         return macd_line
@@ -234,7 +238,7 @@ class AdvancedPumpDumpBot:
         
         # Price changes
         price_change_1h = ((closes[-1] - closes[-12]) / closes[-12]) * 100 if len(closes) >= 12 else 0
-        price_change_5m = ((closes[-1] - closes[-1]) / closes[-2]) * 100 if len(closes) >= 2 else 0
+        price_change_5m = ((closes[-1] - closes[-2]) / closes[-2]) * 100 if len(closes) >= 2 else 0
         
         return {
             'rsi': rsi,
@@ -281,9 +285,9 @@ class AdvancedPumpDumpBot:
         
         # Whale detection
         whale_volume = self.detect_whale_orders(market_data['orderbook'])
-        if whale_volume > market_data['quote_volume'] * 0.01:
+        if whale_volume > 50000:  # $50k+ whale order
             score += 0.1
-            signals.append(f"Whale order: ${whale_volume:,.0f}")
+            signals.append(f"Whale: ${whale_volume:,.0f}")
         
         return {'score': min(score, 1.0), 'signals': signals, 'confidence': 'high' if score > 0.6 else 'medium'}
 
@@ -364,17 +368,6 @@ class AdvancedPumpDumpBot:
         
         return current_price < support_level * 0.99  # 1% below support
 
-    def detect_volume_spike(self, volumes: np.ndarray, window: int = 20) -> bool:
-        """Detect unusual volume spikes"""
-        if len(volumes) < window + 1:
-            return False
-        
-        current_volume = volumes[-1]
-        avg_volume = np.mean(volumes[-window:-1])
-        std_volume = np.std(volumes[-window:-1])
-        
-        return current_volume > (avg_volume + 2 * std_volume)
-
     async def scan_top_coins(self, scan_type: str = 'both'):
         try:
             response = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
@@ -383,7 +376,7 @@ class AdvancedPumpDumpBot:
             usdt_pairs = [x for x in all_data if x['symbol'].endswith('USDT')]
             sorted_by_volume = sorted(usdt_pairs, 
                                     key=lambda x: float(x['volume']), 
-                                    reverse=True)[:100]  # Топ 100 по об'єму
+                                    reverse=True)[:50]  # Топ 50 по об'єму
             
             results = {'pump': [], 'dump': []}
             
@@ -507,15 +500,15 @@ class AdvancedPumpDumpBot:
             blacklist_msg = "🚫 Чорний список:\n" + "\n".join(self.coin_blacklist) if self.coin_blacklist else "Чорний список порожній"
             await update.message.reply_text(blacklist_msg)
 
-    async def scan_job(self, context: ContextTypes.DEFAULT_TYPE):
-        """Фонова задача сканування"""
-        results = await self.scan_top_coins('both')
-        
-        # Відправка топ-3 сигналів для кожного типу
-        for signal_type in ['pump', 'dump']:
-            for signal in results[signal_type][:3]:
-                await self.send_alert(context, signal, signal_type)
-                await asyncio.sleep(1)
+    async def manual_scan_job(self):
+        """Ручне сканування без JobQueue"""
+        while True:
+            try:
+                # Тут можна додати логіку для періодичного сканування
+                await asyncio.sleep(300)  # Спати 5 хвилин
+            except Exception as e:
+                logger.error(f"Manual scan error: {e}")
+                await asyncio.sleep(60)
 
     def handle_webhook(self, data: Dict) -> str:
         """Обробка вебхук запитів"""
@@ -572,7 +565,8 @@ class AdvancedPumpDumpBot:
 
     def run_flask(self):
         """Запуск Flask сервера"""
-        self.flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+        port = int(os.environ.get('PORT', 5000))
+        self.flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
     def run(self):
         """Запуск бота"""
@@ -581,17 +575,18 @@ class AdvancedPumpDumpBot:
         flask_thread.start()
         
         print("🤖 Бот запущений...")
-        print("🌐 Flask сервер запущений на порті 5000")
-        print("📊 Доступні endpoints: /webhook, /stats, /update_settings")
+        print("🌐 Flask сервер запущений")
+        print("📊 Доступні endpoints: /webhook, /stats, /update_settings, /health")
         
-        # Додавання фонової задачі
-        job_queue = self.app.job_queue
-        job_queue.run_repeating(self.scan_job, interval=300, first=10)  # Сканування кожні 5 хвилин
+        # Запуск ручного сканування в окремому потоці
+        scan_thread = threading.Thread(target=lambda: asyncio.run(self.manual_scan_job()), daemon=True)
+        scan_thread.start()
         
+        # Запуск Telegram бота
         self.app.run_polling()
 
 # Використання
 if __name__ == "__main__":
-    TOKEN = "8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g"
+    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g")
     bot = AdvancedPumpDumpBot(TOKEN)
     bot.run()
