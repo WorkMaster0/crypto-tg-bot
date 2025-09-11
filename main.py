@@ -726,14 +726,17 @@ def run_flask(app: Flask):
     except Exception as e:
         logger.error(f"Помилка запуску Flask: {e}")
 
+# ... (весь попередній код залишається без змін) ...
+
 def main():
     """Головна функція запуску бота"""
     try:
         # Отримання токену бота
         BOT_TOKEN = os.getenv('BOT_TOKEN') or '8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g'
         
-        if BOT_TOKEN == '8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g':
-            logger.error("❌ Будь ласка, встановіть ваш Telegram Bot Token")
+        # Перевірка, чи токен не є дефолтним (якщо хтось забув його змінити)
+        if BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE' or not BOT_TOKEN:
+            logger.error("❌ Будь ласка, встановіть ваш Telegram Bot Token у змінну середовища BOT_TOKEN")
             return
 
         # Ініціалізація бота
