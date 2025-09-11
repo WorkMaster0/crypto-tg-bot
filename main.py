@@ -684,7 +684,7 @@ class AdvancedPumpDumpBot:
             logger.error(f"Помилка команди debug: {e}")
 
     async def orderbook_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробка команди /orderbook <symbol> - автоматичний аналіз великих ордерів"""
+        """Обробка команди /orderbook <symbol> - автоматичний аналіз великих ордерів"""
     try:
         if not context.args:
             await update.message.reply_text("ℹ️ Вкажіть символ монети. Наприклад: /orderbook BTC")
