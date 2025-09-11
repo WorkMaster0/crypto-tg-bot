@@ -730,9 +730,9 @@ def main():
     """Головна функція запуску бота"""
     try:
         # Отримання токену бота
-        BOT_TOKEN = os.getenv('BOT_TOKEN') or 'YOUR_TELEGRAM_BOT_TOKEN_HERE'
+        BOT_TOKEN = os.getenv('BOT_TOKEN') or '8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g'
         
-        if BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE':
+        if BOT_TOKEN == '8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g':
             logger.error("❌ Будь ласка, встановіть ваш Telegram Bot Token")
             return
 
