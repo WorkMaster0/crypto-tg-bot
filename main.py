@@ -170,7 +170,19 @@ class AdvancedPumpDumpBot:
                 'price_change_percentage': '24h'
             }
             
-            response = requests.get(url, params=params, timeout=10)
+            # Додаємо headers для уникнення rate limiting
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+            }
+            
+            response = requests.get(url, params=params, headers=headers, timeout=15)
+            
+            # Обробка rate limiting
+            if response.status_code == 429:
+                logger.warning("⚠️ CoinGecko rate limit reached, using Binance fallback")
+                return await self.get_top_gainers_binance(limit)
+                
             response.raise_for_status()
             data = response.json()
             
@@ -184,7 +196,8 @@ class AdvancedPumpDumpBot:
                         'price': coin['current_price'],
                         'change_24h': coin['price_change_percentage_24h'],
                         'volume': coin['total_volume'],
-                        'market_cap': coin['market_cap']
+                        'market_cap': coin['market_cap'],
+                        'usd_price': coin['current_price']
                     })
             
             return gainers
@@ -221,7 +234,8 @@ class AdvancedPumpDumpBot:
                     'price': float(coin['lastPrice']),
                     'change_24h': float(coin['priceChangePercent']),
                     'volume': float(coin['volume']),
-                    'quote_volume': float(coin['quoteVolume'])
+                    'quote_volume': float(coin['quoteVolume']),
+                    'usd_price': float(coin['lastPrice'])
                 })
             
             return gainers
@@ -233,6 +247,9 @@ class AdvancedPumpDumpBot:
     async def get_market_data(self, symbol: str) -> Optional[Dict]:
         """Отримання ринкових даних для символу"""
         try:
+            # Затримка для уникнення rate limiting
+            await asyncio.sleep(0.5)
+            
             if self.is_garbage_symbol(symbol):
                 return None
             
@@ -398,7 +415,7 @@ class AdvancedPumpDumpBot:
             lows = np.array([float(x[3]) for x in klines_data])
             volumes = np.array([float(x[5]) for x in klines_data])
             
-            # Базові індикатори
+            # Базові індикаторы
             rsi = self.calculate_rsi(closes)
             macd = self.calculate_macd(closes)
             
@@ -546,6 +563,44 @@ class AdvancedPumpDumpBot:
         wick_ratio = avg_lower_wick / (avg_upper_wick + avg_lower_wick)
         return round(wick_ratio, 4)
 
+    def analyze_coin(self, market_data: Dict) -> Dict:
+        """Аналіз монети на потенційний сигнал"""
+        try:
+            # Базовий аналіз
+            indicators = self.calculate_advanced_indicators(market_data['klines'].get('5m', []))
+            
+            # Аналіз orderbook
+            orderbook = market_data['orderbook']
+            imbalance = orderbook.get('imbalance', 0)
+            
+            # Перевірка умов
+            is_potential = (
+                indicators.get('rsi', 50) > self.pump_thresholds['rsi_overbought'] and
+                imbalance > self.pump_thresholds['orderbook_imbalance_threshold'] and
+                market_data['quote_volume'] > self.pump_thresholds['min_volume']
+            )
+            
+            # Розрахунок впевненості
+            confidence = 0
+            if is_potential:
+                confidence = min(90, (
+                    (indicators.get('rsi', 0) - 70) * 2 +
+                    imbalance * 100 +
+                    min(1, market_data['quote_volume'] / self.pump_thresholds['min_volume']) * 30
+                ))
+            
+            return {
+                'is_potential_signal': is_potential,
+                'confidence': confidence,
+                'rsi': indicators.get('rsi'),
+                'imbalance': imbalance,
+                'volume': market_data['quote_volume']
+            }
+            
+        except Exception as e:
+            logger.error(f"Помилка аналізу монети: {e}")
+            return {'is_potential_signal': False, 'confidence': 0}
+
     async def scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробка команди /scan"""
         try:
@@ -557,14 +612,47 @@ class AdvancedPumpDumpBot:
                 return
                 
             signals_found = 0
+            signal_messages = []
+            
             for coin in gainers[:5]:  # Скануємо топ-5 для швидкості
-                market_data = await self.get_market_data(coin['symbol'])
-                if market_data:
-                    # Тут має бути ваша логіка аналізу
-                    signals_found += 1
+                try:
+                    market_data = await self.get_market_data(coin['symbol'])
+                    if market_data:
+                        # Аналізуємо дані
+                        analysis_result = self.analyze_coin(market_data)
+                        
+                        if analysis_result['is_potential_signal']:
+                            signals_found += 1
+                            signal_message = (
+                                f"🚀 **Потенційний сигнал: {coin['symbol']}**\n"
+                                f"• Ціна: ${market_data['price']:.6f}\n"
+                                f"• Зміна 24h: {coin['change_24h']:.2f}%\n"
+                                f"• Об'єм: ${market_data['quote_volume']:,.0f}\n"
+                                f"• RSI: {analysis_result.get('rsi', 'N/A')}\n"
+                                f"• Imbalance: {analysis_result.get('imbalance', 0):.4f}\n"
+                                f"• Вірогідність: {analysis_result['confidence']:.1f}%"
+                            )
+                            signal_messages.append(signal_message)
+                            
+                except Exception as e:
+                    logger.error(f"Помилка аналізу {coin['symbol']}: {e}")
+                    continue
             
-            await update.message.reply_text(f"✅ Сканування завершено. Знайдено {signals_found} потенційних сигналів.")
-            
+            # Відправляємо результати
+            if signals_found > 0:
+                result_message = f"✅ Сканування завершено. Знайдено {signals_found} потенційних сигналів:\n\n"
+                result_message += "\n\n".join(signal_messages)
+            else:
+                result_message = "❌ Потенційних сигналів не знайдено. Спробуйте пізніше."
+                
+            # Розбиваємо повідомлення якщо занадто довге
+            if len(result_message) > 4000:
+                parts = [result_message[i:i+4000] for i in range(0, len(result_message), 4000)]
+                for part in parts:
+                    await update.message.reply_text(part, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(result_message, parse_mode='Markdown')
+                
         except Exception as e:
             logger.error(f"Помилка сканування: {e}")
             await update.message.reply_text("❌ Помилка під час сканування")
@@ -726,16 +814,13 @@ def run_flask(app: Flask):
     except Exception as e:
         logger.error(f"Помилка запуску Flask: {e}")
 
-# ... (весь попередній код залишається без змін) ...
-
 def main():
     """Головна функція запуску бота"""
     try:
         # Отримання токену бота
-        BOT_TOKEN = os.getenv('BOT_TOKEN') or '8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g'
+        BOT_TOKEN = os.getenv('BOT_TOKEN')
         
-        # Перевірка, чи токен не є дефолтним (якщо хтось забув його змінити)
-        if BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE' or not BOT_TOKEN:
+        if not BOT_TOKEN:
             logger.error("❌ Будь ласка, встановіть ваш Telegram Bot Token у змінну середовища BOT_TOKEN")
             return
 
@@ -756,13 +841,16 @@ def main():
         logger.info("🤖 Starting Telegram bot...")
         bot.app.run_polling(
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False
         )
         
     except KeyboardInterrupt:
         logger.info("⏹️ Bot stopped by user")
     except Exception as e:
         logger.error(f"❌ Critical error: {e}")
+        # Чекаємо перед перезапуском
+        time.sleep(10)
         raise
 
 if __name__ == '__main__':
