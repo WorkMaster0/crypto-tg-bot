@@ -58,10 +58,10 @@ class AdvancedPumpDumpBot:
             'rsi_threshold': 62,
             'buy_pressure_ratio': 1.3,
             'macd_signal': 0.0008,
-            'min_volume': 100000,           # Збільшено мінімальний об'єм
-            'max_volume': 10000000,         # Збільшено максимальний об'єм
-            'min_market_cap': 1000000,      # Мінімальна капіталізація $1M
-            'max_market_cap': 500000000,    # Максимальна капіталізація $500M
+            'min_volume': 100000,
+            'max_volume': 10000000,
+            'min_market_cap': 1000000,
+            'max_market_cap': 500000000,
             'liquidity_score': 0.7,
             'volatility_ratio': 2.0
         }
@@ -75,10 +75,10 @@ class AdvancedPumpDumpBot:
             'rsi_threshold': 38,
             'sell_pressure_ratio': 1.4,
             'macd_signal': -0.0007,
-            'min_volume': 100000,           # Збільшено мінімальний об'єм
-            'max_volume': 10000000,         # Збільшено максимальний об'єм
-            'min_market_cap': 1000000,      # Мінімальна капіталізація $1M
-            'max_market_cap': 500000000,    # Максимальна капіталізація $500M
+            'min_volume': 100000,
+            'max_volume': 10000000,
+            'min_market_cap': 1000000,
+            'max_market_cap': 500000000,
             'liquidity_score': 0.7,
             'volatility_ratio': 1.8
         }
@@ -138,6 +138,36 @@ class AdvancedPumpDumpBot:
         self.app.add_handler(CommandHandler("analysis", self.market_analysis_command))
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
 
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        keyboard = [
+            [InlineKeyboardButton("🔍 Сканувати зараз", callback_data="scan_now")],
+            [InlineKeyboardButton("⚙️ Налаштування", callback_data="settings")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+            [InlineKeyboardButton("🚫 Чорний список", callback_data="blacklist")],
+            [InlineKeyboardButton("🐋 Whale Alert", callback_data="whale_alert")],
+            [InlineKeyboardButton("📈 ТОП сигнали", callback_data="top_signals")],
+            [InlineKeyboardButton("📋 Аналіз ринку", callback_data="market_analysis")],
+            [InlineKeyboardButton("🏆 Продуктивність", callback_data="performance")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🤖 **ULTIMATE PUMP & DUMP DETECTOR**\n\n"
+            "🚀 *Найрозумніший бот для виявлення пампів та дампів*\n\n"
+            "✨ **Унікальні можливості:**\n"
+            "• 🎯 AI-детекція аномалій об'єму\n"
+            "• 📊 Мультитаймфреймний аналіз\n"
+            "• 🐋 Whale order detection\n"
+            "• 🔮 Прогнозування трендів\n"
+            "• 📈 RSI + MACD + Bollinger Bands\n"
+            "• 🌊 Liquidity analysis\n"
+            "• ⚡ Real-time alerts\n"
+            "• 📱 Smart notifications\n\n"
+            "💎 *Створено AI для максимальної ефективності*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
     def is_garbage_symbol(self, symbol: str) -> bool:
         """Перевіряє чи символ є сміттям"""
         symbol = symbol.upper()
@@ -162,15 +192,12 @@ class AdvancedPumpDumpBot:
     async def estimate_market_cap(self, symbol: str, current_price: float, volume: float) -> float:
         """Оцінка ринкової капіталізації"""
         try:
-            # Для більших монет використовуємо більш консервативний множник
-            multiplier = 20  # Для монет з капою 1M-500M
-            
-            # Корекція множника в залежності від об'єму
-            if volume > 5000000:  # Об'єм понад 5M USDT
+            multiplier = 20
+            if volume > 5000000:
                 multiplier = 15
-            elif volume > 2000000:  # Об'єм понад 2M USDT
+            elif volume > 2000000:
                 multiplier = 18
-            elif volume < 500000:  # Об'єм менше 500K USDT
+            elif volume < 500000:
                 multiplier = 25
                 
             estimated_cap = current_price * volume * multiplier
@@ -196,19 +223,16 @@ class AdvancedPumpDumpBot:
             price_change = float(data['priceChangePercent'])
             current_price = float(data['lastPrice'])
             
-            # Оцінка капіталізації
             market_cap = await self.estimate_market_cap(symbol, current_price, quote_volume)
             
-            # Фільтрація за капіталізацією (1M - 500M)
             if (market_cap < self.pump_thresholds['min_market_cap'] or 
                 market_cap > self.pump_thresholds['max_market_cap']):
                 logger.info(f"Пропускаємо {symbol} через капіталізацію: ${market_cap:,.0f}")
                 return None
             
-            # Фільтрація за об'ємом та зміною ціни
             if (quote_volume < self.pump_thresholds['min_volume'] or 
                 quote_volume > self.pump_thresholds['max_volume'] or
-                abs(price_change) < 3.0):  # Зменшено мінімальну зміну ціни
+                abs(price_change) < 3.0):
                 return None
             
             klines_data = {}
@@ -249,11 +273,135 @@ class AdvancedPumpDumpBot:
             logger.error(f"Помилка отримання даних для {symbol}: {e}")
             return None
 
-    # Решта методів залишаються незмінними (calculate_rsi, calculate_ema, calculate_macd, etc.)
-    # ... [всі технічні функції] ...
+    def calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
+        if len(prices) < period + 1:
+            return 50.0
+        
+        try:
+            deltas = np.diff(prices)
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            
+            avg_gain = np.mean(gains[-period:])
+            avg_loss = np.mean(losses[-period:])
+            
+            if avg_loss == 0:
+                return 100.0
+            
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            
+            return rsi
+        except Exception as e:
+            logger.error(f"Помилка розрахунку RSI: {e}")
+            return 50.0
+
+    def calculate_ema(self, data: np.ndarray, period: int) -> float:
+        if len(data) < period:
+            return np.mean(data) if len(data) > 0 else 0
+        
+        try:
+            weights = np.exp(np.linspace(-1., 0., period))
+            weights /= weights.sum()
+            
+            ema = np.convolve(data, weights, mode='valid')
+            return ema[-1] if len(ema) > 0 else np.mean(data)
+        except Exception as e:
+            logger.error(f"Помилка розрахунку EMA: {e}")
+            return np.mean(data)
+
+    def calculate_macd(self, prices: np.ndarray, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> float:
+        if len(prices) < slow_period:
+            return 0.0
+        
+        try:
+            fast_ema = self.calculate_ema(prices, fast_period)
+            slow_ema = self.calculate_ema(prices, slow_period)
+            macd_line = fast_ema - slow_ema
+            
+            return macd_line
+        except Exception as e:
+            logger.error(f"Помилка розрахунку MACD: {e}")
+            return 0.0
+
+    def calculate_bollinger_bands(self, prices: np.ndarray, period: int = 20, std_dev: int = 2) -> Tuple[float, float, float]:
+        if len(prices) < period:
+            return prices[-1], prices[-1], prices[-1]
+        
+        try:
+            sma = np.mean(prices[-period:])
+            std = np.std(prices[-period:])
+            
+            upper_band = sma + (std * std_dev)
+            lower_band = sma - (std * std_dev)
+            
+            return upper_band, sma, lower_band
+        except Exception as e:
+            logger.error(f"Помилка розрахунку Bollinger Bands: {e}")
+            return prices[-1], prices[-1], prices[-1]
+
+    def calculate_sma(self, data: np.ndarray, period: int) -> float:
+        if len(data) < period:
+            return np.mean(data) if len(data) > 0 else 0
+        
+        try:
+            return np.mean(data[-period:])
+        except Exception as e:
+            logger.error(f"Помилка розрахунку SMA: {e}")
+            return np.mean(data)
+
+    def calculate_advanced_indicators(self, klines_data: List) -> Dict:
+        try:
+            closes = np.array([float(x[4]) for x in klines_data])
+            volumes = np.array([float(x[5]) for x in klines_data])
+            
+            rsi = self.calculate_rsi(closes)
+            macd = self.calculate_macd(closes)
+            upper_bb, middle_bb, lower_bb = self.calculate_bollinger_bands(closes)
+            
+            volatility = np.std(closes[-20:]) / np.mean(closes[-20:]) if len(closes) >= 20 else 0
+            
+            volume_sma = self.calculate_sma(volumes, 20)
+            volume_ratio = volumes[-1] / volume_sma if volume_sma > 0 else 1
+            
+            return {
+                'rsi': rsi,
+                'macd': macd,
+                'bb_upper': upper_bb,
+                'bb_middle': middle_bb,
+                'bb_lower': lower_bb,
+                'volatility': volatility,
+                'volume_ratio': volume_ratio,
+                'current_price': closes[-1],
+                'price_5m_ago': closes[-6] if len(closes) >= 6 else closes[0],
+                'price_1h_ago': closes[-12] if len(closes) >= 12 else closes[0]
+            }
+            
+        except Exception as e:
+            logger.error(f"Помилка розрахунку індикаторів: {e}")
+            return {}
+
+    def analyze_orderbook(self, orderbook: Dict) -> Dict:
+        try:
+            bids = np.array([float(bid[1]) for bid in orderbook['bids'][:5]])
+            asks = np.array([float(ask[1]) for ask in orderbook['asks'][:5]])
+            
+            total_bids = np.sum(bids)
+            total_asks = np.sum(asks)
+            
+            buy_pressure = total_bids / total_asks if total_asks > 0 else 1
+            sell_pressure = total_asks / total_bids if total_bids > 0 else 1
+            
+            return {
+                'buy_pressure': buy_pressure,
+                'sell_pressure': sell_pressure,
+                'imbalance': abs(total_bids - total_asks) / (total_bids + total_asks) if (total_bids + total_asks) > 0 else 0
+            }
+        except Exception as e:
+            logger.error(f"Помилка аналізу стакану: {e}")
+            return {'buy_pressure': 1.0, 'sell_pressure': 1.0, 'imbalance': 0.0}
 
     async def scan_for_pump_dump(self):
-        """Основна функція сканування"""
         try:
             start_time = time.time()
             
@@ -266,12 +414,11 @@ class AdvancedPumpDumpBot:
                 and not self.is_garbage_symbol(x['symbol'].replace('USDT', ''))
             ]
             
-            # Сортуємо за абсолютною зміною ціни (найбільші рухи)
             sorted_by_change = sorted(
                 usdt_pairs,
                 key=lambda x: abs(float(x['priceChangePercent'])),
                 reverse=True
-            )[:50]  # Топ 50 за зміною ціни
+            )[:50]
             
             results = {'pump': [], 'dump': []}
             
@@ -327,11 +474,67 @@ class AdvancedPumpDumpBot:
             logger.error(f"Помилка сканування: {e}")
             return {'pump': [], 'dump': []}
 
-    # Решта методів залишаються незмінними (calculate_pump_score, calculate_dump_score, etc.)
-    # ... [всі інші функції] ...
+    def calculate_pump_score(self, market_data: Dict, indicators: Dict) -> float:
+        score = 0.0
+        
+        try:
+            if indicators.get('volume_ratio', 1) > self.pump_thresholds['volume_ratio']:
+                score += 0.25
+            
+            price_change_5m = ((indicators['current_price'] - indicators['price_5m_ago']) / 
+                             indicators['price_5m_ago']) * 100
+            if price_change_5m > self.pump_thresholds['price_change_5m']:
+                score += 0.20
+            
+            if indicators.get('rsi', 50) > self.pump_thresholds['rsi_threshold']:
+                score += 0.15
+            
+            ob_analysis = self.analyze_orderbook(market_data['orderbook'])
+            if ob_analysis['buy_pressure'] > self.pump_thresholds['buy_pressure_ratio']:
+                score += 0.20
+            
+            if indicators.get('volatility', 0) > 0.02:
+                score += 0.10
+            
+            if market_data['price_change_24h'] > self.pump_thresholds['price_change_24h']:
+                score += 0.10
+                
+        except Exception as e:
+            logger.error(f"Помилка розрахунку pump score: {e}")
+        
+        return min(score, 1.0)
+
+    def calculate_dump_score(self, market_data: Dict, indicators: Dict) -> float:
+        score = 0.0
+        
+        try:
+            if indicators.get('volume_ratio', 1) > self.dump_thresholds['volume_ratio']:
+                score += 0.25
+            
+            price_change_5m = ((indicators['current_price'] - indicators['price_5m_ago']) / 
+                             indicators['price_5m_ago']) * 100
+            if price_change_5m < self.dump_thresholds['price_change_5m']:
+                score += 0.20
+            
+            if indicators.get('rsi', 50) < self.dump_thresholds['rsi_threshold']:
+                score += 0.15
+            
+            ob_analysis = self.analyze_orderbook(market_data['orderbook'])
+            if ob_analysis['sell_pressure'] > self.dump_thresholds['sell_pressure_ratio']:
+                score += 0.20
+            
+            if indicators.get('volatility', 0) > 0.02:
+                score += 0.10
+            
+            if market_data['price_change_24h'] < self.dump_thresholds['price_change_24h']:
+                score += 0.10
+                
+        except Exception as e:
+            logger.error(f"Помилка розрахунку dump score: {e}")
+        
+        return min(score, 1.0)
 
     async def scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда сканування"""
         await update.message.reply_text("🔍 Запускаю сканування топ монет за зміною ціни...")
         results = await self.scan_for_pump_dump()
         
@@ -351,7 +554,6 @@ class AdvancedPumpDumpBot:
         await update.message.reply_text(message, parse_mode='Markdown')
 
     async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда налаштувань"""
         settings_msg = "⚙️ **Поточні налаштування**\n\n"
         
         settings_msg += "🚀 **Pump Detection:**\n"
@@ -371,7 +573,6 @@ class AdvancedPumpDumpBot:
         await update.message.reply_text(settings_msg, parse_mode='Markdown')
 
     async def blacklist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда чорного списку"""
         if context.args:
             coin = context.args[0].upper()
             if coin in self.coin_blacklist:
@@ -389,7 +590,6 @@ class AdvancedPumpDumpBot:
             await update.message.reply_text(blacklist_msg)
 
     async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда дебагу"""
         await update.message.reply_text("🛠️ Режим дебагу...")
         
         test_symbol = "BTC"
@@ -401,6 +601,7 @@ class AdvancedPumpDumpBot:
             message = f"🔧 **Дебаг для {test_symbol}:**\n"
             message += f"• Ціна: ${market_data['price']}\n"
             message += f"• Об'єм: {market_data['quote_volume']:,.0f} USDT\n"
+            message += f"• Капіталізація: ${market_data['market_cap']:,.0f}\n"
             message += f"• 24h зміна: {market_data['price_change_24h']:.1f}%\n"
             message += f"• RSI: {indicators.get('rsi', 0):.1f}\n"
             message += f"• Volume ratio: {indicators.get('volume_ratio', 0):.2f}x"
@@ -410,7 +611,6 @@ class AdvancedPumpDumpBot:
             await update.message.reply_text("❌ Не вдалося отримати дані")
 
     async def whale_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда whale alert"""
         await update.message.reply_text(
             "🐋 **Whale Alert System**\n\n"
             "• Мінімальний ордер: $50,000\n"
@@ -421,7 +621,6 @@ class AdvancedPumpDumpBot:
         )
 
     async def top_signals_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда топ сигналів"""
         if not self.last_signals:
             await update.message.reply_text("📊 Ще немає збережених сигналів")
             return
@@ -435,7 +634,6 @@ class AdvancedPumpDumpBot:
         await update.message.reply_text(message)
 
     async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда продуктивності"""
         perf_msg = "🏆 **Статистика продуктивності**\n\n"
         perf_msg += f"• 📊 Всього сканувань: {self.performance_stats['total_scans']}\n"
         perf_msg += f"• 📈 Знайдено сигналів: {self.performance_stats['signals_found']}\n"
@@ -445,7 +643,6 @@ class AdvancedPumpDumpBot:
         await update.message.reply_text(perf_msg, parse_mode='Markdown')
 
     async def market_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда аналізу ринку"""
         analysis_msg = "📈 **Аналіз ринку**\n\n"
         
         try:
@@ -465,7 +662,6 @@ class AdvancedPumpDumpBot:
         await update.message.reply_text(analysis_msg, parse_mode='Markdown')
 
     def handle_webhook(self, data: Dict) -> str:
-        """Обробка вебхук запитів"""
         try:
             if data.get('type') == 'manual_scan':
                 results = asyncio.run(self.scan_for_pump_dump())
@@ -478,7 +674,6 @@ class AdvancedPumpDumpBot:
             return jsonify({'error': str(e)})
 
     def update_settings(self, new_settings: Dict):
-        """Оновлення налаштувань"""
         if 'pump' in new_settings:
             self.pump_thresholds.update(new_settings['pump'])
         if 'dump' in new_settings:
@@ -551,12 +746,10 @@ class AdvancedPumpDumpBot:
             await self.performance_command(update, context)
 
     def run_flask(self):
-        """Запуск Flask сервера"""
         port = int(os.environ.get('PORT', 5000))
         self.flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
     def run(self):
-        """Запуск бота"""
         print("🤖 Запуск ULTIMATE PUMP/DUMP BOT...")
         print("🎯 Спеціалізація: Памп/дамп стратегії")
         print("📊 Сканування: Топ монети за зміною ціни")
@@ -568,7 +761,6 @@ class AdvancedPumpDumpBot:
         
         self.app.run_polling()
 
-# Використання
 if __name__ == "__main__":
     TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not TOKEN:
