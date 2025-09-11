@@ -58,8 +58,8 @@ class AdvancedPumpDumpBot:
             'rsi_threshold': 62,
             'buy_pressure_ratio': 1.3,
             'macd_signal': 0.0008,
-            'min_volume': 50000,
-            'max_volume': 5000000,
+            'min_volume': 1000000,
+            'max_volume': 50000000,
             'market_cap_max': 100000000,
             'liquidity_score': 0.7,
             'volatility_ratio': 2.0
@@ -74,8 +74,8 @@ class AdvancedPumpDumpBot:
             'rsi_threshold': 38,
             'sell_pressure_ratio': 1.4,
             'macd_signal': -0.0007,
-            'min_volume': 50000,
-            'max_volume': 5000000,
+            'min_volume': 1000000,
+            'max_volume': 50000000,
             'market_cap_max': 100000000,
             'liquidity_score': 0.7,
             'volatility_ratio': 1.8
