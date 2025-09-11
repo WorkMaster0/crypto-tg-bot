@@ -555,7 +555,7 @@ class AdvancedPumpDumpBot:
         port = int(os.environ.get('PORT', 5000))
         self.flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-        def run(self):
+    def run(self):
         """Запуск бота"""
         print("🤖 Запуск ULTIMATE PUMP/DUMP BOT...")
         print("🎯 Спеціалізація: Памп/дамп стратегії")
