@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import asyncio
@@ -15,10 +16,9 @@ import json
 from typing import Dict, List, Optional, Tuple
 import logging
 import math
-import os
 
 # Налаштування логування
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class AdvancedPumpDumpBot:
@@ -30,22 +30,25 @@ class AdvancedPumpDumpBot:
         
         # Пороги для пампу
         self.pump_thresholds = {
-            'volume_ratio': 3.0,  # Зменшено для тестування
-            'price_change_1h': 5.0,
-            'price_change_5m': 2.0,
-            'rsi_threshold': 60,
-            'buy_pressure_ratio': 1.2,
-            'macd_signal': 0.0005
+            'volume_ratio': 5.0,
+            'price_change_1h': 8.0,
+            'price_change_5m': 3.0,
+            'market_cap_min': 500000,
+            'liquidity_min': 50000,
+            'rsi_threshold': 65,
+            'buy_pressure_ratio': 1.5,
+            'macd_signal': 0.001
         }
         
         # Пороги для дампу
         self.dump_thresholds = {
-            'volume_ratio': 2.5,
-            'price_change_1h': -4.0,
-            'price_change_5m': -1.5,
-            'rsi_threshold': 40,
-            'sell_pressure_ratio': 1.5,
-            'macd_signal': -0.0005
+            'volume_ratio': 4.0,
+            'price_change_1h': -6.0,
+            'price_change_5m': -2.5,
+            'rsi_threshold': 35,
+            'sell_pressure_ratio': 1.8,
+            'support_break': True,
+            'macd_signal': -0.001
         }
         
         self.coin_blacklist = set()
@@ -74,17 +77,12 @@ class AdvancedPumpDumpBot:
             data = request.json
             self.update_settings(data)
             return jsonify({'status': 'success'})
-            
-        @self.flask_app.route('/health', methods=['GET'])
-        def health():
-            return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
     
     def setup_handlers(self):
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(CommandHandler("scan", self.scan_command))
         self.app.add_handler(CommandHandler("settings", self.settings_command))
         self.app.add_handler(CommandHandler("blacklist", self.blacklist_command))
-        self.app.add_handler(CommandHandler("debug", self.debug_command))
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,17 +112,10 @@ class AdvancedPumpDumpBot:
 
     async def get_market_data(self, symbol: str) -> Optional[Dict]:
         try:
-            logger.info(f"Отримання даних для {symbol}")
-            
             # Основні дані
             url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
             response = requests.get(url, timeout=10)
             data = response.json()
-            
-            # Перевірка на помилку API
-            if 'code' in data:
-                logger.warning(f"API помилка для {symbol}: {data}")
-                return None
             
             # Клайнси для різних таймфреймів
             timeframes = {
@@ -140,11 +131,16 @@ class AdvancedPumpDumpBot:
                 klines_data[tf] = klines_response.json()
             
             # Order book data
-            orderbook_url = f"https://api.binance.com/api/v3/depth?symbol={symbol}USDT&limit=10"
+            orderbook_url = f"https://api.binance.com/api/v3/depth?symbol={symbol}USDT&limit=20"
             orderbook_response = requests.get(orderbook_url, timeout=10)
             orderbook_data = orderbook_response.json()
             
-            market_data = {
+            # Trades data for recent activity
+            trades_url = f"https://api.binance.com/api/v3/trades?symbol={symbol}USDT&limit=50"
+            trades_response = requests.get(trades_url, timeout=10)
+            trades_data = trades_response.json()
+            
+            return {
                 'symbol': symbol,
                 'price': float(data['lastPrice']),
                 'volume': float(data['volume']),
@@ -153,14 +149,11 @@ class AdvancedPumpDumpBot:
                 'low': float(data['lowPrice']),
                 'quote_volume': float(data['quoteVolume']),
                 'klines': klines_data,
-                'orderbook': orderbook_data
+                'orderbook': orderbook_data,
+                'trades': trades_data
             }
-            
-            logger.info(f"Дані отримані для {symbol}: price={market_data['price']}, volume={market_data['volume']}")
-            return market_data
-            
         except Exception as e:
-            logger.error(f"Помилка отримання даних для {symbol}: {e}")
+            logger.error(f"Error getting market data for {symbol}: {e}")
             return None
 
     def calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
@@ -168,172 +161,129 @@ class AdvancedPumpDumpBot:
         if len(prices) < period + 1:
             return 50.0
         
-        try:
-            deltas = np.diff(prices)
-            gains = np.where(deltas > 0, deltas, 0)
-            losses = np.where(deltas < 0, -deltas, 0)
-            
-            avg_gain = np.mean(gains[-period:])
-            avg_loss = np.mean(losses[-period:])
-            
-            if avg_loss == 0:
-                return 100.0
-            
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-            
-            return rsi
-        except Exception as e:
-            logger.error(f"Помилка розрахунку RSI: {e}")
-            return 50.0
-
-    def calculate_ema(self, data: np.ndarray, period: int) -> float:
-        """Експоненційна ковзна середня"""
-        if len(data) < period:
-            return np.mean(data) if len(data) > 0 else 0
+        deltas = np.diff(prices)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
         
-        try:
-            weights = np.exp(np.linspace(-1., 0., period))
-            weights /= weights.sum()
-            
-            # Використовуємо згортку для EMA
-            ema = np.convolve(data, weights, mode='valid')
-            return ema[-1] if len(ema) > 0 else np.mean(data)
-        except Exception as e:
-            logger.error(f"Помилка розрахунку EMA: {e}")
-            return np.mean(data)
+        avg_gain = np.mean(gains[-period:])
+        avg_loss = np.mean(losses[-period:])
+        
+        if avg_loss == 0:
+            return 100.0
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
 
     def calculate_macd(self, prices: np.ndarray, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> float:
         """Власна реалізація MACD"""
-        if len(prices) < slow_period:
+        if len(prices) < slow_period + signal_period:
             return 0.0
         
-        try:
-            fast_ema = self.calculate_ema(prices, fast_period)
-            slow_ema = self.calculate_ema(prices, slow_period)
-            macd_line = fast_ema - slow_ema
-            
-            return macd_line
-        except Exception as e:
-            logger.error(f"Помилка розрахунку MACD: {e}")
-            return 0.0
+        # EMA для швидкого періоду
+        def ema(data, period):
+            weights = np.exp(np.linspace(-1., 0., period))
+            weights /= weights.sum()
+            return np.convolve(data, weights, mode='valid')[-1]
+        
+        fast_ema = ema(prices[-fast_period:], fast_period)
+        slow_ema = ema(prices[-slow_period:], slow_period)
+        macd_line = fast_ema - slow_ema
+        
+        return macd_line
 
     def calculate_bollinger_bands(self, prices: np.ndarray, period: int = 20, std_dev: int = 2) -> Tuple[float, float, float]:
         """Власна реалізація Bollinger Bands"""
         if len(prices) < period:
             return prices[-1], prices[-1], prices[-1]
         
-        try:
-            sma = np.mean(prices[-period:])
-            std = np.std(prices[-period:])
-            
-            upper_band = sma + (std * std_dev)
-            lower_band = sma - (std * std_dev)
-            
-            return upper_band, sma, lower_band
-        except Exception as e:
-            logger.error(f"Помилка розрахунку Bollinger Bands: {e}")
-            return prices[-1], prices[-1], prices[-1]
+        sma = np.mean(prices[-period:])
+        std = np.std(prices[-period:])
+        
+        upper_band = sma + (std * std_dev)
+        lower_band = sma - (std * std_dev)
+        
+        return upper_band, sma, lower_band
 
     def calculate_sma(self, data: np.ndarray, period: int) -> float:
         """Проста ковзна середня"""
         if len(data) < period:
             return np.mean(data) if len(data) > 0 else 0
-        
-        try:
-            return np.mean(data[-period:])
-        except Exception as e:
-            logger.error(f"Помилка розрахунку SMA: {e}")
-            return np.mean(data)
+        return np.mean(data[-period:])
 
     async def calculate_technical_indicators(self, klines_data: List) -> Dict:
-        try:
-            closes = np.array([float(x[4]) for x in klines_data])
-            volumes = np.array([float(x[5]) for x in klines_data])
-            
-            # RSI
-            rsi = self.calculate_rsi(closes)
-            
-            # MACD
-            macd = self.calculate_macd(closes)
-            
-            # Bollinger Bands
-            upper_bb, middle_bb, lower_bb = self.calculate_bollinger_bands(closes)
-            bb_position = (closes[-1] - lower_bb) / (upper_bb - lower_bb) if upper_bb != lower_bb else 0.5
-            
-            # Volume SMA
-            volume_sma = self.calculate_sma(volumes, 20)
-            volume_ratio = volumes[-1] / volume_sma if volume_sma > 0 else 1
-            
-            # Price changes
-            price_change_1h = ((closes[-1] - closes[-12]) / closes[-12]) * 100 if len(closes) >= 12 else 0
-            price_change_5m = ((closes[-1] - closes[-2]) / closes[-2]) * 100 if len(closes) >= 2 else 0
-            
-            indicators = {
-                'rsi': rsi,
-                'macd': macd,
-                'bb_position': bb_position,
-                'volume_ratio': volume_ratio,
-                'current_price': closes[-1],
-                'price_5m_ago': closes[-2] if len(closes) >= 2 else closes[0],
-                'price_1h_ago': closes[-12] if len(closes) >= 12 else closes[0],
-                'price_change_1h': price_change_1h,
-                'price_change_5m': price_change_5m
-            }
-            
-            logger.debug(f"Індикатори: {indicators}")
-            return indicators
-            
-        except Exception as e:
-            logger.error(f"Помилка розрахунку технічних індикаторів: {e}")
-            return {
-                'rsi': 50.0,
-                'macd': 0.0,
-                'bb_position': 0.5,
-                'volume_ratio': 1.0,
-                'current_price': 0.0,
-                'price_5m_ago': 0.0,
-                'price_1h_ago': 0.0,
-                'price_change_1h': 0.0,
-                'price_change_5m': 0.0
-            }
+        closes = np.array([float(x[4]) for x in klines_data])
+        highs = np.array([float(x[2]) for x in klines_data])
+        lows = np.array([float(x[3]) for x in klines_data])
+        volumes = np.array([float(x[5]) for x in klines_data])
+        
+        # RSI
+        rsi = self.calculate_rsi(closes)
+        
+        # MACD
+        macd = self.calculate_macd(closes)
+        
+        # Bollinger Bands
+        upper_bb, middle_bb, lower_bb = self.calculate_bollinger_bands(closes)
+        bb_position = (closes[-1] - lower_bb) / (upper_bb - lower_bb) if upper_bb != lower_bb else 0.5
+        
+        # Volume SMA
+        volume_sma = self.calculate_sma(volumes, 20)
+        volume_ratio = volumes[-1] / volume_sma if volume_sma > 0 else 1
+        
+        # Price changes
+        price_change_1h = ((closes[-1] - closes[-12]) / closes[-12]) * 100 if len(closes) >= 12 else 0
+        price_change_5m = ((closes[-1] - closes[-1]) / closes[-2]) * 100 if len(closes) >= 2 else 0
+        
+        return {
+            'rsi': rsi,
+            'macd': macd,
+            'bb_position': bb_position,
+            'volume_ratio': volume_ratio,
+            'current_price': closes[-1],
+            'price_5m_ago': closes[-2] if len(closes) >= 2 else closes[0],
+            'price_1h_ago': closes[-12] if len(closes) >= 12 else closes[0],
+            'price_change_1h': price_change_1h,
+            'price_change_5m': price_change_5m
+        }
 
     async def detect_pump_pattern(self, market_data: Dict, tech_indicators: Dict) -> Dict:
         score = 0
         signals = []
         
-        try:
-            # Volume analysis
-            volume_ratio = tech_indicators['volume_ratio']
-            if volume_ratio > self.pump_thresholds['volume_ratio']:
-                score += 0.3
-                signals.append(f"Volume x{volume_ratio:.1f}")
-            
-            # Price momentum
-            if tech_indicators['price_change_5m'] > self.pump_thresholds['price_change_5m']:
-                score += 0.2
-                signals.append(f"+{tech_indicators['price_change_5m']:.1f}% 5m")
-            
-            # RSI condition
-            if tech_indicators['rsi'] > self.pump_thresholds['rsi_threshold']:
-                score += 0.1
-                signals.append(f"RSI {tech_indicators['rsi']:.1f}")
-            
-            # MACD condition
-            if tech_indicators['macd'] > self.pump_thresholds['macd_signal']:
-                score += 0.1
-                signals.append(f"MACD {tech_indicators['macd']:.4f}")
-            
-            # Order book analysis
-            ob_analysis = self.analyze_orderbook(market_data['orderbook'])
-            if ob_analysis['buy_pressure'] > self.pump_thresholds['buy_pressure_ratio']:
-                score += 0.2
-                signals.append(f"Buy pressure {ob_analysis['buy_pressure']:.1f}")
-            
-            logger.info(f"Pump detection for {market_data['symbol']}: score={score}, signals={signals}")
-            
-        except Exception as e:
-            logger.error(f"Помилка детекції пампу: {e}")
+        # Volume analysis
+        volume_ratio = tech_indicators['volume_ratio']
+        if volume_ratio > self.pump_thresholds['volume_ratio']:
+            score += 0.3
+            signals.append(f"Volume x{volume_ratio:.1f}")
+        
+        # Price momentum
+        if tech_indicators['price_change_5m'] > self.pump_thresholds['price_change_5m']:
+            score += 0.2
+            signals.append(f"+{tech_indicators['price_change_5m']:.1f}% 5m")
+        
+        # RSI condition
+        if tech_indicators['rsi'] > self.pump_thresholds['rsi_threshold']:
+            score += 0.1
+            signals.append(f"RSI {tech_indicators['rsi']:.1f}")
+        
+        # MACD condition
+        if tech_indicators['macd'] > self.pump_thresholds['macd_signal']:
+            score += 0.1
+            signals.append(f"MACD {tech_indicators['macd']:.4f}")
+        
+        # Order book analysis
+        ob_analysis = self.analyze_orderbook(market_data['orderbook'])
+        if ob_analysis['buy_pressure'] > self.pump_thresholds['buy_pressure_ratio']:
+            score += 0.2
+            signals.append(f"Buy pressure {ob_analysis['buy_pressure']:.1f}")
+        
+        # Whale detection
+        whale_volume = self.detect_whale_orders(market_data['orderbook'])
+        if whale_volume > market_data['quote_volume'] * 0.01:
+            score += 0.1
+            signals.append(f"Whale order: ${whale_volume:,.0f}")
         
         return {'score': min(score, 1.0), 'signals': signals, 'confidence': 'high' if score > 0.6 else 'medium'}
 
@@ -341,78 +291,99 @@ class AdvancedPumpDumpBot:
         score = 0
         signals = []
         
-        try:
-            # Volume analysis (selling volume)
-            volume_ratio = tech_indicators['volume_ratio']
-            if volume_ratio > self.dump_thresholds['volume_ratio']:
-                score += 0.3
-                signals.append(f"Sell volume x{volume_ratio:.1f}")
-            
-            # Price decline
-            if tech_indicators['price_change_5m'] < self.dump_thresholds['price_change_5m']:
-                score += 0.2
-                signals.append(f"{tech_indicators['price_change_5m']:.1f}% 5m")
-            
-            # RSI condition (oversold)
-            if tech_indicators['rsi'] < self.dump_thresholds['rsi_threshold']:
-                score += 0.1
-                signals.append(f"RSI {tech_indicators['rsi']:.1f}")
-            
-            # MACD condition
-            if tech_indicators['macd'] < self.dump_thresholds['macd_signal']:
-                score += 0.1
-                signals.append(f"MACD {tech_indicators['macd']:.4f}")
-            
-            # Order book analysis (sell pressure)
-            ob_analysis = self.analyze_orderbook(market_data['orderbook'])
-            if ob_analysis['sell_pressure'] > self.dump_thresholds['sell_pressure_ratio']:
-                score += 0.2
-                signals.append(f"Sell pressure {ob_analysis['sell_pressure']:.1f}")
-            
-            logger.info(f"Dump detection for {market_data['symbol']}: score={score}, signals={signals}")
-            
-        except Exception as e:
-            logger.error(f"Помилка детекції дампу: {e}")
+        # Volume analysis (selling volume)
+        volume_ratio = tech_indicators['volume_ratio']
+        if volume_ratio > self.dump_thresholds['volume_ratio']:
+            score += 0.3
+            signals.append(f"Sell volume x{volume_ratio:.1f}")
+        
+        # Price decline
+        if tech_indicators['price_change_5m'] < self.dump_thresholds['price_change_5m']:
+            score += 0.2
+            signals.append(f"{tech_indicators['price_change_5m']:.1f}% 5m")
+        
+        # RSI condition (oversold)
+        if tech_indicators['rsi'] < self.dump_thresholds['rsi_threshold']:
+            score += 0.1
+            signals.append(f"RSI {tech_indicators['rsi']:.1f}")
+        
+        # MACD condition
+        if tech_indicators['macd'] < self.dump_thresholds['macd_signal']:
+            score += 0.1
+            signals.append(f"MACD {tech_indicators['macd']:.4f}")
+        
+        # Order book analysis (sell pressure)
+        ob_analysis = self.analyze_orderbook(market_data['orderbook'])
+        if ob_analysis['sell_pressure'] > self.dump_thresholds['sell_pressure_ratio']:
+            score += 0.2
+            signals.append(f"Sell pressure {ob_analysis['sell_pressure']:.1f}")
+        
+        # Support break detection
+        if self.check_support_break(tech_indicators, market_data['klines']['15m']):
+            score += 0.1
+            signals.append("Support broken")
         
         return {'score': min(score, 1.0), 'signals': signals, 'confidence': 'high' if score > 0.6 else 'medium'}
 
     def analyze_orderbook(self, orderbook: Dict) -> Dict:
-        try:
-            bids = np.array([float(bid[1]) for bid in orderbook['bids'][:5]])  # Топ 5 bid
-            asks = np.array([float(ask[1]) for ask in orderbook['asks'][:5]])  # Топ 5 ask
-            
-            total_bids = np.sum(bids)
-            total_asks = np.sum(asks)
-            
-            buy_pressure = total_bids / total_asks if total_asks > 0 else 1
-            sell_pressure = total_asks / total_bids if total_bids > 0 else 1
-            
-            return {
-                'buy_pressure': buy_pressure,
-                'sell_pressure': sell_pressure,
-                'imbalance': abs(total_bids - total_asks) / (total_bids + total_asks) if (total_bids + total_asks) > 0 else 0
-            }
-        except Exception as e:
-            logger.error(f"Помилка аналізу стакану: {e}")
-            return {
-                'buy_pressure': 1.0,
-                'sell_pressure': 1.0,
-                'imbalance': 0.0
-            }
+        bids = np.array([float(bid[1]) for bid in orderbook['bids'][:10]])  # Топ 10 bid
+        asks = np.array([float(ask[1]) for ask in orderbook['asks'][:10]])  # Топ 10 ask
+        
+        total_bids = np.sum(bids)
+        total_asks = np.sum(asks)
+        
+        buy_pressure = total_bids / total_asks if total_asks > 0 else 1
+        sell_pressure = total_asks / total_bids if total_bids > 0 else 1
+        
+        return {
+            'buy_pressure': buy_pressure,
+            'sell_pressure': sell_pressure,
+            'imbalance': abs(total_bids - total_asks) / (total_bids + total_asks) if (total_bids + total_asks) > 0 else 0
+        }
+
+    def detect_whale_orders(self, orderbook: Dict) -> float:
+        """Detect large individual orders"""
+        large_orders = []
+        for side in ['bids', 'asks']:
+            for order in orderbook[side]:
+                order_size = float(order[1]) * float(order[0])
+                if order_size > 50000:  # $50k+ considered whale order
+                    large_orders.append(order_size)
+        return sum(large_orders) if large_orders else 0
+
+    def check_support_break(self, tech_indicators: Dict, klines: List) -> bool:
+        """Check if price broke through support level"""
+        if len(klines) < 20:
+            return False
+        
+        closes = np.array([float(x[4]) for x in klines])
+        
+        # Support as lowest price in last 10 periods
+        support_level = np.min(closes[-10:])
+        current_price = tech_indicators['current_price']
+        
+        return current_price < support_level * 0.99  # 1% below support
+
+    def detect_volume_spike(self, volumes: np.ndarray, window: int = 20) -> bool:
+        """Detect unusual volume spikes"""
+        if len(volumes) < window + 1:
+            return False
+        
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-window:-1])
+        std_volume = np.std(volumes[-window:-1])
+        
+        return current_volume > (avg_volume + 2 * std_volume)
 
     async def scan_top_coins(self, scan_type: str = 'both'):
         try:
-            logger.info(f"Початок сканування типу: {scan_type}")
-            
-            response = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
+            response = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
             all_data = response.json()
             
             usdt_pairs = [x for x in all_data if x['symbol'].endswith('USDT')]
             sorted_by_volume = sorted(usdt_pairs, 
                                     key=lambda x: float(x['volume']), 
-                                    reverse=True)[:20]  # Топ 20 по об'єму
-            
-            logger.info(f"Знайдено {len(sorted_by_volume)} USDT пар")
+                                    reverse=True)[:100]  # Топ 100 по об'єму
             
             results = {'pump': [], 'dump': []}
             
@@ -421,7 +392,6 @@ class AdvancedPumpDumpBot:
                 if symbol in self.coin_blacklist:
                     continue
                     
-                logger.info(f"Аналіз монети: {symbol}")
                 market_data = await self.get_market_data(symbol)
                 if not market_data:
                     continue
@@ -434,7 +404,7 @@ class AdvancedPumpDumpBot:
                 # Детекція пампу
                 if scan_type in ['both', 'pump']:
                     pump_result = await self.detect_pump_pattern(market_data, tech_indicators)
-                    if pump_result['score'] > 0.4:  # Зменшено поріг для тестування
+                    if pump_result['score'] > 0.5:
                         results['pump'].append({
                             'symbol': symbol,
                             'score': pump_result['score'],
@@ -444,12 +414,11 @@ class AdvancedPumpDumpBot:
                             'volume': market_data['volume'],
                             'price_change_24h': market_data['price_change']
                         })
-                        logger.info(f"Знайдено pump сигнал для {symbol}: {pump_result['score']:.2%}")
                 
                 # Детекція дампу
                 if scan_type in ['both', 'dump']:
                     dump_result = await self.detect_dump_pattern(market_data, tech_indicators)
-                    if dump_result['score'] > 0.4:  # Зменшено поріг для тестування
+                    if dump_result['score'] > 0.5:
                         results['dump'].append({
                             'symbol': symbol,
                             'score': dump_result['score'],
@@ -459,17 +428,15 @@ class AdvancedPumpDumpBot:
                             'volume': market_data['volume'],
                             'price_change_24h': market_data['price_change']
                         })
-                        logger.info(f"Знайдено dump сигнал для {symbol}: {dump_result['score']:.2%}")
             
             # Сортування результатів
             for key in results:
                 results[key].sort(key=lambda x: x['score'], reverse=True)
             
-            logger.info(f"Сканування завершено. Pump: {len(results['pump'])}, Dump: {len(results['dump'])}")
             return results
             
         except Exception as e:
-            logger.error(f"Помилка сканування: {e}")
+            logger.error(f"Scan error: {e}")
             return {'pump': [], 'dump': []}
 
     async def send_alert(self, context: ContextTypes.DEFAULT_TYPE, signal_data: Dict, signal_type: str):
@@ -513,19 +480,11 @@ class AdvancedPumpDumpBot:
         results = await self.scan_top_coins('both')
         
         message = "📊 Результати сканування:\n\n"
-        
-        if not results['pump'] and not results['dump']:
-            message += "ℹ️ Сигналів не знайдено. Спробуйте змінити налаштування або спробувати пізніше.\n"
-            message += f"Поточні пороги:\n"
-            message += f"Pump: Volume > {self.pump_thresholds['volume_ratio']}x, Price change > {self.pump_thresholds['price_change_5m']}%\n"
-            message += f"Dump: Volume > {self.dump_thresholds['volume_ratio']}x, Price change < {self.dump_thresholds['price_change_5m']}%"
-        else:
-            for signal_type in ['pump', 'dump']:
-                if results[signal_type]:
-                    message += f"{'🚀' if signal_type == 'pump' else '📉'} {signal_type.upper()}:\n"
-                    for i, signal in enumerate(results[signal_type][:5], 1):
-                        message += f"{i}. {signal['symbol']} - {signal['score']:.2%} ({len(signal['signals'])} сигналів)\n"
-                    message += "\n"
+        for signal_type in ['pump', 'dump']:
+            message += f"{'🚀' if signal_type == 'pump' else '📉'} {signal_type.upper()}:\n"
+            for i, signal in enumerate(results[signal_type][:3], 1):
+                message += f"{i}. {signal['symbol']} - {signal['score']:.2%}\n"
+            message += "\n"
             
         await update.message.reply_text(message)
 
@@ -548,27 +507,35 @@ class AdvancedPumpDumpBot:
             blacklist_msg = "🚫 Чорний список:\n" + "\n".join(self.coin_blacklist) if self.coin_blacklist else "Чорний список порожній"
             await update.message.reply_text(blacklist_msg)
 
-    async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда для дебагу"""
-        await update.message.reply_text("🛠️ Режим дебагу...")
+    async def scan_job(self, context: ContextTypes.DEFAULT_TYPE):
+        """Фонова задача сканування"""
+        results = await self.scan_top_coins('both')
         
-        # Тестування однієї монети
-        test_symbol = "BTC"
-        market_data = await self.get_market_data(test_symbol)
-        
-        if market_data:
-            tech_indicators = await self.calculate_technical_indicators(market_data['klines']['5m'])
-            
-            message = f"🔧 Дебаг для {test_symbol}:\n"
-            message += f"Ціна: ${market_data['price']}\n"
-            message += f"Volume ratio: {tech_indicators['volume_ratio']:.2f}\n"
-            message += f"RSI: {tech_indicators['rsi']:.1f}\n"
-            message += f"MACD: {tech_indicators['macd']:.6f}\n"
-            message += f"5m change: {tech_indicators['price_change_5m']:.2f}%"
-            
-            await update.message.reply_text(message)
-        else:
-            await update.message.reply_text("❌ Не вдалося отримати дані для тесту")
+        # Відправка топ-3 сигналів для кожного типу
+        for signal_type in ['pump', 'dump']:
+            for signal in results[signal_type][:3]:
+                await self.send_alert(context, signal, signal_type)
+                await asyncio.sleep(1)
+
+    def handle_webhook(self, data: Dict) -> str:
+        """Обробка вебхук запитів"""
+        try:
+            if data.get('type') == 'manual_scan':
+                results = asyncio.run(self.scan_top_coins(data.get('scan_type', 'both')))
+                return jsonify(results)
+            elif data.get('type') == 'update_settings':
+                self.update_settings(data.get('settings', {}))
+                return jsonify({'status': 'success'})
+            return jsonify({'error': 'Unknown webhook type'})
+        except Exception as e:
+            return jsonify({'error': str(e)})
+
+    def update_settings(self, new_settings: Dict):
+        """Оновлення налаштувань"""
+        if 'pump' in new_settings:
+            self.pump_thresholds.update(new_settings['pump'])
+        if 'dump' in new_settings:
+            self.dump_thresholds.update(new_settings['dump'])
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -579,39 +546,17 @@ class AdvancedPumpDumpBot:
             results = await self.scan_top_coins('both')
             
             message = "📊 Результати сканування:\n\n"
-            
-            if not results['pump'] and not results['dump']:
-                message += "ℹ️ Сигналів не знайдено\n"
-                message += "Спробуйте команду /debug для перевірки роботи"
-            else:
-                for signal_type in ['pump', 'dump']:
-                    if results[signal_type]:
-                        message += f"{'🚀' if signal_type == 'pump' else '📉'} {signal_type.upper()}:\n"
-                        for i, signal in enumerate(results[signal_type][:3], 1):
-                            message += f"{i}. {signal['symbol']} - {signal['score']:.2%}\n"
-                        message += "\n"
+            for signal_type in ['pump', 'dump']:
+                message += f"{'🚀' if signal_type == 'pump' else '📉'} {signal_type.upper()}:\n"
+                for i, signal in enumerate(results[signal_type][:3], 1):
+                    message += f"{i}. {signal['symbol']} - {signal['score']:.2%}\n"
+                message += "\n"
                 
             await query.edit_message_text(message)
             
         elif query.data == "settings":
             settings_msg = self.get_settings_message()
             await query.edit_message_text(settings_msg)
-            
-        elif query.data == "stats":
-            stats_msg = "📊 Статистика:\n"
-            stats_msg += f"Останні сигнали: {len(self.last_signals)}\n"
-            stats_msg += f"Чорний список: {len(self.coin_blacklist)} монет"
-            await query.edit_message_text(stats_msg)
-            
-        elif query.data == "blacklist":
-            blacklist_msg = "🚫 Чорний список:\n" + "\n".join(self.coin_blacklist) if self.coin_blacklist else "Чорний список порожній"
-            await query.edit_message_text(blacklist_msg)
-            
-        elif query.data == "whale_alert":
-            await query.edit_message_text("🐋 Whale Alert функція в розробці...")
-            
-        elif query.data == "top_signals":
-            await query.edit_message_text("📈 ТОП сигнали функція в розробці...")
 
     def get_settings_message(self) -> str:
         msg = "⚙️ Поточні налаштування:\n\n"
@@ -627,8 +572,7 @@ class AdvancedPumpDumpBot:
 
     def run_flask(self):
         """Запуск Flask сервера"""
-        port = int(os.environ.get('PORT', 5000))
-        self.flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        self.flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
     def run(self):
         """Запуск бота"""
@@ -637,20 +581,17 @@ class AdvancedPumpDumpBot:
         flask_thread.start()
         
         print("🤖 Бот запущений...")
-        print("🌐 Flask сервер запущений")
-        print("📊 Доступні endpoints: /webhook, /stats, /update_settings, /health")
-        print("💬 Доступні команди: /start, /scan, /settings, /blacklist, /debug")
+        print("🌐 Flask сервер запущений на порті 5000")
+        print("📊 Доступні endpoints: /webhook, /stats, /update_settings")
         
-        # Запуск Telegram бота
+        # Додавання фонової задачі
+        job_queue = self.app.job_queue
+        job_queue.run_repeating(self.scan_job, interval=300, first=10)  # Сканування кожні 5 хвилин
+        
         self.app.run_polling()
 
 # Використання
 if __name__ == "__main__":
-    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not TOKEN:
-        print("❌ Помилка: TELEGRAM_BOT_TOKEN не встановлено в змінних оточення")
-        print("ℹ️ Додайте TELEGRAM_BOT_TOKEN до налаштувань Render")
-        exit(1)
-    
+    TOKEN = "8489382938:AAHeFFZPODspuEFcSQyjw8lWzYpRRSv9n3g"
     bot = AdvancedPumpDumpBot(TOKEN)
     bot.run()
