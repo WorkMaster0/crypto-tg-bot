@@ -683,6 +683,50 @@ class AdvancedPumpDumpBot:
         except Exception as e:
             logger.error(f"Помилка команди debug: {e}")
 
+    async def orderbook_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробка команди /orderbook <symbol>"""
+        try:
+            if not context.args:
+                await update.message.reply_text("ℹ️ Вкажіть символ монети. Наприклад: /orderbook BTC")
+                return
+                
+            symbol = context.args[0].upper()
+            await update.message.reply_text(f"📊 Аналізую книгу ордерів для {symbol}...")
+            
+            orderbook = await self.get_detailed_orderbook(symbol)
+            if orderbook['bids']:
+                message = (f"📈 Orderbook для {symbol}:\n"
+                          f"• Imbalance: {orderbook['imbalance']:.4f}\n"
+                          f"• Великі bids: {orderbook['large_bids']}\n"
+                          f"• Великі asks: {orderbook['large_asks']}\n"
+                          f"• Кластери bids: {len(orderbook['bid_clusters'])}\n"
+                          f"• Кластери asks: {len(orderbook['ask_clusters'])}")
+                await update.message.reply_text(message)
+            else:
+                await update.message.reply_text(f"❌ Не вдалося отримати дані для {symbol}")
+                
+        except Exception as e:
+            logger.error(f"Помилка команди orderbook: {e}")
+            await update.message.reply_text("❌ Помилка аналізу orderbook")
+
+    async def market_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробка команди /analysis"""
+        try:
+            await update.message.reply_text("📋 Запускаю загальний аналіз ринку...")
+            gainers = await self.get_top_gainers(10)
+            
+            if gainers:
+                message = "📈 Топ-5 Gainers (24h):\n"
+                for i, coin in enumerate(gainers[:5], 1):
+                    message += f"{i}. {coin['symbol']}: {coin['change_24h']:.2f}%\n"
+                await update.message.reply_text(message)
+            else:
+                await update.message.reply_text("ℹ️ Дані ринку тимчасово недоступні")
+                
+        except Exception as e:
+            logger.error(f"Помилка команди analysis: {e}")
+            await update.message.reply_text("❌ Помилка аналізу ринку")
+
     async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробка команди /performance"""
         try:
