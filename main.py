@@ -1014,16 +1014,8 @@ def main():
 
         bot = AdvancedPumpDumpBot(BOT_TOKEN)
 
-        flask_thread = threading.Thread(
-            target=run_flask, 
-            args=(bot.flask_app,), 
-            daemon=True,
-            name="Flask-Thread"
-        )
-        flask_thread.start()
-        logger.info("🌐 Flask server started")
-
-        logger.info("🤖 Starting Telegram bot...")
+        # Просто запускаємо polling
+        logger.info("🤖 Starting Telegram bot with polling...")
         bot.app.run_polling(
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
@@ -1036,6 +1028,3 @@ def main():
         logger.error(f"❌ Critical error: {e}")
         time.sleep(10)
         raise
-
-if __name__ == '__main__':
-    main()
