@@ -62,8 +62,8 @@ class AdvancedPumpDumpBot:
             'price_acceleration': 0.0005,
             'orderbook_imbalance_threshold': 0.25,
             'large_orders_threshold': 50000,
-            'scan_limit': 25,
-            'parallel_workers': 8
+            'scan_limit': 50,
+            'parallel_workers': 12
         }
         
         self.coin_blacklist = set()
@@ -220,7 +220,7 @@ class AdvancedPumpDumpBot:
             logger.error(f"Помилка отримання топ gainers з CoinGecko: {e}")
             return await self.get_top_gainers_binance(limit)
 
-    async def get_top_gainers_binance(self, limit: int = 50) -> List[Dict]:
+    async def get_top_gainers_binance(self, limit: int = 80) -> List[Dict]:
         try:
             response = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
             response.raise_for_status()
@@ -673,7 +673,7 @@ class AdvancedPumpDumpBot:
     async def rsi_scanner_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text("🎯 Сканую RSI монет...")
-            gainers = await self.get_top_gainers(20)
+            gainers = await self.get_top_gainers(30)
             
             if not gainers:
                 await update.message.reply_text("❌ Не вдалося отримати дані")
@@ -733,7 +733,7 @@ class AdvancedPumpDumpBot:
     async def pump_detector_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text("🚨 Шукаю потенційні памп...")
-            gainers = await self.get_top_gainers(25)
+            gainers = await self.get_top_gainers(40)
             
             if not gainers:
                 await update.message.reply_text("❌ Не вдалося отримати дані")
@@ -775,8 +775,8 @@ class AdvancedPumpDumpBot:
 
     async def scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
-            await update.message.reply_text("🔍 Запускаю сканування 25+ монет...")
-            gainers = await self.get_top_gainers(40)
+            await update.message.reply_text("🔍 Запускаю сканування 50+ монет...")
+            gainers = await self.get_top_gainers(80)
             
             if not gainers:
                 await update.message.reply_text("❌ Не вдалося отримати дані")
@@ -808,7 +808,7 @@ class AdvancedPumpDumpBot:
                     f"📊 Сканування завершено!\n"
                     f"• Проаналізовано: {len(analyzed_coins)} монет\n"
                     f"• Знайдено сигналів: 0\n"
-                    f"• Монети: {', '.join(analyzed_coins[:10])}{'...' if len(analyzed_coins) > 10 else ''}\n\n"
+                    f"• Монети: {', '.join(analyzed_coins[:15])}{'...' if len(analyzed_coins) > 15 else ''}\n\n"
                     f"💡 Спробуйте знову через декілька хвилин"
                 )
             
@@ -850,7 +850,7 @@ class AdvancedPumpDumpBot:
     async def large_orders_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text("💰 Шукаю монети з великими ордерами...")
-            gainers = await self.get_top_gainers(30)
+            gainers = await self.get_top_gainers(50)
             
             if not gainers:
                 await update.message.reply_text("❌ Не вдалося отримати дані")
