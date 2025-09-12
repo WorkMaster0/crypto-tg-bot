@@ -1,5 +1,5 @@
-import matplotlib
-matplotlib.use('Agg')
+import ssl
+from telegram.ext import ApplicationBuilder
 import pandas as pd
 import numpy as np
 import requests
@@ -1009,19 +1009,50 @@ def run_flask(app: Flask):
 def main():
     try:
         BOT_TOKEN = os.getenv('BOT_TOKEN')
+        RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dex-tg-bot.onrender.com')
         
         if not BOT_TOKEN:
             logger.error("❌ Будь ласка, встановіть ваш Telegram Bot Token")
             return
 
+        # Створюємо бота з webhook
+        application = ApplicationBuilder().token(BOT_TOKEN).build()
         bot = AdvancedPumpDumpBot(BOT_TOKEN)
+        
+        # Отримуємо порт з Render
+        port = int(os.environ.get('PORT', 5000))
+        
+        # Налаштування webhook
+        webhook_url = f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}"
+        
+        async def set_webhook():
+            await application.bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True
+            )
+            logger.info(f"🌐 Webhook встановлено: {webhook_url}")
 
-        # Просто запускаємо polling
-        logger.info("🤖 Starting Telegram bot with polling...")
-        bot.app.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            close_loop=False
+        # Запускаємо Flask у фоні
+        def run_flask():
+            bot.flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+        
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info(f"🌐 Flask server started on port {port}")
+
+        # Запускаємо бота з webhook
+        logger.info("🤖 Starting Telegram bot with webhook...")
+        
+        # Додаємо обробники до application
+        bot.setup_handlers()
+        
+        # Запускаємо webhook
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=BOT_TOKEN,
+            webhook_url=webhook_url,
+            drop_pending_updates=True
         )
         
     except KeyboardInterrupt:
