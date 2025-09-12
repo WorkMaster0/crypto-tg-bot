@@ -124,7 +124,7 @@ class AdvancedPumpDumpBot:
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        keyboard = [
+    keyboard = [
         [InlineKeyboardButton("🔍 Сканувати PRE-TOP", callback_data="scan_now"),
          InlineKeyboardButton("💰 Великі ордери", callback_data="large_orders")],
         [InlineKeyboardButton("📈 Топ Volumes", callback_data="top_volumes"),
@@ -138,7 +138,7 @@ class AdvancedPumpDumpBot:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-        await update.message.reply_text(
+            await update.message.reply_text(
         "🤖 **ULTIMATE CRYPTO SIGNALS BOT v3.0**\n\n"
         "🎯 *Спеціалізація: виявлення pump/dump та сильних сигналів*\n\n"
         "✨ **Нові фічі:**\n"
