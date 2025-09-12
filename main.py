@@ -138,7 +138,7 @@ class AdvancedPumpDumpBot:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+        await update.message.reply_text(
         "🤖 **ULTIMATE CRYPTO SIGNALS BOT v3.0**\n\n"
         "🎯 *Спеціалізація: виявлення pump/dump та сильних сигналів*\n\n"
         "✨ **Нові фічі:**\n"
