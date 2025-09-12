@@ -1,5 +1,5 @@
-import ssl
-from telegram.ext import ApplicationBuilder
+import matplotlib
+matplotlib.use('Agg')  # КРИТИЧНО ВАЖЛИВО ДЛЯ RENDER!
 import pandas as pd
 import numpy as np
 import requests
@@ -43,7 +43,7 @@ class AdvancedPumpDumpBot:
         self.garbage_symbols = {
             'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'RUB', 'TRY', 'BRL', 'KRW', 'AUD',
             'USDC', 'USDT', 'BUSD', 'DAI', 'TUSD', 'PAX', 'UST', 'HUSD', 'GUSD',
-            'PAXG', 'WBBTC', 'BTCB', 'ETHB', 'BNB', 'HT', 'OKB', 'LEO', 'LINK',
+            'PAXG', 'WBTC', 'BTCB', 'ETHB', 'BNB', 'HT', 'OKB', 'LEO', 'LINK',
             'XRP', 'ADA', 'DOT', 'DOGE', 'SHIB', 'MATIC', 'SOL', 'AVAX', 'FTM'
         }
         
@@ -1000,64 +1000,25 @@ class AdvancedPumpDumpBot:
         except Exception as e:
             logger.error(f"Помилка оновлення налаштувань: {e}")
 
-def run_flask(app: Flask):
-    try:
-        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
-    except Exception as e:
-        logger.error(f"Помилка запуску Flask: {e}")
-
 def main():
     try:
         BOT_TOKEN = os.getenv('BOT_TOKEN')
-        RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dex-tg-bot.onrender.com')
         
         if not BOT_TOKEN:
             logger.error("❌ Будь ласка, встановіть ваш Telegram Bot Token")
             return
 
-        # Створюємо бота з webhook
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
         bot = AdvancedPumpDumpBot(BOT_TOKEN)
         
-        # Отримуємо порт з Render
-        port = int(os.environ.get('PORT', 5000))
-        
-        # Налаштування webhook
-        webhook_url = f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}"
-        
-        async def set_webhook():
-            await application.bot.set_webhook(
-                url=webhook_url,
-                drop_pending_updates=True
-            )
-            logger.info(f"🌐 Webhook встановлено: {webhook_url}")
-
-        # Запускаємо Flask у фоні
-        def run_flask():
-            bot.flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
-        
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info(f"🌐 Flask server started on port {port}")
-
-        # Запускаємо бота з webhook
-        logger.info("🤖 Starting Telegram bot with webhook...")
-        
-        # Додаємо обробники до application
-        bot.setup_handlers()
-        
-        # Запускаємо webhook
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=BOT_TOKEN,
-            webhook_url=webhook_url,
-            drop_pending_updates=True
+        logger.info("🤖 Starting Telegram bot...")
+        bot.app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
         )
         
-    except KeyboardInterrupt:
-        logger.info("⏹️ Bot stopped by user")
     except Exception as e:
-        logger.error(f"❌ Critical error: {e}")
-        time.sleep(10)
+        logger.error(f"❌ Error: {e}")
         raise
+
+if __name__ == '__main__':
+    main()
