@@ -742,7 +742,7 @@ class AdvancedPumpDumpBot:
         await self.scan_command(update, context)
 
         async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /settings"""
+            """Обробка команди /settings"""
         try:
             current_settings = "\n".join([f"• {k}: {v}" for k, v in self.pump_thresholds.items()])
             await update.message.reply_text(f"⚙️ Поточні налаштування:\n{current_settings}")
