@@ -41,7 +41,7 @@ class AdvancedPumpDumpBot:
         self.garbage_symbols = {
             'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'RUB', 'TRY', 'BRL', 'KRW', 'AUD',
             'USDC', 'USDT', 'BUSD', 'DAI', 'TUSD', 'PAX', 'UST', 'HUSD', 'GUSD',
-            'PAXG', 'WBTC', 'BTCB', 'ETHB', 'BNB', 'HT', 'OKB', 'LEO', 'LINK',
+            'PAXG', 'WBBTC', 'BTCB', 'ETHB', 'BNB', 'HT', 'OKB', 'LEO', 'LINK',
             'XRP', 'ADA', 'DOT', 'DOGE', 'SHIB', 'MATIC', 'SOL', 'AVAX', 'FTM'
         }
         
@@ -60,8 +60,8 @@ class AdvancedPumpDumpBot:
             'price_acceleration': 0.0005,
             'orderbook_imbalance_threshold': 0.25,
             'large_orders_threshold': 50000,
-            'scan_limit': 25,  # Збільшено кількість монет для сканування
-            'parallel_workers': 8  # Паралельне сканування
+            'scan_limit': 25,
+            'parallel_workers': 8
         }
         
         self.coin_blacklist = set()
@@ -116,44 +116,45 @@ class AdvancedPumpDumpBot:
         self.app.add_handler(CommandHandler("blacklist", self.blacklist_command))
         self.app.add_handler(CommandHandler("debug", self.debug_command))
         self.app.add_handler(CommandHandler("orderbook", self.orderbook_command))
-        self.app.add_handler(CommandHandler("analysis", self.market_analysis_command))
-        self.app.add_handler(CommandHandler("performance", self.performance_command))
-        self.app.add_handler(CommandHandler("topgainers", self.top_gainers_command))
+        self.app.add_handler(CommandHandler("topvolumes", self.top_volumes_command))
+        self.app.add_handler(CommandHandler("fastsignals", self.fast_signals_command))
+        self.app.add_handler(CommandHandler("rsiscanner", self.rsi_scanner_command))
+        self.app.add_handler(CommandHandler("pumpdetector", self.pump_detector_command))
+        self.app.add_handler(CommandHandler("dumpdetector", self.dump_detector_command))
         self.app.add_handler(CommandHandler("largeorders", self.large_orders_command))
-        self.app.add_handler(CommandHandler("scanall", self.scan_all_command))
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("🔍 Сканувати PRE-TOP", callback_data="scan_now"),
-             InlineKeyboardButton("📈 Топ Gainers", callback_data="top_gainers")],
-            [InlineKeyboardButton("📊 Аналіз ордерів", callback_data="orderbook_analysis"),
              InlineKeyboardButton("💰 Великі ордери", callback_data="large_orders")],
+            [InlineKeyboardButton("📈 Топ Volumes", callback_data="top_volumes"),
+             InlineKeyboardButton("⚡ Швидкі сигнали", callback_data="fast_signals")],
+            [InlineKeyboardButton("🎯 RSI Сканер", callback_data="rsi_scanner"),
+             InlineKeyboardButton("📊 Orderbook Аналіз", callback_data="orderbook_analysis")],
+            [InlineKeyboardButton("🚨 Pump Детектор", callback_data="pump_detector"),
+             InlineKeyboardButton("📉 Dump Детектор", callback_data="dump_detector")],
             [InlineKeyboardButton("⚙️ Налаштування", callback_data="settings"),
-             InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-            [InlineKeyboardButton("🚫 Чорний список", callback_data="blacklist"),
-             InlineKeyboardButton("🌐 Сканувати все", callback_data="scan_all")],
-            [InlineKeyboardButton("📋 Аналіз ринку", callback_data="market_analysis"),
-             InlineKeyboardButton("🏆 Продуктивність", callback_data="performance")]
+             InlineKeyboardButton("🚫 Чорний список", callback_data="blacklist")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🤖 **ULTIMATE PRE-TOP DETECT BOT v2.0**\n\n"
-            "🎯 *Спеціалізація: виявлення точок розвороту після пампу*\n\n"
+            "🤖 **ULTIMATE CRYPTO SIGNALS BOT v3.0**\n\n"
+            "🎯 *Спеціалізація: виявлення pump/dump та сильних сигналів*\n\n"
             "✨ **Нові фічі:**\n"
-            "• 🔍 Сканування 25+ монет паралельно\n"
-            "• 📊 Автоматичний пошук великих ордерів\n"
-            "• 🚀 Покращена швидкість аналізу\n"
-            "• 📈 Детальніші звіти\n"
-            "• ⚡ Більше сигналів!\n\n"
-            "💎 *Встигни зайти перед дампом!*",
+            "• 🔍 Авто-сканування 25+ монет\n"
+            "• 📊 Аналіз великих ордерів в реальному часі\n"
+            "• 🚨 Детектор пампів та дампів\n"
+            "• 📈 RSI перекупленість/перепроданість\n"
+            "• ⚡ Швидкі сигнали з orderbook\n"
+            "• 💰 Топ монети за об'ємом\n\n"
+            "💎 *Влови момент для входу!*",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
 
     def is_garbage_symbol(self, symbol: str) -> bool:
-        """Перевіряє чи символ є сміттям"""
         symbol = symbol.upper()
         
         if symbol in self.garbage_symbols:
@@ -172,7 +173,6 @@ class AdvancedPumpDumpBot:
         return False
 
     async def get_top_gainers(self, limit: int = 50) -> List[Dict]:
-        """Отримання топ монет за зміною ціни з CoinGecko"""
         try:
             url = "https://api.coingecko.com/api/v3/coins/markets"
             params = {
@@ -219,7 +219,6 @@ class AdvancedPumpDumpBot:
             return await self.get_top_gainers_binance(limit)
 
     async def get_top_gainers_binance(self, limit: int = 50) -> List[Dict]:
-        """Резервний метод отримання топ gainers через Binance"""
         try:
             response = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
             response.raise_for_status()
@@ -229,7 +228,7 @@ class AdvancedPumpDumpBot:
                 x for x in all_data 
                 if x['symbol'].endswith('USDT') 
                 and not self.is_garbage_symbol(x['symbol'].replace('USDT', ''))
-                and float(x['priceChangePercent']) > 3.0  # Зменшено мінімальний ріст
+                and float(x['priceChangePercent']) > 3.0
             ]
             
             sorted_gainers = sorted(
@@ -257,12 +256,10 @@ class AdvancedPumpDumpBot:
             return []
 
     async def get_market_data(self, symbol: str) -> Optional[Dict]:
-        """Отримання ринкових даних для символу"""
         try:
             if self.is_garbage_symbol(symbol):
                 return None
             
-            # Отримуємо основні дані
             url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
             response = requests.get(url, timeout=8)
             response.raise_for_status()
@@ -275,11 +272,9 @@ class AdvancedPumpDumpBot:
             price_change = float(data['priceChangePercent'])
             current_price = float(data['lastPrice'])
             
-            # Фільтр за об'ємом (зменшено мінімальний об'єм)
             if quote_volume < self.pump_thresholds['min_volume'] / 2:
                 return None
             
-            # Отримуємо детальні клайнси
             klines_data = {}
             timeframes = {
                 '5m': '5m',
@@ -289,14 +284,13 @@ class AdvancedPumpDumpBot:
             
             for tf, interval in timeframes.items():
                 try:
-                    klines_url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit=50"  # Зменшено ліміт
+                    klines_url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit=50"
                     klines_response = requests.get(klines_url, timeout=5)
                     klines_response.raise_for_status()
                     klines_data[tf] = klines_response.json()
                 except Exception as e:
                     continue
             
-            # Детальна книга ордерів
             orderbook = await self.get_detailed_orderbook(symbol)
             
             market_data = {
@@ -319,9 +313,8 @@ class AdvancedPumpDumpBot:
             return None
 
     async def get_detailed_orderbook(self, symbol: str) -> Dict:
-        """Детальний аналіз книги ордерів"""
         try:
-            orderbook_url = f"https://api.binance.com/api/v3/depth?symbol={symbol}USDT&limit=100"  # Збільшено ліміт
+            orderbook_url = f"https://api.binance.com/api/v3/depth?symbol={symbol}USDT&limit=100"
             orderbook_response = requests.get(orderbook_url, timeout=8)
             orderbook_response.raise_for_status()
             orderbook_data = orderbook_response.json()
@@ -332,7 +325,6 @@ class AdvancedPumpDumpBot:
             bid_clusters = self.find_order_clusters(orderbook_data['bids'])
             ask_clusters = self.find_order_clusters(orderbook_data['asks'])
             
-            # Знаходимо найбільші ордери
             largest_bid = self.find_largest_order(orderbook_data['bids'])
             largest_ask = self.find_largest_order(orderbook_data['asks'])
             
@@ -352,7 +344,6 @@ class AdvancedPumpDumpBot:
             return {'bids': [], 'asks': [], 'large_bids': 0, 'large_asks': 0, 'imbalance': 0}
 
     def analyze_large_orders(self, orders: List) -> int:
-        """Аналіз великих ордерів"""
         large_orders = 0
         for order in orders:
             price = float(order[0])
@@ -363,7 +354,6 @@ class AdvancedPumpDumpBot:
         return large_orders
 
     def find_largest_order(self, orders: List) -> Dict:
-        """Знаходить найбільший ордер за обсягом"""
         largest_order = {'price': 0, 'quantity': 0, 'size': 0}
         
         for order in orders:
@@ -381,7 +371,6 @@ class AdvancedPumpDumpBot:
         return largest_order
 
     def calculate_orderbook_imbalance(self, orderbook: Dict) -> float:
-        """Розрахунок imbalance книги ордерів"""
         try:
             total_bid_volume = sum(float(bid[1]) for bid in orderbook['bids'])
             total_ask_volume = sum(float(ask[1]) for ask in orderbook['asks'])
@@ -394,7 +383,6 @@ class AdvancedPumpDumpBot:
             return 0.0
 
     def find_order_clusters(self, orders: List, threshold: float = 0.02) -> List[Dict]:
-        """Знаходження кластерів ордерів"""
         clusters = []
         current_cluster = []
         
@@ -409,7 +397,7 @@ class AdvancedPumpDumpBot:
                 if price_diff < threshold:
                     current_cluster.append(orders[i])
                 else:
-                    if len(current_cluster) > 1:  # Зменшено мінімальну кількість
+                    if len(current_cluster) > 1:
                         clusters.append({
                             'price_range': (float(current_cluster[0][0]), float(current_cluster[-1][0])),
                             'total_quantity': sum(float(order[1]) for order in current_cluster),
@@ -427,9 +415,8 @@ class AdvancedPumpDumpBot:
         return clusters
 
     def calculate_advanced_indicators(self, klines_data: List) -> Dict:
-        """Розширені технічні індикатори"""
         try:
-            if not klines_data or len(klines_data) < 10:  # Зменшено мінімальну кількість
+            if not klines_data or len(klines_data) < 10:
                 return {}
                 
             closes = np.array([float(x[4]) for x in klines_data])
@@ -460,7 +447,6 @@ class AdvancedPumpDumpBot:
             return {}
 
     def calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
-        """Розрахунок RSI"""
         if len(prices) < period + 1:
             return 50.0
         
@@ -500,7 +486,6 @@ class AdvancedPumpDumpBot:
             return 50.0
 
     def calculate_macd(self, closes: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
-        """Розрахунок MACD"""
         try:
             if len(closes) < slow + signal:
                 return {'macd_line': 0, 'signal_line': 0, 'histogram': 0}
@@ -520,7 +505,6 @@ class AdvancedPumpDumpBot:
             return {'macd_line': 0, 'signal_line': 0, 'histogram': 0}
 
     def calculate_price_acceleration(self, closes: np.ndarray, lookback: int = 5) -> float:
-        """Розрахунок прискорення ціни"""
         if len(closes) < lookback + 1:
             return 0.0
         recent_changes = np.diff(closes[-lookback:])
@@ -530,7 +514,6 @@ class AdvancedPumpDumpBot:
         return round(acceleration, 6)
 
     def calculate_volume_price_divergence(self, closes: np.ndarray, volumes: np.ndarray, lookback: int = 20) -> float:
-        """Розрахунок дивергенції між об'ємом і ціною"""
         if len(closes) < lookback or len(volumes) < lookback:
             return 0.0
             
@@ -549,7 +532,6 @@ class AdvancedPumpDumpBot:
         return round(correlation, 4)
 
     def calculate_wick_analysis(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, lookback: int = 10) -> float:
-        """Аналіз співвідношення верхніх та нижніх хвостів"""
         if len(highs) < lookback:
             return 0.5
             
@@ -580,16 +562,14 @@ class AdvancedPumpDumpBot:
         return round(wick_ratio, 4)
 
     def analyze_coin(self, market_data: Dict) -> Dict:
-        """Аналіз монети на потенційний сигнал"""
         try:
             indicators = self.calculate_advanced_indicators(market_data['klines'].get('5m', []))
             orderbook = market_data['orderbook']
             imbalance = orderbook.get('imbalance', 0)
             
-            # Розширені критерії
             is_potential = (
-                indicators.get('rsi', 50) > 65 and  # Зменшено RSI
-                abs(imbalance) > 0.15 and  # Зменшено imbalance
+                indicators.get('rsi', 50) > 65 and
+                abs(imbalance) > 0.15 and
                 market_data['quote_volume'] > self.pump_thresholds['min_volume'] / 3
             )
             
@@ -612,11 +592,189 @@ class AdvancedPumpDumpBot:
         except Exception as e:
             return {'is_potential_signal': False, 'confidence': 0}
 
+    async def top_volumes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.reply_text("📊 Отримую топ монет за об'ємом...")
+            gainers = await self.get_top_gainers(30)
+            
+            if not gainers:
+                await update.message.reply_text("❌ Не вдалося отримати дані")
+                return
+            
+            gainers_sorted = sorted(gainers, key=lambda x: x.get('volume', 0), reverse=True)
+            
+            message = "💰 **Топ-10 за об'ємом торгів:**\n\n"
+            for i, coin in enumerate(gainers_sorted[:10], 1):
+                volume = coin.get('volume', 0)
+                if volume > 1000000:
+                    volume_str = f"${volume/1000000:.1f}M"
+                else:
+                    volume_str = f"${volume:,.0f}"
+                    
+                message += f"{i}. **{coin['symbol']}** - {volume_str} ({coin['change_24h']:.1f}%)\n"
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Помилка топ volumes: {e}")
+            await update.message.reply_text("❌ Помилка отримання даних")
+
+    async def fast_signals_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.reply_text("⚡ Шукаю швидкі сигнали...")
+            gainers = await self.get_top_gainers(15)
+            
+            if not gainers:
+                await update.message.reply_text("❌ Не вдалося отримати дані")
+                return
+            
+            signals = []
+            
+            for coin in gainers[:8]:
+                try:
+                    market_data = await self.get_market_data(coin['symbol'])
+                    if market_data and market_data.get('orderbook'):
+                        orderbook = market_data['orderbook']
+                        
+                        if (orderbook['large_bids'] >= 4 and orderbook['imbalance'] > 0.2 and 
+                            coin['change_24h'] > 5.0):
+                            signals.append({
+                                'symbol': coin['symbol'],
+                                'price': coin['usd_price'],
+                                'change': coin['change_24h'],
+                                'large_bids': orderbook['large_bids'],
+                                'imbalance': orderbook['imbalance'],
+                                'volume': market_data['quote_volume']
+                            })
+                    
+                    await asyncio.sleep(0.1)
+                except:
+                    continue
+            
+            if signals:
+                message = "⚡ **Швидкі сигнали:**\n\n"
+                for i, signal in enumerate(signals, 1):
+                    message += (
+                        f"{i}. **{signal['symbol']}** ({signal['change']:.1f}%)\n"
+                        f"   🟢 Bids: {signal['large_bids']} | ⚖️: {signal['imbalance']:.3f}\n"
+                        f"   💰 Ціна: ${signal['price']:.6f}\n"
+                        f"   📊 Об'єм: ${signal['volume']:,.0f}\n\n"
+                    )
+                await update.message.reply_text(message, parse_mode='Markdown')
+            else:
+                await update.message.reply_text("❌ Швидких сигналів не знайдено")
+                
+        except Exception as e:
+            logger.error(f"Помилка швидких сигналів: {e}")
+            await update.message.reply_text("❌ Помилка пошуку сигналів")
+
+    async def rsi_scanner_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.reply_text("🎯 Сканую RSI монет...")
+            gainers = await self.get_top_gainers(20)
+            
+            if not gainers:
+                await update.message.reply_text("❌ Не вдалося отримати дані")
+                return
+            
+            overbought = []
+            oversold = []
+            
+            for coin in gainers[:12]:
+                try:
+                    market_data = await self.get_market_data(coin['symbol'])
+                    if market_data and market_data.get('klines'):
+                        indicators = self.calculate_advanced_indicators(market_data['klines'].get('5m', []))
+                        rsi = indicators.get('rsi', 50)
+                        
+                        if rsi > 70:
+                            overbought.append({
+                                'symbol': coin['symbol'],
+                                'rsi': rsi,
+                                'price': coin['usd_price'],
+                                'change': coin['change_24h']
+                            })
+                        elif rsi < 30:
+                            oversold.append({
+                                'symbol': coin['symbol'],
+                                'rsi': rsi,
+                                'price': coin['usd_price'],
+                                'change': coin['change_24h']
+                            })
+                    
+                    await asyncio.sleep(0.1)
+                except:
+                    continue
+            
+            message = "🎯 **RSI Сканер:**\n\n"
+            
+            if overbought:
+                message += "🚨 **Перекуплені (RSI > 70):**\n"
+                for i, coin in enumerate(overbought[:5], 1):
+                    message += f"{i}. {coin['symbol']} - RSI: {coin['rsi']:.1f} ({coin['change']:.1f}%)\n"
+                message += "\n"
+            
+            if oversold:
+                message += "📉 **Перепродані (RSI < 30):**\n"
+                for i, coin in enumerate(oversold[:5], 1):
+                    message += f"{i}. {coin['symbol']} - RSI: {coin['rsi']:.1f} ({coin['change']:.1f}%)\n"
+            
+            if not overbought and not oversold:
+                message += "ℹ️ Немає сильних RSI сигналів"
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+                
+        except Exception as e:
+            logger.error(f"Помилка RSI сканера: {e}")
+            await update.message.reply_text("❌ Помилка RSI аналізу")
+
+    async def pump_detector_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.reply_text("🚨 Шукаю потенційні памп...")
+            gainers = await self.get_top_gainers(25)
+            
+            if not gainers:
+                await update.message.reply_text("❌ Не вдалося отримати дані")
+                return
+            
+            pump_signals = []
+            
+            for coin in gainers:
+                if (coin['change_24h'] > 15.0 and 
+                    coin.get('volume', 0) > 1000000 and
+                    coin['usd_price'] < 1.0):
+                    
+                    pump_signals.append(coin)
+            
+            if pump_signals:
+                message = "🚨 **Потенційні памп:**\n\n"
+                for i, coin in enumerate(pump_signals[:5], 1):
+                    message += (
+                        f"{i}. **{coin['symbol']}**\n"
+                        f"   📈 Зміна: {coin['change_24h']:.1f}%\n"
+                        f"   💰 Ціна: ${coin['usd_price']:.6f}\n"
+                        f"   📊 Об'єм: ${coin.get('volume', 0):,.0f}\n\n"
+                    )
+                await update.message.reply_text(message, parse_mode='Markdown')
+            else:
+                await update.message.reply_text("❌ Потенційних пампів не знайдено")
+                
+        except Exception as e:
+            logger.error(f"Помилка детектора пампів: {e}")
+            await update.message.reply_text("❌ Помилка аналізу")
+
+    async def dump_detector_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.reply_text("📉 Функція детектора дампів в розробці...")
+            
+        except Exception as e:
+            logger.error(f"Помилка детектора дампів: {e}")
+            await update.message.reply_text("❌ Помилка аналізу")
+
     async def scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Покращена команда сканування"""
         try:
             await update.message.reply_text("🔍 Запускаю сканування 25+ монет...")
-            gainers = await self.get_top_gainers(40)  # Більше монет
+            gainers = await self.get_top_gainers(40)
             
             if not gainers:
                 await update.message.reply_text("❌ Не вдалося отримати дані")
@@ -627,7 +785,6 @@ class AdvancedPumpDumpBot:
             signal_messages = []
             analyzed_coins = []
             
-            # Паралельне сканування
             tasks = []
             for coin in gainers[:scan_limit]:
                 tasks.append(self.process_coin_for_scan(coin))
@@ -641,7 +798,6 @@ class AdvancedPumpDumpBot:
                 elif isinstance(result, dict) and result.get('analyzed'):
                     analyzed_coins.append(result['symbol'])
             
-            # Відправляємо результати
             if signals_found > 0:
                 result_message = f"✅ Сканування завершено!\n📊 Проаналізовано: {len(analyzed_coins)} монет\n🎯 Знайдено сигналів: {signals_found}\n\n"
                 result_message += "\n\n".join(signal_messages)
@@ -666,7 +822,6 @@ class AdvancedPumpDumpBot:
             await update.message.reply_text("❌ Помилка під час сканування")
 
     async def process_coin_for_scan(self, coin: Dict) -> Dict:
-        """Обробка однієї монети для сканування"""
         try:
             market_data = await self.get_market_data(coin['symbol'])
             if not market_data:
@@ -691,7 +846,6 @@ class AdvancedPumpDumpBot:
             return {'analyzed': True, 'symbol': coin['symbol']}
 
     async def large_orders_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Пошук монет з великими ордерами"""
         try:
             await update.message.reply_text("💰 Шукаю монети з великими ордерами...")
             gainers = await self.get_top_gainers(30)
@@ -737,12 +891,7 @@ class AdvancedPumpDumpBot:
             logger.error(f"Помилка пошуку великих ордерів: {e}")
             await update.message.reply_text("❌ Помилка пошуку")
 
-    async def scan_all_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда для повного сканування"""
-        await self.scan_command(update, context)
-
     async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /settings"""
         try:
             current_settings = "\n".join([f"• {k}: {v}" for k, v in self.pump_thresholds.items()])
             await update.message.reply_text(f"⚙️ Поточні налаштування:\n{current_settings}")
@@ -751,7 +900,6 @@ class AdvancedPumpDumpBot:
             await update.message.reply_text("❌ Помилка відображення налаштувань")
 
     async def blacklist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /blacklist"""
         try:
             blacklist_str = "\n".join(self.coin_blacklist) if self.coin_blacklist else "Чорний список порожній."
             await update.message.reply_text(f"🚫 Чорний список:\n{blacklist_str}")
@@ -760,90 +908,15 @@ class AdvancedPumpDumpBot:
             await update.message.reply_text("❌ Помилка відображення чорного списку")
 
     async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /debug"""
         try:
             await update.message.reply_text("🐞 Режим налагодження активовано. Логи будуть детальнішими.")
             logging.getLogger().setLevel(logging.DEBUG)
         except Exception as e:
             logger.error(f"Помилка команди debug: {e}")
 
-    async def market_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /analysis"""
-        try:
-            await update.message.reply_text("📋 Запускаю загальний аналіз ринку...")
-            gainers = await self.get_top_gainers(15)
-            
-            if gainers:
-                message = "📈 Топ-8 Gainers (24h):\n"
-                for i, coin in enumerate(gainers[:8], 1):
-                    message += f"{i}. {coin['symbol']}: {coin['change_24h']:.2f}%\n"
-                await update.message.reply_text(message)
-            else:
-                await update.message.reply_text("ℹ️ Дані ринку тимчасово недоступні")
-                
-        except Exception as e:
-            logger.error(f"Помилка команди analysis: {e}")
-            await update.message.reply_text("❌ Помилка аналізу ринку")
-
-    async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /performance"""
-        try:
-            stats = self.performance_stats
-            message = (f"📊 Статистика продуктивності:\n"
-                       f"• Всього сканувань: {stats['total_scans']}\n"
-                       f"• Знайдено сигналів: {stats['signals_found']}\n"
-                       f"• Успішність: {stats['success_rate']:.2f}%\n"
-                       f"• Сер. час сканування: {stats['avg_scan_time']:.2f} сек\n"
-                       f"• Монет проскановано: {stats['coins_scanned']}\n"
-                       f"• Uptime: {timedelta(seconds=int(time.time() - self.start_time))}")
-            await update.message.reply_text(message)
-        except Exception as e:
-            logger.error(f"Помилка команди performance: {e}")
-            await update.message.reply_text("❌ Помилка відображення статистики")
-
-    async def top_gainers_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка команди /topgainers"""
-        try:
-            await update.message.reply_text("📈 Отримую список топ-монет...")
-            gainers = await self.get_top_gainers(20)
-            
-            if not gainers:
-                await update.message.reply_text("❌ Не вдалося отримати дані.")
-                return
-                
-            message = "🏆 Топ-15 Gainers (24h):\n"
-            for i, coin in enumerate(gainers[:15], 1):
-                message += f"{i}. {coin['symbol']}: {coin['change_24h']:.2f}%\n"
-                
-            await update.message.reply_text(message)
-            
-        except Exception as e:
-            logger.error(f"Помилка команди topgainers: {e}")
-            await update.message.reply_text("❌ Помилка отримання топ gainers")
-
-    def handle_webhook(self, data):
-        """Обробка вхідних вебхуків"""
-        try:
-            logger.info(f"📩 Отримано вебхук: {data}")
-            return jsonify({'status': 'webhook_received', 'timestamp': datetime.now().isoformat()})
-        except Exception as e:
-            logger.error(f"Помилка обробки вебхука: {e}")
-            return jsonify({'status': 'error', 'message': str(e)})
-
-    def update_settings(self, new_settings: dict):
-        """Оновлення налаштувань"""
-        try:
-            valid_settings = {k: v for k, v in new_settings.items() if k in self.pump_thresholds}
-            self.pump_thresholds.update(valid_settings)
-            logger.info(f"⚙️ Налаштування оновлено: {valid_settings}")
-        except Exception as e:
-            logger.error(f"Помилка оновлення налаштувань: {e}")
-
     async def orderbook_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Покращена команда orderbook"""
         try:
             if not context.args:
-                # Автоматичний пошук монет з великими ордерами
                 await self.large_orders_command(update, context)
                 return
                 
@@ -855,7 +928,6 @@ class AdvancedPumpDumpBot:
                 await update.message.reply_text(f"❌ Не вдалося отримати дані для {symbol}")
                 return
             
-            # Детальний аналіз
             message = (
                 f"📈 **Детальний аналіз {symbol}**\n\n"
                 f"⚖️ **Imbalance:** {orderbook['imbalance']:.4f}\n"
@@ -881,7 +953,6 @@ class AdvancedPumpDumpBot:
             await update.message.reply_text("❌ Помилка аналізу orderbook")
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка інлайн-кнопок"""
         try:
             query = update.callback_query
             await query.answer()
@@ -889,39 +960,51 @@ class AdvancedPumpDumpBot:
 
             if data == "scan_now":
                 await self.scan_command(query, context)
-            elif data == "top_gainers":
-                await self.top_gainers_command(query, context)
-            elif data == "orderbook_analysis":
-                await query.edit_message_text(text="📊 Введіть /orderbook <symbol> для аналізу")
             elif data == "large_orders":
                 await self.large_orders_command(query, context)
+            elif data == "top_volumes":
+                await self.top_volumes_command(query, context)
+            elif data == "fast_signals":
+                await self.fast_signals_command(query, context)
+            elif data == "rsi_scanner":
+                await self.rsi_scanner_command(query, context)
+            elif data == "orderbook_analysis":
+                await query.edit_message_text(text="📊 Введіть /orderbook <symbol> для аналізу")
+            elif data == "pump_detector":
+                await self.pump_detector_command(query, context)
+            elif data == "dump_detector":
+                await self.dump_detector_command(query, context)
             elif data == "settings":
                 await self.settings_command(query, context)
-            elif data == "stats":
-                await query.edit_message_text(text="📈 Статистика бота...")
             elif data == "blacklist":
                 await self.blacklist_command(query, context)
-            elif data == "scan_all":
-                await self.scan_all_command(query, context)
-            elif data == "market_analysis":
-                await self.market_analysis_command(query, context)
-            elif data == "performance":
-                await self.performance_command(query, context)
                 
         except Exception as e:
             logger.error(f"Помилка обробки кнопки: {e}")
 
-    # Інші методи залишаються без змін...
+    def handle_webhook(self, data):
+        try:
+            logger.info(f"📩 Отримано вебхук: {data}")
+            return jsonify({'status': 'webhook_received', 'timestamp': datetime.now().isoformat()})
+        except Exception as e:
+            logger.error(f"Помилка обробки вебхука: {e}")
+            return jsonify({'status': 'error', 'message': str(e)})
+
+    def update_settings(self, new_settings: dict):
+        try:
+            valid_settings = {k: v for k, v in new_settings.items() if k in self.pump_thresholds}
+            self.pump_thresholds.update(valid_settings)
+            logger.info(f"⚙️ Налаштування оновлено: {valid_settings}")
+        except Exception as e:
+            logger.error(f"Помилка оновлення налаштувань: {e}")
 
 def run_flask(app: Flask):
-    """Запуск Flask-сервера"""
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
     except Exception as e:
         logger.error(f"Помилка запуску Flask: {e}")
 
 def main():
-    """Головна функція"""
     try:
         BOT_TOKEN = os.getenv('BOT_TOKEN')
         
