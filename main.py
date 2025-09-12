@@ -1033,8 +1033,8 @@ async def dump_detector_command(self, update: Update, context: ContextTypes.DEFA
             await update.message.reply_text("❌ Помилка аналізу orderbook")
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробка інлайн-кнопок"""
-        try:
+    """Обробка інлайн-кнопок"""
+    try:
         query = update.callback_query
         await query.answer()
         data = query.data
