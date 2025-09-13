@@ -1181,7 +1181,7 @@ class UltimatePumpDumpDetector:
             
         return False
 
-    async def run(self):
+        async def run(self):
         """Запуск бота"""
         try:
             logger.info("🤖 Запускаю Ultimate Pump/Dump Detector...")
@@ -1194,7 +1194,9 @@ class UltimatePumpDumpDetector:
             # Запускаємо фонові tasks
             asyncio.create_task(self.background_monitoring())
             
-            await self.app.idle()
+            # Просто чекаємо безкінечно замість idle()
+            while True:
+                await asyncio.sleep(3600)  # Спимо 1 годину
             
         except Exception as e:
             logger.error(f"❌ Помилка запуску бота: {e}")
