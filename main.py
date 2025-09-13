@@ -1238,16 +1238,6 @@ class UltimatePumpDumpDetector:
         old_keys = []
         
         for symbol, data in self.market_data_cache.items():
-            if current_time - data['timestamp'] > 600: 
-            
-            # ... (попередній код залишається без змін) ...
-
-    def cleanup_old_cache(self):
-        """Очищення застарілого кешу"""
-        current_time = time.time()
-        old_keys = []
-        
-        for symbol, data in self.market_data_cache.items():
             if current_time - data['timestamp'] > 600:  # 10 хвилин
                 old_keys.append(symbol)
         
