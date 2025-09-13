@@ -1182,7 +1182,7 @@ class UltimatePumpDumpDetector:
         return False
 
         async def run(self):
-        """Запуск бота"""
+            """Запуск бота"""
         try:
             logger.info("🤖 Запускаю Ultimate Pump/Dump Detector...")
             await self.app.initialize()
