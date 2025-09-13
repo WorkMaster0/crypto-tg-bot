@@ -1183,7 +1183,7 @@ class UltimatePumpDumpDetector:
 
     async def run(self):
         """Запуск бота"""
-            try:
+        try:
             logger.info("🤖 Запускаю Ultimate Pump/Dump Detector...")
                 await self.app.initialize()
                 await self.app.start()
