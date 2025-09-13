@@ -1185,9 +1185,9 @@ class UltimatePumpDumpDetector:
             """Запуск бота"""
         try:
             logger.info("🤖 Запускаю Ultimate Pump/Dump Detector...")
-            await self.app.initialize()
-            await self.app.start()
-            await self.app.updater.start_polling()
+                await self.app.initialize()
+                await self.app.start()
+                await self.app.updater.start_polling()
             
             logger.info("✅ Бот успішно запущено!")
             
