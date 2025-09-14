@@ -118,7 +118,8 @@ class UltimatePumpDumpDetector:
             'SXP', 'CHZ', 'OOKI', 'CREAM', 'FTT', 'BTT', 'WIN', 'TRX', 'BCH',
             'LTC', 'HARD', 'XLM', 'XMR', 'XTZ', 'WTC', 'DASH', 'ETC', 'BETA',
             'BURGER', 'FIRO', 'CVP', 'EPX', 'PROS', 'SLF', 'OAX', 'VIDT',
-            'WING', 'CLV', 'FOR', 'VITE', 'TROY'
+            'WING', 'CLV', 'FOR', 'VITE', 'TROY', 'LEVER', 'MULTI', 'GFT',
+            'DREP', 'PERL', 'UFT'
         }
         
         patterns = {
