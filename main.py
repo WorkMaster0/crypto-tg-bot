@@ -113,10 +113,10 @@ class UltimatePumpDumpDetector:
         base = {
             'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'RUB', 'TRY', 'BRL', 'KRW', 'AUD',
             'USDC', 'USDT', 'BUSD', 'DAI', 'TUSD', 'PAX', 'UST', 'HUSD', 'GUSD',
-            'PAXG', 'WBTC', 'BTCB', 'ETHB', 'BNB', 'HT', 'OKB', 'LEO', 'LINK',
-            'XRP', 'ADA', 'DOT', 'DOGE', 'SHIB', 'MATIC', 'SOL', 'AVAX', 'FTM',
-            'SXP', 'CHZ', 'VET', 'THETA', 'FTT', 'BTT', 'WIN', 'TRX', 'BCH',
-            'LTC', 'EOS', 'XLM', 'XMR', 'XTZ', 'ZEC', 'DASH', 'ETC', 'NEO'
+            'PAXG', 'WBTC', 'BTCB', 'ETHB', 'BNB', 'HT', 'PNT', 'LEO', 'LINK',
+            'XRP', 'ADA', 'DOT', 'DOGE', 'SHIB', 'VIB', 'SOL', 'AVAX', 'FTM',
+            'SXP', 'CHZ', 'OOKI', 'CREAM', 'FTT', 'BTT', 'WIN', 'TRX', 'BCH',
+            'LTC', 'HARD', 'XLM', 'XMR', 'XTZ', 'WTC', 'DASH', 'ETC', 'BETA'
         }
         
         patterns = {
