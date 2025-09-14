@@ -66,25 +66,25 @@ class UltimatePumpDumpDetector:
         self.garbage_symbols = self._load_garbage_symbols()
         self.coin_blacklist = set()
         
-        # Динамічні параметри для виявлення
+        # Динамічні параметри для виявлення (знижені пороги для тестування)
         self.detection_params = {
-            'volume_spike_threshold': 1.5,
-            'price_acceleration_min': 0.002,
+            'volume_spike_threshold': 1.2,
+            'price_acceleration_min': 0.001,
             'rsi_oversold': 30,
             'rsi_overbought': 70,
             'orderbook_imbalance_min': 0.1,
             'large_order_threshold': 10000,
-            'min_volume_usdt': 50000,
+            'min_volume_usdt': 10000,
             'max_volume_usdt': 2000000,
-            'price_change_5m_min': 1.0,
+            'price_change_5m_min': 0.5,
             'wick_ratio_threshold': 0.3,
             'market_cap_filter': 1000000,
             'liquidity_score_min': 0.3,
-            'pump_probability_threshold': 0.4,
-            'dump_probability_threshold': 0.4,
+            'pump_probability_threshold': 0.3,
+            'dump_probability_threshold': 0.3,
             'whale_volume_threshold': 10000,
             'volatility_spike_threshold': 1.5,
-            'min_daily_change': 5.0  # Мінімальна зміна за добу для фільтрації
+            'min_daily_change': 2.0
         }
         
         # Тривожні сигнали та історія
@@ -145,6 +145,7 @@ class UltimatePumpDumpDetector:
             CommandHandler("emergency", self.emergency_scan),
             CommandHandler("debug", self.debug_command),
             CommandHandler("test", self.test_command),
+            CommandHandler("test_symbol", self.test_symbol_command),
             CallbackQueryHandler(self.advanced_button_handler)
         ]
         
@@ -195,16 +196,8 @@ class UltimatePumpDumpDetector:
         await update.message.reply_text(f"📡 Мережа: {'✅' if network_ok else '❌'}")
         
         # Тест 2: Перевірка підключення до Binance
-        try:
-            if self.exchange:
-                markets = await asyncio.get_event_loop().run_in_executor(
-                    self.executor, self.exchange.load_markets
-                )
-                await update.message.reply_text(f"📊 Binance: ✅ ({len(markets)} ринків)")
-            else:
-                await update.message.reply_text("📊 Binance: ❌ (не ініціалізовано)")
-        except Exception as e:
-            await update.message.reply_text(f"📊 Binance: ❌ ({str(e)})")
+        exchange_ok = await self.check_exchange_connection()
+        await update.message.reply_text(f"📊 Binance: {'✅' if exchange_ok else '❌'}")
         
         # Тест 3: Отримання топ гейнерів
         try:
@@ -212,6 +205,63 @@ class UltimatePumpDumpDetector:
             await update.message.reply_text(f"📈 Топ гейнери: {', '.join([s.replace('/USDT', '') for s in gainers])}")
         except Exception as e:
             await update.message.reply_text(f"📈 Топ гейнери: ❌ ({str(e)})")
+
+    async def test_symbol_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Тестування конкретного символу"""
+        try:
+            if not context.args:
+                await update.message.reply_text("Вкажіть символ, наприклад: /test_symbol BTC/USDT")
+                return
+            
+            symbol = context.args[0].upper()
+            if not symbol.endswith('/USDT'):
+                symbol += '/USDT'
+            
+            await update.message.reply_text(f"🔍 Тестую символ {symbol}...")
+            
+            # Отримуємо всі дані
+            market_data = await self.get_market_data(symbol)
+            orderbook = await self.get_orderbook_depth(symbol)
+            klines = await self.get_klines(symbol, '5m', 20)
+            
+            if not all([market_data, orderbook, klines]):
+                await update.message.reply_text("❌ Не вдалося отримати дані для символу")
+                return
+            
+            # Аналіз
+            tech = self.technical_analysis(klines)
+            ob_analysis = self.orderbook_analysis(orderbook)
+            volume_analysis = self.volume_analysis(klines, market_data)
+            
+            pump_prob = self.calculate_pump_probability(tech, ob_analysis, volume_analysis)
+            dump_prob = self.calculate_dump_probability(tech, ob_analysis, volume_analysis)
+            
+            response = (
+                f"📊 **РЕЗУЛЬТАТИ ТЕСТУ ДЛЯ {symbol}:**\n\n"
+                f"💰 Ціна: ${market_data['close']:.6f}\n"
+                f"📈 Зміна 24h: {market_data['percentage']:.2f}%\n"
+                f"📊 Об'єм: ${market_data['volume']:,.0f}\n\n"
+                f"📊 **ТЕХНІЧНИЙ АНАЛІЗ:**\n"
+                f"• RSI: {tech['rsi']:.1f}\n"
+                f"• MACD Hist: {tech['macd_hist']:.6f}\n"
+                f"• Волатильність: {tech['volatility']:.2f}%\n"
+                f"• Прискорення ціни: {tech['price_acceleration']:.4f}\n\n"
+                f"📊 **СТАКАН:**\n"
+                f"• Imbalance: {ob_analysis['imbalance']:.3f}\n"
+                f"• Великі покупки: {ob_analysis['large_bids']}\n"
+                f"• Великі продажі: {ob_analysis['large_asks']}\n\n"
+                f"📊 **ОБ'ЄМИ:**\n"
+                f"• Спайк об'ємів: {volume_analysis['volume_spike_ratio']:.2f}x\n"
+                f"• Кореляція ціна/об'єм: {volume_analysis['volume_price_correlation']:.2f}\n\n"
+                f"🚨 **ЙМОВІРНОСТІ:**\n"
+                f"• Pump: {pump_prob:.2%}\n"
+                f"• Dump: {dump_prob:.2%}\n"
+            )
+            
+            await update.message.reply_text(response, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Помилка тесту: {e}")
 
     async def check_network_connection(self) -> bool:
         """Перевірка мережевого з'єднання"""
@@ -223,6 +273,52 @@ class UltimatePumpDumpDetector:
             logger.error(f"Помилка мережі: {e}")
             return False
 
+    async def check_exchange_connection(self) -> bool:
+        """Перевірка підключення до біржі"""
+        if not self.exchange:
+            logger.error("Біржа не ініціалізована")
+            return False
+        
+        try:
+            # Проста перевірка пінга
+            await asyncio.get_event_loop().run_in_executor(
+                self.executor, lambda: self.exchange.fetch_status()
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Помилка підключення до біржі: {e}")
+            return False
+
+    async def fetch_ticker_async(self, symbol: str):
+        """Асинхронне отримання ticker даних"""
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                self.executor, lambda: self.exchange.fetch_ticker(symbol)
+            )
+        except Exception as e:
+            logger.error(f"Помилка отримання ticker для {symbol}: {e}")
+            return None
+
+    async def fetch_order_book_async(self, symbol: str, limit: int = 20):
+        """Асинхронне отримання стакану"""
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                self.executor, lambda: self.exchange.fetch_order_book(symbol, limit)
+            )
+        except Exception as e:
+            logger.error(f"Помилка отримання стакану для {symbol}: {e}")
+            return {'bids': [], 'asks': [], 'symbol': symbol}
+
+    async def fetch_ohlcv_async(self, symbol: str, timeframe: str = '5m', limit: int = 50):
+        """Асинхронне отримання історичних даних"""
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                self.executor, lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit)
+            )
+        except Exception as e:
+            logger.error(f"Помилка отримання ohlcv для {symbol}: {e}")
+            return []
+
     async def get_market_data(self, symbol: str) -> Optional[Dict]:
         """Отримання ринкових даних"""
         logger.debug(f"Отримання даних для {symbol}")
@@ -231,28 +327,17 @@ class UltimatePumpDumpDetector:
                 logger.error("Біржа не ініціалізована")
                 return None
                 
-            for attempt in range(2):
-                try:
-                    ticker = await asyncio.get_event_loop().run_in_executor(
-                        self.executor, 
-                        lambda: self.exchange.fetch_ticker(symbol)
-                    )
-                    result = self.parse_ticker_data(ticker, symbol)
-                    logger.debug(f"Дані отримані для {symbol}: {result['close']}")
-                    return result
-                except (asyncio.TimeoutError, ccxt.NetworkError) as e:
-                    logger.warning(f"Спроба {attempt+1} для {symbol} невдала: {e}")
-                    if attempt == 1:
-                        raise
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logger.error(f"Несподівана помилка для {symbol}: {e}")
-                    break
-                    
+            ticker = await self.fetch_ticker_async(symbol)
+            if not ticker:
+                return None
+                
+            result = self.parse_ticker_data(ticker, symbol)
+            logger.debug(f"Дані отримані для {symbol}: {result['close']}")
+            return result
+            
         except Exception as e:
             logger.error(f"Не вдалося отримати дані для {symbol}: {e}")
-        
-        return None
+            return None
 
     def parse_ticker_data(self, ticker: Dict, symbol: str) -> Dict:
         """Парсинг даних ticker"""
@@ -280,10 +365,7 @@ class UltimatePumpDumpDetector:
             if not self.exchange:
                 return {'bids': [], 'asks': [], 'symbol': symbol}
                 
-            orderbook = await asyncio.get_event_loop().run_in_executor(
-                self.executor, 
-                lambda: self.exchange.fetch_order_book(symbol, limit)
-            )
+            orderbook = await self.fetch_order_book_async(symbol, limit)
             orderbook['symbol'] = symbol
             return orderbook
         except Exception as e:
@@ -297,60 +379,35 @@ class UltimatePumpDumpDetector:
             if not self.exchange:
                 return []
                 
-            klines = await asyncio.get_event_loop().run_in_executor(
-                self.executor, 
-                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit)
-            )
+            klines = await self.fetch_ohlcv_async(symbol, timeframe, limit)
             return klines
         except Exception as e:
             logger.error(f"Помилка отримання klines для {symbol}: {e}")
             return []
 
     async def get_top_gainers(self, limit: int = 50) -> List[str]:
-        """Отримання топ гейнерів (монет з найбільшим зростанням за 24h)"""
-        logger.debug("Отримання топ гейнерів")
+        """Отримання топ гейнерів (спрощена версія)"""
         try:
             if not self.exchange:
                 return self.get_fallback_symbols(limit)
-                
-            # Завантажуємо ринки
-            await asyncio.get_event_loop().run_in_executor(
-                self.executor, self.exchange.load_markets
+            
+            # Отримуємо всі tickers
+            tickers = await asyncio.get_event_loop().run_in_executor(
+                self.executor, lambda: self.exchange.fetch_tickers()
             )
             
-            # Фільтруємо USDT пари
+            # Фільтруємо USDT пари з достатнім об'ємом
             usdt_pairs = []
-            for symbol, market in self.exchange.markets.items():
+            for symbol, ticker in tickers.items():
                 if (symbol.endswith('/USDT') and 
-                    market.get('active', False) and
-                    market.get('quoteVolume', 0) > self.detection_params['min_volume_usdt'] and
+                    ticker.get('quoteVolume', 0) > self.detection_params['min_volume_usdt'] and
                     not self.is_garbage_symbol(symbol)):
-                    usdt_pairs.append(symbol)
+                    usdt_pairs.append((symbol, ticker.get('percentage', 0)))
             
-            # Обмежуємо кількість для продуктивності
-            usdt_pairs = usdt_pairs[:100]
+            # Сортуємо за зміною ціни
+            usdt_pairs.sort(key=lambda x: abs(x[1]), reverse=True)
             
-            # Отримуємо дані ticker
-            ticker_data = {}
-            for symbol in usdt_pairs:
-                try:
-                    ticker = await asyncio.get_event_loop().run_in_executor(
-                        self.executor, lambda: self.exchange.fetch_ticker(symbol)
-                    )
-                    if (ticker and 'percentage' in ticker and 
-                        ticker['percentage'] is not None and
-                        abs(ticker['percentage']) >= self.detection_params['min_daily_change']):
-                        ticker_data[symbol] = ticker['percentage']
-                    await asyncio.sleep(0.1)  # Rate limiting
-                except Exception as e:
-                    continue
-            
-            # Сортуємо за абсолютним значенням зміни (щоб знайти і пампы і дампи)
-            sorted_symbols = sorted(ticker_data.keys(), 
-                                   key=lambda x: abs(ticker_data[x]), 
-                                   reverse=True)
-            
-            return sorted_symbols[:limit]
+            return [pair[0] for pair in usdt_pairs[:limit]]
             
         except Exception as e:
             logger.error(f"Помилка отримання топ гейнерів: {e}")
@@ -783,30 +840,51 @@ class UltimatePumpDumpDetector:
             return f"{index}. Помилка форматування сигналу\n\n"
 
     async def analyze_symbol(self, symbol: str) -> Dict:
-        """Комплексний аналіз символу"""
+        """Комплексний аналіз символу з детальним логуванням"""
         try:
+            logger.debug(f"Початок аналізу {symbol}")
+            
             if not await self.check_network_connection():
+                logger.warning(f"Немає мережевого з'єднання для {symbol}")
                 return {}
             
             market_data = await self.get_market_data(symbol)
-            if not market_data or market_data['volume'] < self.detection_params['min_volume_usdt']:
+            if not market_data:
+                logger.warning(f"Не вдалося отримати market data для {symbol}")
+                return {}
+                
+            logger.debug(f"Market data для {symbol}: {market_data}")
+            
+            if market_data['volume'] < self.detection_params['min_volume_usdt']:
+                logger.debug(f"Об'єм занадто малий для {symbol}: {market_data['volume']}")
                 return {}
             
             if self.is_garbage_symbol(symbol):
+                logger.debug(f"Символ у сміттєвому списку: {symbol}")
                 return {}
             
             orderbook = await self.get_orderbook_depth(symbol, 30)
             klines = await self.get_klines(symbol, '5m', 50)
             
-            if not klines or not orderbook:
+            logger.debug(f"Orderbook для {symbol}: {len(orderbook.get('bids', []))} bids, {len(orderbook.get('asks', []))} asks")
+            logger.debug(f"Klines для {symbol}: {len(klines)} записів")
+            
+            if not klines or len(klines) < 10:
+                logger.warning(f"Недостатньо даних klines для {symbol}")
                 return {}
             
             tech_analysis = self.technical_analysis(klines)
             ob_analysis = self.orderbook_analysis(orderbook)
             volume_analysis = self.volume_analysis(klines, market_data)
             
+            logger.debug(f"Технічний аналіз для {symbol}: {tech_analysis}")
+            logger.debug(f"Аналіз стакану для {symbol}: {ob_analysis}")
+            logger.debug(f"Аналіз об'ємів для {symbol}: {volume_analysis}")
+            
             pump_prob = self.calculate_pump_probability(tech_analysis, ob_analysis, volume_analysis)
             dump_prob = self.calculate_dump_probability(tech_analysis, ob_analysis, volume_analysis)
+            
+            logger.debug(f"Ймовірності для {symbol}: Pump={pump_prob}, Dump={dump_prob}")
             
             return {
                 'symbol': symbol,
@@ -822,7 +900,7 @@ class UltimatePumpDumpDetector:
             }
             
         except Exception as e:
-            logger.error(f"Помилка аналізу {symbol}: {e}")
+            logger.error(f"Критична помилка аналізу {symbol}: {e}")
             return {}
 
     async def analyze_pump_potential(self, symbol: str) -> Dict:
@@ -901,6 +979,10 @@ class UltimatePumpDumpDetector:
     async def deep_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Глибинне сканування топ гейнерів"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("🔍 Запускаю сканування топ гейнерів...")
             
             # Отримуємо топ гейнери замість активних символів
@@ -935,6 +1017,10 @@ class UltimatePumpDumpDetector:
     async def pump_radar_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Детектор пампів серед топ гейнерів"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("🚨 АКТИВУЮ PUMP RADAR для топ гейнерів...")
             
             symbols = await self.get_top_gainers(limit=15)
@@ -970,6 +1056,10 @@ class UltimatePumpDumpDetector:
     async def dump_radar_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Детектор дампів серед топ гейнерів"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("📉 АКТИВУЮ DUMP RADAR для топ гейнерів...")
             
             symbols = await self.get_top_gainers(limit=15)
@@ -1004,6 +1094,10 @@ class UltimatePumpDumpDetector:
     async def whale_watch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Моніторинг китів"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("🐋 ВІДСТЕЖУЮ КИТІВ...")
             
             whale_activity = await self.detect_whale_activity()
@@ -1029,6 +1123,10 @@ class UltimatePumpDumpDetector:
     async def liquidity_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сканування ліквідності"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("💧 АНАЛІЗУЮ ЛІКВІДНІСТЬ...")
             
             symbols = await self.get_top_gainers(limit=15)
@@ -1061,6 +1159,10 @@ class UltimatePumpDumpDetector:
     async def volatility_alert_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сигнали волатильності"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("⚡ ШУКАЮ ВОЛАТИЛЬНІСТЬ...")
             
             symbols = await self.get_top_gainers(limit=15)
@@ -1081,7 +1183,7 @@ class UltimatePumpDumpDetector:
             if volatile_symbols:
                 volatile_symbols.sort(key=lambda x: x['volatility'], reverse=True)
                 
-                response = "⚡ **ВИСОКА ВОЛАТИЛЬНІСТЬ СЕРЕД ГЕЙНЕРІВ:**\n\n"
+                response = "⚡ **ВИСОКА ВОЛАТИЛЬНІСТЬ СЕРЕД ГЕЙНЕРАХ:**\n\n"
                 for i, data in enumerate(volatile_symbols[:5], 1):
                     response += (
                         f"{i}. **{data['symbol']}** - Волатильність: {data['volatility']:.2f}%\n"
@@ -1098,6 +1200,10 @@ class UltimatePumpDumpDetector:
     async def ai_risk_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """AI аналіз ризиків"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("🤖 AI АНАЛІЗ РИЗИКІВ...")
             
             symbols = await self.get_top_gainers(limit=10)
@@ -1166,6 +1272,10 @@ class UltimatePumpDumpDetector:
     async def quick_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Швидке сканування"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("⚡ ШВИДКЕ СКАНУВАННЯ ГЕЙНЕРІВ...")
             
             symbols = await self.get_top_gainers(limit=10)
@@ -1208,6 +1318,10 @@ class UltimatePumpDumpDetector:
     async def emergency_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Екстрене сканування"""
         try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
             msg = await update.message.reply_text("🚨 ЕКСТРЕНЕ СКАНУВАННЯ ГЕЙНЕРІВ...")
             
             symbols = await self.get_top_gainers(limit=10)
@@ -1252,6 +1366,7 @@ class UltimatePumpDumpDetector:
         """Діагностична команда"""
         try:
             network_ok = await self.check_network_connection()
+            exchange_ok = await self.check_exchange_connection()
             test_symbol = 'BTC/USDT'
             
             market_data = await self.get_market_data(test_symbol)
@@ -1265,7 +1380,7 @@ class UltimatePumpDumpDetector:
 🔧 **ДІАГНОСТИКА:**
 
 📡 Мережа: {'✅' if network_ok else '❌'}
-📊 Біржа: {'✅' if self.exchange else '❌'}
+📊 Біржа: {'✅' if exchange_ok else '❌'}
 📈 Топ гейнери: {len(gainers)} монет
 
 💰 BTC Ціна: {market_data.get('close', 'N/A') if market_data else 'N/A'}
