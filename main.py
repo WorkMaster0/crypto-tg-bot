@@ -943,14 +943,6 @@ class UltimatePumpDumpDetector:
                 'price_acceleration': tech['price_acceleration']
             }
             
-            if self.is_pump_dump_trap(symbol, klines, ob_analysis):
-        return {
-            'symbol': symbol,
-            'pump_confidence': 0,  # Нульова впевненість для пастки
-            'is_trap': True,
-            'warning': '🚨 PUMP & DUMP TRAP DETECTED'
-        }
-            
         except Exception as e:
             return {}
 
