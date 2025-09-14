@@ -52,7 +52,7 @@ class UltimatePumpDumpDetector:
         try:
             self.exchange = ccxt.binance({
                 'enableRateLimit': True,
-                'timeout': 20000,
+                'timeout': 30000,
                 'options': {
                     'defaultType': 'spot',
                     'adjustForTimeDifference': True,
@@ -69,25 +69,25 @@ class UltimatePumpDumpDetector:
         
         # Параметри для виявлення
         self.detection_params = {
-            'volume_spike_threshold': 1.8,
-            'price_acceleration_min': 0.003,
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-            'orderbook_imbalance_min': 0.15,
-            'large_order_threshold': 50000,
-            'min_volume_usdt': 1000000,
-            'max_volume_usdt': 50000000,
-            'price_change_5m_min': 1.0,
-            'wick_ratio_threshold': 0.25,
-            'market_cap_filter': 1000000,
-            'liquidity_score_min': 0.4,
-            'pump_probability_threshold': 0.6,
-            'dump_probability_threshold': 0.6,
-            'whale_volume_threshold': 50000,
-            'volatility_spike_threshold': 2.0,
-            'min_daily_change': 5.0,
-            'min_price': 0.0005,
-            'max_symbols_per_scan': 100
+            'volume_spike_threshold': 2.0,
+            'price_acceleration_min': 0.005,
+            'rsi_oversold': 35,
+            'rsi_overbought': 65,
+            'orderbook_imbalance_min': 0.2,
+            'large_order_threshold': 100000,
+            'min_volume_usdt': 500000,
+            'max_volume_usdt': 100000000,
+            'price_change_5m_min': 2.0,
+            'wick_ratio_threshold': 0.3,
+            'market_cap_filter': 500000,
+            'liquidity_score_min': 0.3,
+            'pump_probability_threshold': 0.55,
+            'dump_probability_threshold': 0.55,
+            'whale_volume_threshold': 75000,
+            'volatility_spike_threshold': 2.5,
+            'min_daily_change': 3.0,
+            'min_price': 0.0001,
+            'max_symbols_per_scan': 80
         }
         
         # Кеш та оптимізація
@@ -111,10 +111,11 @@ class UltimatePumpDumpDetector:
         }
         
         # Пул потоків
-        self.executor = ThreadPoolExecutor(max_workers=15)
+        self.executor = ThreadPoolExecutor(max_workers=10)
         self.setup_handlers()
         
         self.last_update_time = time.time()
+        self.profit_tracker = {}  # Трекер прибутковості сигналів
 
     def _load_garbage_symbols(self):
         """Розширений список непотрібних символів"""
@@ -148,7 +149,7 @@ class UltimatePumpDumpDetector:
             CommandHandler("mass_scan", self.mass_scan_command),
             CommandHandler("pump_radar", self.pump_radar_command),
             CommandHandler("dump_radar", self.dump_radar_command),
-            CommandHandler("liquidity_scan", self.liquidity_scan_command),
+            CommandHandler("money_maker", self.money_maker_command),  # Нова корисна кнопка
             CommandHandler("whale_watch", self.whale_watch_command),
             CommandHandler("volatility_alert", self.volatility_alert_command),
             CommandHandler("ai_risk_scan", self.ai_risk_scan_command),
@@ -157,6 +158,7 @@ class UltimatePumpDumpDetector:
             CommandHandler("performance", self.performance_command),
             CommandHandler("quick_scan", self.quick_scan_command),
             CommandHandler("emergency", self.emergency_scan),
+            CommandHandler("debug", self.debug_command),
             CommandHandler("test", self.test_command),
             CommandHandler("test_symbol", self.test_symbol_command),
             CommandHandler("scan_stats", self.scan_stats_command),
@@ -173,8 +175,8 @@ class UltimatePumpDumpDetector:
              InlineKeyboardButton("🔍 DEEP SCAN", callback_data="deep_scan")],
             [InlineKeyboardButton("📊 PUMP RADAR", callback_data="pump_radar"),
              InlineKeyboardButton("📉 DUMP RADAR", callback_data="dump_radar")],
-            [InlineKeyboardButton("🐋 WHALE WATCH", callback_data="whale_watch"),
-             InlineKeyboardButton("💧 LIQUIDITY SCAN", callback_data="liquidity_scan")],
+            [InlineKeyboardButton("💰 MONEY MAKER", callback_data="money_maker"),  # Нова кнопка
+             InlineKeyboardButton("🐋 WHALE WATCH", callback_data="whale_watch")],
             [InlineKeyboardButton("⚡ VOLATILITY", callback_data="volatility_alerts"),
              InlineKeyboardButton("🤖 AI RISK SCAN", callback_data="ai_risk_scan")],
             [InlineKeyboardButton("📈 SCAN STATS", callback_data="scan_stats"),
@@ -193,12 +195,98 @@ class UltimatePumpDumpDetector:
             "• 📊 Сканування 100+ токенів одночасно\n"
             "• ⚡ Миттєве виявлення аномалій\n"
             "• 🎯 Точні сигнали на основі даних\n"
-            "• 🔍 Глибинний технічний аналіз\n\n"
+            "• 🔍 Глибинний технічний аналіз\n"
+            "• 💰 Money Maker - прибуткові стратегії\n\n"
             "💎 _Фокус на якісних активах з високою ліквідністю_",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
     
+    async def money_maker_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Нова корисна функція - Money Maker"""
+        try:
+            if not await self.check_exchange_connection():
+                await update.message.reply_text("❌ Немає підключення до біржі")
+                return
+            
+            msg = await update.message.reply_text("💰 АНАЛІЗУЮ ПРИБУТКОВІ СТРАТЕГІЇ...")
+            
+            # Отримуємо топ монети
+            symbols = await self.get_all_qualified_symbols()
+            symbols = symbols[:20]  # Аналізуємо топ-20
+            
+            best_opportunities = []
+            
+            for symbol in symbols:
+                try:
+                    analysis = await self.analyze_symbol(symbol)
+                    if analysis:
+                        # Додатковий аналіз для Money Maker
+                        profit_score = self.calculate_profit_score(analysis)
+                        if profit_score > 0.6:
+                            analysis['profit_score'] = profit_score
+                            best_opportunities.append(analysis)
+                    
+                    await asyncio.sleep(0.2)
+                except Exception as e:
+                    continue
+            
+            if best_opportunities:
+                best_opportunities.sort(key=lambda x: x['profit_score'], reverse=True)
+                
+                response = "💰 **ТОП ПРИБУТКОВІ СТРАТЕГІЇ:**\n\n"
+                
+                for i, opportunity in enumerate(best_opportunities[:3], 1):
+                    symbol = opportunity['symbol'].replace('/USDT', '')
+                    response += f"{i}. 🎯 **{symbol}** - Прибутковість: {opportunity['profit_score']:.0%}\n"
+                    response += f"   📈 Вірогідність успіху: {max(opportunity['pump_probability'], opportunity['dump_probability']):.0%}\n"
+                    response += f"   💰 Рекомендована позиція: {'LONG' if opportunity['pump_probability'] > opportunity['dump_probability'] else 'SHORT'}\n"
+                    response += f"   ⏰ Таймфрейм: 15-30 хв\n"
+                    response += f"   🎯 Цільовий прибуток: 2-5%\n"
+                    response += f"   ⚠️ Стоп-лос: 1.5-2%\n\n"
+                
+                response += "📊 **СТРАТЕГІЯ:**\n"
+                response += "• Входьте пошарово (25%-25%-50%)\n"
+                response += "• Фіксуйте частку прибутку на кожному рівні\n"
+                response += "• Використовуйте трейлінг-стоп після +3%\n\n"
+                response += "💡 _Ризик-менеджмент: Не більше 2% депозиту на угоду_"
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text(
+                    "📊 Наразі сильних прибуткових можливостей не знайдено\n\n"
+                    "ℹ️ Перевірте пізніше або використовуйте:\n"
+                    "• /mass_scan - для повного сканування\n"
+                    "• /pump_radar - для pump сигналів\n"
+                    "• /dump_radar - для dump сигналів"
+                )
+                
+        except Exception as e:
+            logger.error(f"Помилка Money Maker: {e}")
+            await update.message.reply_text("❌ Помилка аналізу прибуткових стратегій")
+
+    def calculate_profit_score(self, analysis: Dict) -> float:
+        """Розрахунок оцінки прибутковості"""
+        try:
+            pump_prob = analysis['pump_probability']
+            dump_prob = analysis['dump_probability']
+            volume = analysis['volume_usdt']
+            volatility = analysis['technical_indicators']['volatility']
+            
+            # Базовий score на основі ймовірності
+            base_score = max(pump_prob, dump_prob)
+            
+            # Модифікатори
+            volume_modifier = min(volume / 5000000, 1.0)  # Нормалізація об'єму
+            volatility_modifier = min(volatility / 20.0, 1.0)  # Нормалізація волатильності
+            
+            # Фінальний score
+            profit_score = base_score * 0.6 + volume_modifier * 0.2 + volatility_modifier * 0.2
+            
+            return min(profit_score, 1.0)
+        except:
+            return 0.0
+
     async def mass_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Масове сканування 100+ токенів"""
         try:
@@ -206,7 +294,7 @@ class UltimatePumpDumpDetector:
                 await update.message.reply_text("❌ Немає підключення до біржі")
                 return
             
-            msg = await update.message.reply_text("🔥 ЗАПУСКАЮ МАСОВЕ СКАНУВАННЯ 100+ ТОКЕНІВ...")
+            msg = await update.message.reply_text("🔥 ЗАПУСКАЮ МАСОВЕ СКАНУВАННЯ...")
             
             start_time = time.time()
             symbols = await self.get_all_qualified_symbols()
@@ -221,12 +309,19 @@ class UltimatePumpDumpDetector:
             
             scan_time = time.time() - start_time
             self.performance_metrics['total_scans'] += 1
-            self.performance_metrics['avg_scan_time'] = scan_time
+            self.performance_metrics['avg_scan_time'] = (self.performance_metrics['avg_scan_time'] + scan_time) / 2
             self.performance_metrics['avg_symbols_per_scan'] = len(symbols)
             
             if results:
                 results.sort(key=lambda x: max(x['pump_probability'], x['dump_probability']), reverse=True)
                 self.performance_metrics['signals_triggered'] += len(results)
+                
+                # Оновлюємо статистику pump/dump сигналів
+                for result in results:
+                    if result['pump_probability'] > result['dump_probability']:
+                        self.performance_metrics['pump_signals_detected'] += 1
+                    else:
+                        self.performance_metrics['dump_signals_detected'] += 1
                 
                 response = (
                     f"🚨 **РЕЗУЛЬТАТИ МАСОВОГО СКАНУВАННЯ**\n\n"
@@ -236,8 +331,8 @@ class UltimatePumpDumpDetector:
                 )
                 
                 # Групуємо сигнали
-                strong_signals = [r for r in results if max(r['pump_probability'], r['dump_probability']) > 0.75]
-                medium_signals = [r for r in results if 0.6 <= max(r['pump_probability'], r['dump_probability']) <= 0.75]
+                strong_signals = [r for r in results if max(r['pump_probability'], r['dump_probability']) > 0.7]
+                medium_signals = [r for r in results if 0.55 <= max(r['pump_probability'], r['dump_probability']) <= 0.7]
                 
                 if strong_signals:
                     response += "🔥 **СИЛЬНІ СИГНАЛИ:**\n\n"
@@ -267,7 +362,7 @@ class UltimatePumpDumpDetector:
         """Масовий аналіз символів"""
         results = []
         
-        with ThreadPoolExecutor(max_workers=min(15, len(symbols))) as executor:
+        with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as executor:
             future_to_symbol = {
                 executor.submit(self.analyze_symbol, symbol): symbol 
                 for symbol in symbols
@@ -275,14 +370,14 @@ class UltimatePumpDumpDetector:
             
             for future in as_completed(future_to_symbol):
                 try:
-                    result = future.result(timeout=8.0)
+                    result = future.result(timeout=10.0)
                     if result:
                         results.append(result)
                 except Exception as e:
                     symbol = future_to_symbol[future]
                     logger.debug(f"Помилка аналізу {symbol}: {e}")
                 finally:
-                    time.sleep(0.03)
+                    time.sleep(0.05)
         
         return results
 
@@ -291,7 +386,7 @@ class UltimatePumpDumpDetector:
         current_time = time.time()
         
         if (self.symbols_cache and 
-            current_time - self.last_symbols_update < 300):
+            current_time - self.last_symbols_update < 600):  # Збільшено до 10 хвилин
             return self.symbols_cache
         
         try:
@@ -305,12 +400,15 @@ class UltimatePumpDumpDetector:
             qualified_symbols = []
             
             for symbol, market in markets.items():
-                if (symbol.endswith('/USDT') and 
-                    market.get('active', False) and
-                    market.get('quoteVolume', 0) >= self.detection_params['min_volume_usdt'] and
-                    not self.is_garbage_symbol(symbol)):
-                    
-                    qualified_symbols.append(symbol)
+                try:
+                    if (symbol.endswith('/USDT') and 
+                        market.get('active', False) and
+                        market.get('quoteVolume', 0) >= self.detection_params['min_volume_usdt'] and
+                        not self.is_garbage_symbol(symbol)):
+                        
+                        qualified_symbols.append(symbol)
+                except:
+                    continue
             
             # Сортуємо за об'ємом
             qualified_symbols.sort(key=lambda x: markets[x].get('quoteVolume', 0), reverse=True)
@@ -345,13 +443,13 @@ class UltimatePumpDumpDetector:
             if symbol_clean in self.garbage_symbols:
                 return True
             
-            if len(symbol_clean) > 10:
+            if len(symbol_clean) > 12:
                 return True
                 
             if any(char.isdigit() for char in symbol_clean):
                 return True
                 
-            suspicious_patterns = {'MOON', 'SUN', 'MARS', 'EARTH', 'PLUTO'}
+            suspicious_patterns = {'MOON', 'SUN', 'MARS', 'EARTH', 'PLUTO', 'AI', 'GPT'}
             if any(pattern in symbol_clean for pattern in suspicious_patterns):
                 return True
                 
@@ -371,12 +469,12 @@ class UltimatePumpDumpDetector:
                 return {}
             
             # Паралельне отримання даних
-            orderbook_future = asyncio.create_task(self.get_orderbook_depth(symbol, 20))
-            klines_future = asyncio.create_task(self.get_klines(symbol, '5m', 20))
+            orderbook_future = asyncio.create_task(self.get_orderbook_depth(symbol, 15))
+            klines_future = asyncio.create_task(self.get_klines(symbol, '5m', 25))
             
             orderbook, klines = await asyncio.gather(orderbook_future, klines_future)
             
-            if not klines or len(klines) < 15:
+            if not klines or len(klines) < 20:
                 return {}
             
             # Аналіз
@@ -388,7 +486,7 @@ class UltimatePumpDumpDetector:
             dump_prob = self.calculate_dump_probability(tech_analysis, ob_analysis, volume_analysis)
             
             # Перевірка якості сигналу
-            if max(pump_prob, dump_prob) < 0.6:
+            if max(pump_prob, dump_prob) < self.detection_params['pump_probability_threshold']:
                 return {}
             
             return {
@@ -414,7 +512,7 @@ class UltimatePumpDumpDetector:
             current_time = time.time()
             
             if (symbol in self.market_data_cache and 
-                current_time - self.market_data_cache[symbol]['timestamp'] < 30):
+                current_time - self.market_data_cache[symbol]['timestamp'] < 45):  # Збільшено до 45 секунд
                 return self.market_data_cache[symbol]['data']
             
             if not self.exchange:
@@ -451,12 +549,12 @@ class UltimatePumpDumpDetector:
     def technical_analysis(self, klines: List) -> Dict:
         """Технічний аналіз"""
         try:
-            if len(klines) < 15:
+            if len(klines) < 20:
                 return {'rsi': 50, 'macd_hist': 0, 'volatility': 0, 'price_acceleration': 0, 'trend_strength': 0.5}
             
-            closes = np.array([float(k[4]) for k in klines[-15:]])
-            highs = np.array([float(k[2]) for k in klines[-15:]])
-            lows = np.array([float(k[3]) for k in klines[-15:]])
+            closes = np.array([float(k[4]) for k in klines[-20:]])
+            highs = np.array([float(k[2]) for k in klines[-20:]])
+            lows = np.array([float(k[3]) for k in klines[-20:]])
             
             # RSI
             rsi = talib.RSI(closes, timeperiod=14)[-1] if len(closes) >= 14 else 50
@@ -469,8 +567,8 @@ class UltimatePumpDumpDetector:
             volatility = talib.ATR(highs, lows, closes, timeperiod=14)[-1] / closes[-1] * 100 if len(closes) >= 14 else 0
             
             # Прискорення ціни
-            if len(closes) >= 6:
-                price_acceleration = np.polyfit(range(6), closes[-6:], 1)[0] / closes[-6] * 100
+            if len(closes) >= 8:
+                price_acceleration = np.polyfit(range(8), closes[-8:], 1)[0] / closes[-8] * 100
             else:
                 price_acceleration = 0
             
@@ -494,8 +592,11 @@ class UltimatePumpDumpDetector:
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
             
-            total_bid = sum(float(bid[1]) for bid in bids[:20])
-            total_ask = sum(float(ask[1]) for ask in asks[:20])
+            if not bids or not asks:
+                return {'imbalance': 0, 'large_bids': 0, 'large_asks': 0, 'total_bid_volume': 0, 'total_ask_volume': 0}
+            
+            total_bid = sum(float(bid[1]) for bid in bids[:15])
+            total_ask = sum(float(ask[1]) for ask in asks[:15])
             
             imbalance = (total_bid - total_ask) / (total_bid + total_ask) if (total_bid + total_ask) > 0 else 0
             
@@ -516,7 +617,7 @@ class UltimatePumpDumpDetector:
     def volume_analysis(self, klines: List, market_data: Dict) -> Dict:
         """Аналіз об'ємів"""
         try:
-            if len(klines) < 10:
+            if len(klines) < 15:
                 return {
                     'volume_spike_ratio': 1.0,
                     'volume_price_correlation': 0,
@@ -527,13 +628,13 @@ class UltimatePumpDumpDetector:
             volumes = np.array([float(k[5]) for k in klines])
             closes = np.array([float(k[4]) for k in klines])
             
-            avg_volume = np.mean(volumes[:-5]) if len(volumes) > 5 else volumes[0]
+            avg_volume = np.mean(volumes[:-8]) if len(volumes) > 8 else volumes[0]
             current_volume = volumes[-1] if len(volumes) > 0 else 0
             volume_spike = current_volume / avg_volume if avg_volume > 0 else 1
             
-            if len(closes) > 10:
-                price_changes = np.diff(closes[-10:])
-                volume_changes = np.diff(volumes[-10:])
+            if len(closes) > 12:
+                price_changes = np.diff(closes[-12:])
+                volume_changes = np.diff(volumes[-12:])
                 if len(price_changes) == len(volume_changes) and len(price_changes) > 1:
                     correlation = np.corrcoef(price_changes, volume_changes)[0, 1]
                 else:
@@ -577,11 +678,11 @@ class UltimatePumpDumpDetector:
             }
             
             score = (
-                (1.0 if tech['rsi'] < 35 else 0.7 if tech['rsi'] < 45 else 0.3) * weights['rsi'] +
-                min(volume['volume_spike_ratio'] / 2.0, 1.0) * weights['volume_spike'] +
+                (1.0 if tech['rsi'] < 40 else 0.7 if tech['rsi'] < 50 else 0.3) * weights['rsi'] +
+                min(volume['volume_spike_ratio'] / 2.5, 1.0) * weights['volume_spike'] +
                 max(min(orderbook.get('imbalance', 0) + 0.5, 1.0), 0.0) * weights['ob_imbalance'] +
-                min(abs(tech['price_acceleration']) / 0.01, 1.0) * weights['price_accel'] +
-                min(tech['volatility'] / 15.0, 1.0) * weights['volatility']
+                min(abs(tech['price_acceleration']) / 0.015, 1.0) * weights['price_accel'] +
+                min(tech['volatility'] / 25.0, 1.0) * weights['volatility']
             )
             
             return round(score, 4)
@@ -600,11 +701,11 @@ class UltimatePumpDumpDetector:
             }
             
             score = (
-                (1.0 if tech['rsi'] > 75 else 0.7 if tech['rsi'] > 65 else 0.3) * weights['rsi'] +
+                (1.0 if tech['rsi'] > 70 else 0.7 if tech['rsi'] > 60 else 0.3) * weights['rsi'] +
                 (1.0 - min(max(volume['volume_price_correlation'], -1.0), 1.0)) * weights['volume_divergence'] +
                 max(min(-orderbook.get('imbalance', 0) + 0.5, 1.0), 0.0) * weights['ob_imbalance'] +
-                min(tech['volatility'] / 20.0, 1.0) * weights['volatility'] +
-                min(abs(tech['price_acceleration']) / 0.008, 1.0) * weights['price_accel']
+                min(tech['volatility'] / 30.0, 1.0) * weights['volatility'] +
+                min(abs(tech['price_acceleration']) / 0.012, 1.0) * weights['price_accel']
             )
             
             return round(score, 4)
@@ -640,11 +741,11 @@ class UltimatePumpDumpDetector:
 
     def get_strength_description(self, probability: float) -> str:
         """Опис сили сигналу"""
-        if probability > 0.8:
+        if probability > 0.75:
             return "ДУЖЕ СИЛЬНИЙ"
-        elif probability > 0.7:
+        elif probability > 0.65:
             return "СИЛЬНИЙ"
-        elif probability > 0.6:
+        elif probability > 0.55:
             return "ПОМІРНИЙ"
         else:
             return "СЛАБКИЙ"
@@ -659,15 +760,15 @@ class UltimatePumpDumpDetector:
             msg = await update.message.reply_text("🚨 АКТИВУЮ PUMP RADAR...")
             
             symbols = await self.get_all_qualified_symbols()
-            symbols = symbols[:30]
+            symbols = symbols[:25]  # Зменшено кількість для швидшої роботи
             
             pump_candidates = []
             
             for symbol in symbols:
                 analysis = await self.analyze_symbol(symbol)
-                if analysis and analysis['pump_probability'] > 0.65:
+                if analysis and analysis['pump_probability'] > 0.6:
                     pump_candidates.append(analysis)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.15)
             
             if pump_candidates:
                 pump_candidates.sort(key=lambda x: x['pump_probability'], reverse=True)
@@ -694,15 +795,15 @@ class UltimatePumpDumpDetector:
             msg = await update.message.reply_text("📉 АКТИВУЮ DUMP RADAR...")
             
             symbols = await self.get_all_qualified_symbols()
-            symbols = symbols[:30]
+            symbols = symbols[:25]
             
             dump_candidates = []
             
             for symbol in symbols:
                 analysis = await self.analyze_symbol(symbol)
-                if analysis and analysis['dump_probability'] > 0.65:
+                if analysis and analysis['dump_probability'] > 0.6:
                     dump_candidates.append(analysis)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.15)
             
             if dump_candidates:
                 dump_candidates.sort(key=lambda x: x['dump_probability'], reverse=True)
@@ -729,7 +830,7 @@ class UltimatePumpDumpDetector:
             msg = await update.message.reply_text("🔍 ЗАПУСКАЮ ГЛИБИННЕ СКАНУВАННЯ...")
             
             symbols = await self.get_all_qualified_symbols()
-            symbols = symbols[:50]
+            symbols = symbols[:40]  # Зменшено кількість
             
             results = await self.mass_analyze_symbols(symbols)
             
@@ -737,7 +838,7 @@ class UltimatePumpDumpDetector:
                 results.sort(key=lambda x: max(x['pump_probability'], x['dump_probability']), reverse=True)
                 
                 response = "🚨 **РЕЗУЛЬТАТИ ГЛИБИННОГО СКАНУВАННЯ:**\n\n"
-                for i, res in enumerate(results[:8], 1):
+                for i, res in enumerate(results[:6], 1):  # Зменшено кількість результатів
                     response += self.format_signal_message(res, i)
                 
                 response += f"📊 Знайдено {len(results)} сигналів з {len(symbols)} монет"
@@ -790,13 +891,13 @@ class UltimatePumpDumpDetector:
         """Перевірка мережевого з'єднання"""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get('https://api.binance.com/api/v3/ping', timeout=10) as response:
+                async with session.get('https://api.binance.com/api/v3/ping', timeout=15) as response:
                     return response.status == 200
         except Exception as e:
             logger.error(f"Помилка мережі: {e}")
             return False
 
-    async def get_orderbook_depth(self, symbol: str, limit: int = 20) -> Dict:
+    async def get_orderbook_depth(self, symbol: str, limit: int = 15) -> Dict:
         """Отримання глибини ринку"""
         try:
             if not self.exchange:
@@ -810,7 +911,7 @@ class UltimatePumpDumpDetector:
             logger.error(f"Помилка стакану для {symbol}: {e}")
             return {'bids': [], 'asks': [], 'symbol': symbol}
 
-    async def get_klines(self, symbol: str, timeframe: str = '5m', limit: int = 20) -> List:
+    async def get_klines(self, symbol: str, timeframe: str = '5m', limit: int = 25) -> List:
         """Отримання історичних даних"""
         try:
             if not self.exchange:
@@ -830,13 +931,6 @@ class UltimatePumpDumpDetector:
             await update.message.reply_text("🐋 Функція в розробці...")
         except Exception as e:
             logger.error(f"Помилка whale watch: {e}")
-
-    async def liquidity_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Сканування ліквідності"""
-        try:
-            await update.message.reply_text("💧 Функція в розробці...")
-        except Exception as e:
-            logger.error(f"Помилка liquidity scan: {e}")
 
     async def volatility_alert_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сигнали волатильності"""
@@ -866,6 +960,33 @@ class UltimatePumpDumpDetector:
         except Exception as e:
             logger.error(f"Помилка emergency scan: {e}")
 
+    async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Діагностична команда"""
+        try:
+            network_ok = await self.check_network_connection()
+            exchange_ok = await self.check_exchange_connection()
+            
+            debug_info = f"""
+🔧 **ДІАГНОСТИКА СИСТЕМИ:**
+
+📡 Мережа: {'✅' if network_ok else '❌'}
+📊 Біржа: {'✅' if exchange_ok else '❌'}
+📈 Символів у кеші: {len(self.symbols_cache)}
+💾 Даних у кеші: {len(self.market_data_cache)}
+⚡ Воркерів: {self.executor._max_workers}
+
+📊 **СТАТИСТИКА:**
+• Сканувань: {self.performance_metrics['total_scans']}
+• Сигналів: {self.performance_metrics['signals_triggered']}
+• Успішність: {self.performance_metrics['success_rate']:.1f}%
+"""
+
+            await update.message.reply_text(debug_info, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Помилка діагностики: {e}")
+            await update.message.reply_text(f"❌ Помилка діагностики: {e}")
+
     async def test_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Тестова команда"""
         try:
@@ -877,7 +998,8 @@ class UltimatePumpDumpDetector:
             response = (
                 f"📡 Мережа: {'✅' if network_ok else '❌'}\n"
                 f"📊 Біржа: {'✅' if exchange_ok else '❌'}\n"
-                f"🔧 Статус: 🟢 ПРАЦЮЄ"
+                f"🔧 Статус: 🟢 ПРАЦЮЄ\n"
+                f"📈 Символів у кеші: {len(self.symbols_cache)}"
             )
             
             await update.message.reply_text(response)
@@ -903,7 +1025,8 @@ class UltimatePumpDumpDetector:
                     f"📈 Зміна: {analysis['percentage']:+.2f}%\n"
                     f"📊 Об'єм: ${analysis['volume_usdt']:,.0f}\n"
                     f"🚨 Pump: {analysis['pump_probability']:.1%}\n"
-                    f"📉 Dump: {analysis['dump_probability']:.1%}"
+                    f"📉 Dump: {analysis['dump_probability']:.1%}\n"
+                    f"📍 RSI: {analysis['technical_indicators']['rsi']:.1f}"
                 )
             else:
                 response = "❌ Не вдалося проаналізувати символ"
@@ -983,10 +1106,10 @@ class UltimatePumpDumpDetector:
                 await self.pump_radar_command(query, context)
             elif query.data == "dump_radar":
                 await self.dump_radar_command(query, context)
+            elif query.data == "money_maker":
+                await self.money_maker_command(query, context)
             elif query.data == "whale_watch":
                 await self.whale_watch_command(query, context)
-            elif query.data == "liquidity_scan":
-                await self.liquidity_scan_command(query, context)
             elif query.data == "volatility_alerts":
                 await self.volatility_alert_command(query, context)
             elif query.data == "ai_risk_scan":
@@ -1047,12 +1170,12 @@ class UltimatePumpDumpDetector:
         """Оновлення кешу"""
         try:
             symbols = await self.get_all_qualified_symbols()
-            symbols = symbols[:50]
+            symbols = symbols[:30]  # Зменшено кількість для оптимізації
             
             for symbol in symbols:
                 try:
                     await self.get_market_data(symbol)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.15)
                 except Exception as e:
                     continue
                     
@@ -1071,7 +1194,9 @@ def main():
         
         bot = UltimatePumpDumpDetector(BOT_TOKEN)
         logger.info("🚀 Запускаю бота...")
-        bot.app.run_polling()
+        
+        # Використовуємо власний метод run() замість app.run_polling()
+        asyncio.run(bot.run())
         
     except KeyboardInterrupt:
         logger.info("⏹️ Зупинка бота...")
