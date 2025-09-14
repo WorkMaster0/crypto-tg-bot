@@ -157,7 +157,6 @@ class UltimatePumpDumpDetector:
             CommandHandler("performance", self.performance_command),
             CommandHandler("quick_scan", self.quick_scan_command),
             CommandHandler("emergency", self.emergency_scan),
-            CommandHandler("debug", self.debug_command),
             CommandHandler("test", self.test_command),
             CommandHandler("test_symbol", self.test_symbol_command),
             CommandHandler("scan_stats", self.scan_stats_command),
@@ -199,33 +198,6 @@ class UltimatePumpDumpDetector:
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
-
-async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Діагностична команда"""
-    try:
-        network_ok = await self.check_network_connection()
-        exchange_ok = await self.check_exchange_connection()
-        
-        debug_info = f"""
-🔧 **ДІАГНОСТИКА СИСТЕМИ:**
-
-📡 Мережа: {'✅' if network_ok else '❌'}
-📊 Біржа: {'✅' if exchange_ok else '❌'}
-📈 Символів у кеші: {len(self.symbols_cache)}
-💾 Даних у кеші: {len(self.market_data_cache)}
-⚡ Воркерів: {self.executor._max_workers}
-
-📊 **СТАТИСТИКА:**
-• Сканувань: {self.performance_metrics['total_scans']}
-• Сигналів: {self.performance_metrics['signals_triggered']}
-• Успішність: {self.performance_metrics['success_rate']:.1f}%
-"""
-
-        await update.message.reply_text(debug_info, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Помилка діагностики: {e}")
-        await update.message.reply_text(f"❌ Помилка діагностики: {e}")
     
     async def mass_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Масове сканування 100+ токенів"""
