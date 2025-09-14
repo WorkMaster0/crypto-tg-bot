@@ -774,22 +774,6 @@ class UltimatePumpDumpDetector:
             return round((volume_score * 0.6 + spread_score * 0.4), 3)
         except:
             return 0.5
-
-    def is_pump_dump_trap(self, symbol: str, klines: List, orderbook: Dict) -> bool:
-        """Виявлення pump & dump пастки"""
-    try:
-        # Швидкий ріст (>3% за 10 хв) і негативне прискорення
-        price_change = self.calculate_price_change(klines, 10)
-        tech = self.technical_analysis(klines)
-        
-        if (price_change > 3.0 and 
-            tech['price_acceleration'] < 0 and
-            orderbook['large_asks'] > orderbook['large_bids'] * 2):
-            return True
-            
-        return False
-    except:
-        return False
     
     def calculate_volatility(self, klines: List) -> float:
         """Розрахунок волатильності"""
