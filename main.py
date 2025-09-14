@@ -66,7 +66,7 @@ class UltimatePumpDumpDetector:
         self.garbage_symbols = self._load_garbage_symbols()
         self.coin_blacklist = set()
         
-        # Динамічні параметри для виявлення (знижені пороги для тесту)
+        # Динамічні параметри для виявлення
         self.detection_params = {
             'volume_spike_threshold': 1.5,
             'price_acceleration_min': 0.002,
@@ -74,8 +74,8 @@ class UltimatePumpDumpDetector:
             'rsi_overbought': 70,
             'orderbook_imbalance_min': 0.1,
             'large_order_threshold': 10000,
-            'min_volume_usdt': 10000,
-            'max_volume_usdt': 1000000,
+            'min_volume_usdt': 50000,
+            'max_volume_usdt': 2000000,
             'price_change_5m_min': 1.0,
             'wick_ratio_threshold': 0.3,
             'market_cap_filter': 1000000,
@@ -83,7 +83,8 @@ class UltimatePumpDumpDetector:
             'pump_probability_threshold': 0.4,
             'dump_probability_threshold': 0.4,
             'whale_volume_threshold': 10000,
-            'volatility_spike_threshold': 1.5
+            'volatility_spike_threshold': 1.5,
+            'min_daily_change': 5.0  # Мінімальна зміна за добу для фільтрації
         }
         
         # Тривожні сигнали та історія
@@ -100,7 +101,7 @@ class UltimatePumpDumpDetector:
         }
         
         # Пул потоків для паралельного обчислення
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=8)
         self.setup_handlers()
         
         # Ініціалізація даних
@@ -127,7 +128,7 @@ class UltimatePumpDumpDetector:
         return base.union(patterns)
 
     def setup_handlers(self):
-        """Оновлені обробники команд з debug"""
+        """Оновлені обробники команд"""
         handlers = [
             CommandHandler("start", self.start_command),
             CommandHandler("scan", self.deep_scan_command),
@@ -170,7 +171,16 @@ class UltimatePumpDumpDetector:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🤖 **ULTIMATE PUMP/DUMP DETECTOR v4.1**\n\n",
+            "🤖 **ULTIMATE PUMP/DUMP DETECTOR v4.2**\n\n"
+            "🎯 *Спеціалізація: виявлення маніпуляцій на топ гейнерах*\n\n"
+            "✨ **Ексклюзивні фічі:**\n"
+            "• 🚨 Детектор пампів на активних монетах\n"
+            "• 📉 Виявлення дампів серед топ гейнерів\n"
+            "• 🐋 Відстеження китів на волатильних парах\n"
+            "• 💧 Аналіз ліквідності ринків\n"
+            "• ⚡ Сигнали волатильності\n"
+            "• 🤖 AI аналіз ризиків\n\n"
+            "💎 *Фокус на монетах з найбільшим зростанням!*",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -196,15 +206,12 @@ class UltimatePumpDumpDetector:
         except Exception as e:
             await update.message.reply_text(f"📊 Binance: ❌ ({str(e)})")
         
-        # Тест 3: Отримання даних BTC
+        # Тест 3: Отримання топ гейнерів
         try:
-            btc_data = await self.get_market_data('BTC/USDT')
-            if btc_data and btc_data.get('close', 0) > 0:
-                await update.message.reply_text(f"💰 BTC: ✅ (${btc_data['close']})")
-            else:
-                await update.message.reply_text("💰 BTC: ❌ (не вдалося отримати дані)")
+            gainers = await self.get_top_gainers(limit=5)
+            await update.message.reply_text(f"📈 Топ гейнери: {', '.join([s.replace('/USDT', '') for s in gainers])}")
         except Exception as e:
-            await update.message.reply_text(f"💰 BTC: ❌ ({str(e)})")
+            await update.message.reply_text(f"📈 Топ гейнери: ❌ ({str(e)})")
 
     async def check_network_connection(self) -> bool:
         """Перевірка мережевого з'єднання"""
@@ -217,14 +224,14 @@ class UltimatePumpDumpDetector:
             return False
 
     async def get_market_data(self, symbol: str) -> Optional[Dict]:
-        """Покращене отримання ринкових даних"""
+        """Отримання ринкових даних"""
         logger.debug(f"Отримання даних для {symbol}")
         try:
             if not self.exchange:
                 logger.error("Біржа не ініціалізована")
                 return None
                 
-            for attempt in range(2):  # Менше спроб
+            for attempt in range(2):
                 try:
                     ticker = await asyncio.get_event_loop().run_in_executor(
                         self.executor, 
@@ -244,23 +251,6 @@ class UltimatePumpDumpDetector:
                     
         except Exception as e:
             logger.error(f"Не вдалося отримати дані для {symbol}: {e}")
-        
-        # Спрощений fallback
-        try:
-            if symbol == 'BTC/USDT':
-                return {
-                    'symbol': symbol,
-                    'open': 50000, 'high': 51000, 'low': 49000, 
-                    'close': 50500, 'volume': 1000000, 'percentage': 1.5
-                }
-            elif symbol == 'ETH/USDT':
-                return {
-                    'symbol': symbol,
-                    'open': 3000, 'high': 3100, 'low': 2900,
-                    'close': 3050, 'volume': 500000, 'percentage': 2.0
-                }
-        except Exception as e:
-            logger.error(f"Помилка fallback: {e}")
         
         return None
 
@@ -283,12 +273,12 @@ class UltimatePumpDumpDetector:
                 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'volume': 0, 'percentage': 0
             }
 
-    async def get_orderbook_depth(self, symbol: str, limit: int = 10) -> Optional[Dict]:
+    async def get_orderbook_depth(self, symbol: str, limit: int = 20) -> Optional[Dict]:
         """Отримання глибини ринку"""
         logger.debug(f"Отримання стакану для {symbol}")
         try:
             if not self.exchange:
-                return {'bids': [[50000, 1]], 'asks': [[51000, 1]], 'symbol': symbol}
+                return {'bids': [], 'asks': [], 'symbol': symbol}
                 
             orderbook = await asyncio.get_event_loop().run_in_executor(
                 self.executor, 
@@ -298,20 +288,14 @@ class UltimatePumpDumpDetector:
             return orderbook
         except Exception as e:
             logger.error(f"Помилка отримання стакану для {symbol}: {e}")
-            # Повертаємо тестові дані
-            return {'bids': [[50000, 1], [49900, 2]], 'asks': [[51000, 1], [51100, 1.5]], 'symbol': symbol}
+            return {'bids': [], 'asks': [], 'symbol': symbol}
 
-    async def get_klines(self, symbol: str, timeframe: str = '5m', limit: int = 10) -> List:
+    async def get_klines(self, symbol: str, timeframe: str = '5m', limit: int = 50) -> List:
         """Отримання історичних даних"""
         logger.debug(f"Отримання klines для {symbol}")
         try:
             if not self.exchange:
-                # Повертаємо тестові дані
-                base_price = 50000 if 'BTC' in symbol else 3000
-                return [
-                    [int(time.time())*1000 - i*300000, base_price, base_price+100, base_price-100, base_price+50, 100]
-                    for i in range(limit)
-                ]
+                return []
                 
             klines = await asyncio.get_event_loop().run_in_executor(
                 self.executor, 
@@ -320,16 +304,60 @@ class UltimatePumpDumpDetector:
             return klines
         except Exception as e:
             logger.error(f"Помилка отримання klines для {symbol}: {e}")
-            # Тестові дані
-            base_price = 50000 if 'BTC' in symbol else 3000
-            return [
-                [int(time.time())*1000 - i*300000, base_price, base_price+100, base_price-100, base_price+50, 100]
-                for i in range(limit)
-            ]
+            return []
 
-    async def get_active_symbols(self, limit: int = 5) -> List[str]:
-        """Отримання активних торгових пар"""
-        logger.debug("Отримання активних символів")
+    async def get_top_gainers(self, limit: int = 50) -> List[str]:
+        """Отримання топ гейнерів (монет з найбільшим зростанням за 24h)"""
+        logger.debug("Отримання топ гейнерів")
+        try:
+            if not self.exchange:
+                return self.get_fallback_symbols(limit)
+                
+            # Завантажуємо ринки
+            await asyncio.get_event_loop().run_in_executor(
+                self.executor, self.exchange.load_markets
+            )
+            
+            # Фільтруємо USDT пари
+            usdt_pairs = []
+            for symbol, market in self.exchange.markets.items():
+                if (symbol.endswith('/USDT') and 
+                    market.get('active', False) and
+                    market.get('quoteVolume', 0) > self.detection_params['min_volume_usdt'] and
+                    not self.is_garbage_symbol(symbol)):
+                    usdt_pairs.append(symbol)
+            
+            # Обмежуємо кількість для продуктивності
+            usdt_pairs = usdt_pairs[:100]
+            
+            # Отримуємо дані ticker
+            ticker_data = {}
+            for symbol in usdt_pairs:
+                try:
+                    ticker = await asyncio.get_event_loop().run_in_executor(
+                        self.executor, lambda: self.exchange.fetch_ticker(symbol)
+                    )
+                    if (ticker and 'percentage' in ticker and 
+                        ticker['percentage'] is not None and
+                        abs(ticker['percentage']) >= self.detection_params['min_daily_change']):
+                        ticker_data[symbol] = ticker['percentage']
+                    await asyncio.sleep(0.1)  # Rate limiting
+                except Exception as e:
+                    continue
+            
+            # Сортуємо за абсолютним значенням зміни (щоб знайти і пампы і дампи)
+            sorted_symbols = sorted(ticker_data.keys(), 
+                                   key=lambda x: abs(ticker_data[x]), 
+                                   reverse=True)
+            
+            return sorted_symbols[:limit]
+            
+        except Exception as e:
+            logger.error(f"Помилка отримання топ гейнерів: {e}")
+            return self.get_fallback_symbols(limit)
+
+    async def get_high_volume_symbols(self, limit: int = 30) -> List[str]:
+        """Отримання монет з високим об'ємом (для whale watching)"""
         try:
             if not self.exchange:
                 return self.get_fallback_symbols(limit)
@@ -338,194 +366,301 @@ class UltimatePumpDumpDetector:
                 self.executor, self.exchange.load_markets
             )
             
-            if not hasattr(self.exchange, 'markets'):
-                return self.get_fallback_symbols(limit)
+            usdt_pairs = [
+                symbol for symbol, market in self.exchange.markets.items()
+                if symbol.endswith('/USDT') and market.get('active', False)
+                and market.get('quoteVolume', 0) > self.detection_params['min_volume_usdt']
+                and not self.is_garbage_symbol(symbol)
+            ]
             
-            return self.get_fallback_symbols(limit)
+            # Сортуємо за об'ємом
+            usdt_pairs.sort(key=lambda x: self.exchange.markets[x].get('quoteVolume', 0), reverse=True)
+            return usdt_pairs[:limit]
             
         except Exception as e:
-            logger.error(f"Помилка отримання активних символів: {e}")
-            return self.get_fallback_symbols(limit)
+            logger.error(f"Помилка отримання high volume symbols: {e}")
+            return self.get_fallback_symbols(5)
 
     def get_fallback_symbols(self, limit: int) -> List[str]:
         """Резервний список популярних символів"""
         popular_symbols = [
-            'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'
+            'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT',
+            'ADA/USDT', 'DOGE/USDT', 'MATIC/USDT', 'DOT/USDT', 'LTC/USDT',
+            'AVAX/USDT', 'LINK/USDT', 'ATOM/USDT', 'XMR/USDT', 'ETC/USDT'
         ]
         return popular_symbols[:limit]
 
-    def technical_analysis(self, klines: List) -> Dict:
-        """Поглиблений технічний аналіз"""
+    def is_garbage_symbol(self, symbol: str) -> bool:
+        """Перевірка чи символ є непотрібним"""
         try:
-            if len(klines) < 5:
+            symbol_clean = symbol.upper().replace('/USDT', '')
+            
+            # Головні криптовалюти не є сміттям
+            major_coins = {'BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 
+                          'MATIC', 'DOT', 'LTC', 'AVAX', 'LINK', 'ATOM'}
+            if symbol_clean in major_coins:
+                return False
+                
+            if symbol_clean in self.garbage_symbols:
+                return True
+            
+            if len(symbol_clean) > 10:
+                return True
+            
+            if any(char.isdigit() for char in symbol_clean):
+                return True
+                
+            garbage_patterns = ['UP', 'DOWN', 'BULL', 'BEAR', 'LONG', 'SHORT', 
+                               'HEDGE', 'DOOM', 'MOON', '3L', '3S', '2L', '2S']
+            if any(pattern in symbol_clean for pattern in garbage_patterns):
+                return True
+                
+            # Фільтр для дуже дивних назв
+            if re.match(r'^[0-9]+$', symbol_clean):
+                return True
+                
+            return False
+        except:
+            return False
+
+    def technical_analysis(self, klines: List) -> Dict:
+        """Технічний аналіз"""
+        try:
+            if len(klines) < 10:
                 return {'rsi': 50, 'macd_hist': 0, 'volatility': 0, 'price_acceleration': 0, 'trend_strength': 0.5}
             
             closes = np.array([float(k[4]) for k in klines])
+            highs = np.array([float(k[2]) for k in klines])
+            lows = np.array([float(k[3]) for k in klines])
             
-            # Спрощений RSI
-            price_changes = np.diff(closes)
-            gains = price_changes[price_changes > 0].sum() or 0.001
-            losses = -price_changes[price_changes < 0].sum() or 0.001
-            rs = gains / losses
-            rsi = 100 - (100 / (1 + rs))
+            # RSI
+            rsi = talib.RSI(closes, timeperiod=14)[-1] if len(closes) >= 14 else 50
             
-            # Спрощена волатильність
-            volatility = np.std(closes) / np.mean(closes) * 100 if len(closes) > 1 else 0
+            # MACD
+            macd, macd_signal, _ = talib.MACD(closes)
+            macd_hist = (macd - macd_signal)[-1] if len(macd) > 0 else 0
+            
+            # Волотильність
+            volatility = talib.ATR(highs, lows, closes, timeperiod=14)[-1] / closes[-1] * 100 if len(closes) >= 14 else 0
             
             # Прискорення ціни
-            if len(closes) >= 3:
-                price_acceleration = (closes[-1] - closes[-3]) / closes[-3] * 100
+            if len(closes) >= 6:
+                price_acceleration = np.polyfit(range(6), closes[-6:], 1)[0] / closes[-6] * 100
             else:
                 price_acceleration = 0
             
+            # Сила тренду
+            trend_strength = self.calculate_trend_strength(closes)
+            
             return {
                 'rsi': round(rsi, 2),
-                'macd_hist': 0.001,
+                'macd_hist': round(macd_hist, 6),
                 'volatility': round(volatility, 2),
                 'price_acceleration': round(price_acceleration, 4),
-                'trend_strength': 0.7
+                'trend_strength': trend_strength
             }
         except Exception as e:
             logger.error(f"Помилка технічного аналізу: {e}")
             return {'rsi': 50, 'macd_hist': 0, 'volatility': 0, 'price_acceleration': 0, 'trend_strength': 0.5}
 
     def orderbook_analysis(self, orderbook: Dict) -> Dict:
-        """Детальний аналіз стану ордерів"""
+        """Аналіз стану ордерів"""
         try:
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
             
-            total_bid = sum(float(bid[1]) for bid in bids[:5])
-            total_ask = sum(float(ask[1]) for ask in asks[:5])
+            total_bid = sum(float(bid[1]) for bid in bids[:20])
+            total_ask = sum(float(ask[1]) for ask in asks[:20])
             
             imbalance = (total_bid - total_ask) / (total_bid + total_ask) if (total_bid + total_ask) > 0 else 0
             
+            large_bids = sum(1 for bid in bids if float(bid[0]) * float(bid[1]) > self.detection_params['large_order_threshold'])
+            large_asks = sum(1 for ask in asks if float(ask[0]) * float(ask[1]) > self.detection_params['large_order_threshold'])
+            
             return {
                 'imbalance': round(imbalance, 4),
-                'large_bids': len([b for b in bids if float(b[0]) * float(b[1]) > 5000]),
-                'large_asks': len([a for a in asks if float(a[0]) * float(a[1]) > 5000]),
+                'large_bids': large_bids,
+                'large_asks': large_asks,
                 'total_bid_volume': total_bid,
                 'total_ask_volume': total_ask
             }
         except Exception as e:
             logger.error(f"Помилка аналізу orderbook: {e}")
-            return {'imbalance': 0.1, 'large_bids': 2, 'large_asks': 1, 'total_bid_volume': 100, 'total_ask_volume': 50}
+            return {'imbalance': 0, 'large_bids': 0, 'large_asks': 0, 'total_bid_volume': 0, 'total_ask_volume': 0}
 
     def volume_analysis(self, klines: List, market_data: Dict) -> Dict:
         """Аналіз об'ємів торгів"""
         try:
-            if len(klines) < 3:
+            if len(klines) < 10:
                 return {
                     'volume_spike_ratio': 1.0,
                     'volume_price_correlation': 0,
-                    'current_volume': market_data.get('volume', 1000),
-                    'average_volume': 1000
+                    'current_volume': market_data.get('volume', 0),
+                    'average_volume': market_data.get('volume', 0)
                 }
             
             volumes = np.array([float(k[5]) for k in klines])
-            current_volume = volumes[-1] if len(volumes) > 0 else 1000
-            avg_volume = np.mean(volumes[:-1]) if len(volumes) > 1 else 1000
+            closes = np.array([float(k[4]) for k in klines])
             
+            # Спайк об'ємів
+            avg_volume = np.mean(volumes[:-5]) if len(volumes) > 5 else volumes[0]
+            current_volume = volumes[-1] if len(volumes) > 0 else 0
             volume_spike = current_volume / avg_volume if avg_volume > 0 else 1
+            
+            # Кореляція ціна-об'єм
+            if len(closes) > 10:
+                price_changes = np.diff(closes[-10:])
+                volume_changes = np.diff(volumes[-10:])
+                if len(price_changes) == len(volume_changes) and len(price_changes) > 1:
+                    correlation = np.corrcoef(price_changes, volume_changes)[0, 1]
+                else:
+                    correlation = 0
+            else:
+                correlation = 0
             
             return {
                 'volume_spike_ratio': round(volume_spike, 2),
-                'volume_price_correlation': 0.5,
+                'volume_price_correlation': round(correlation, 2),
                 'current_volume': current_volume,
                 'average_volume': avg_volume
             }
         except Exception as e:
             logger.error(f"Помилка аналізу об'ємів: {e}")
-            return {'volume_spike_ratio': 1.5, 'volume_price_correlation': 0.5, 'current_volume': 1500, 'average_volume': 1000}
+            return {'volume_spike_ratio': 1, 'volume_price_correlation': 0, 'current_volume': 0, 'average_volume': 0}
 
     def calculate_trend_strength(self, prices: np.ndarray) -> float:
         """Розрахунок сили тренду"""
-        if len(prices) < 2:
+        if len(prices) < 10:
             return 0.5
         
         try:
-            price_change = (prices[-1] - prices[0]) / prices[0] * 100
-            return round(min(abs(price_change) / 10, 1.0), 3)
+            x = np.arange(len(prices))
+            slope, _, r_value, _, _ = stats.linregress(x, prices)
+            trend_strength = abs(r_value ** 2)
+            direction = 1 if slope > 0 else -1
+            return round(trend_strength * direction, 3)
         except:
             return 0.5
 
     def calculate_price_change(self, klines: List, minutes: int) -> float:
         """Розрахунок зміни ціни за вказаний період"""
         if len(klines) < minutes + 1:
-            return 2.5  # Тестова зміна
-            
+            return 0.0
+        
         try:
             current_price = float(klines[-1][4])
             past_price = float(klines[-minutes-1][4])
-            return ((current_price - past_price) / past_price) * 100 if past_price != 0 else 2.5
+            return ((current_price - past_price) / past_price) * 100 if past_price != 0 else 0.0
         except:
-            return 2.5
+            return 0.0
 
     def calculate_pump_probability(self, tech: Dict, orderbook: Dict, volume: Dict) -> float:
         """Розрахунок ймовірності пампу"""
         try:
-            # Спрощений розрахунок
+            weights = {
+                'rsi': 0.15,
+                'volume_spike': 0.25,
+                'ob_imbalance': 0.20,
+                'price_accel': 0.20,
+                'whale_orders': 0.20
+            }
+            
             score = (
-                0.3 if tech['rsi'] < 40 else 0.1 +
-                0.3 if volume['volume_spike_ratio'] > 1.5 else 0.1 +
-                0.2 if orderbook['imbalance'] > 0.1 else 0.0 +
-                0.2 if tech['price_acceleration'] > 0.5 else 0.0
+                (1.0 if tech['rsi'] < 40 else 0.6 if tech['rsi'] < 50 else 0.3) * weights['rsi'] +
+                min(volume['volume_spike_ratio'] / 3.0, 1.0) * weights['volume_spike'] +
+                (orderbook['imbalance'] + 1.0) / 2.0 * weights['ob_imbalance'] +
+                min(abs(tech['price_acceleration']) / 0.01, 1.0) * weights['price_accel'] +
+                min(orderbook['large_bids'] / 5.0, 1.0) * weights['whale_orders']
             )
             
             return round(score, 4)
         except:
-            return 0.6  # Висока ймовірність для тесту
+            return 0.3
 
     def calculate_dump_probability(self, tech: Dict, orderbook: Dict, volume: Dict) -> float:
         """Розрахунок ймовірності дампу"""
         try:
-            # Спрощений розрахунок
+            weights = {
+                'rsi': 0.25,
+                'volume_divergence': 0.20,
+                'ob_imbalance': 0.20,
+                'whale_sells': 0.20,
+                'volatility': 0.15
+            }
+            
             score = (
-                0.3 if tech['rsi'] > 70 else 0.1 +
-                0.3 if orderbook['imbalance'] < -0.1 else 0.1 +
-                0.2 if tech['volatility'] > 5 else 0.0 +
-                0.2 if volume['volume_spike_ratio'] < 0.5 else 0.0
+                (1.0 if tech['rsi'] > 70 else 0.6 if tech['rsi'] > 60 else 0.3) * weights['rsi'] +
+                (1.0 - min(volume['volume_price_correlation'], 1.0)) * weights['volume_divergence'] +
+                (1.0 - (orderbook['imbalance'] + 1.0) / 2.0) * weights['ob_imbalance'] +
+                min(orderbook['large_asks'] / 5.0, 1.0) * weights['whale_sells'] +
+                min(tech['volatility'] / 0.05, 1.0) * weights['volatility']
             )
             
             return round(score, 4)
         except:
-            return 0.4  # Середня ймовірність для тесту
+            return 0.3
 
     def calculate_pump_confidence(self, tech: Dict, orderbook: Dict, market_data: Dict) -> float:
         """Розрахунок впевненості в пампі"""
         try:
-            confidence = (
-                25 if tech['rsi'] < 40 else 10 +
-                30 if orderbook['imbalance'] > 0.2 else 15 +
-                20 if orderbook.get('large_bids', 0) > 1 else 10 +
-                25 if tech.get('price_acceleration', 0) > 1 else 10
-            )
+            confidence = 0
+            
+            if tech['rsi'] < 45:
+                confidence += 25
+            elif tech['rsi'] < 55:
+                confidence += 15
+            
+            if orderbook['imbalance'] > 0.2:
+                confidence += 30
+            elif orderbook['imbalance'] > 0.1:
+                confidence += 15
+            
+            if orderbook['large_bids'] >= 3:
+                confidence += 20
+            elif orderbook['large_bids'] >= 1:
+                confidence += 10
+            
+            if tech['price_acceleration'] > 0.005:
+                confidence += 25
             
             return min(confidence, 100)
         except:
-            return 75  # Висока впевненість для тесту
+            return 0
 
     def calculate_dump_confidence(self, tech: Dict, orderbook: Dict, market_data: Dict) -> float:
         """Розрахунок впевненості в дампі"""
         try:
-            confidence = (
-                30 if tech['rsi'] > 70 else 15 +
-                25 if orderbook['imbalance'] < -0.2 else 10 +
-                25 if orderbook.get('large_asks', 0) > 1 else 10 +
-                20 if tech.get('volatility', 0) > 8 else 10
-            )
+            confidence = 0
+            
+            if tech['rsi'] > 75:
+                confidence += 30
+            elif tech['rsi'] > 65:
+                confidence += 20
+            
+            if orderbook['imbalance'] < -0.2:
+                confidence += 25
+            elif orderbook['imbalance'] < -0.1:
+                confidence += 15
+            
+            if orderbook['large_asks'] >= 3:
+                confidence += 25
+            elif orderbook['large_asks'] >= 1:
+                confidence += 15
+            
+            if tech['volatility'] > 8:
+                confidence += 20
             
             return min(confidence, 100)
         except:
-            return 60  # Середня впевненість для тесту
+            return 0
 
     def analyze_large_orders(self, orderbook: Dict) -> List[Dict]:
         """Аналіз великих ордерів"""
         large_orders = []
-        threshold = 10000
+        threshold = self.detection_params['large_order_threshold']
         
         try:
-            for bid in orderbook.get('bids', [])[:3]:
+            for bid in orderbook.get('bids', [])[:10]:
                 price, amount = float(bid[0]), float(bid[1])
                 order_size = price * amount
                 
@@ -536,10 +671,11 @@ class UltimatePumpDumpDetector:
                         'is_buy': True,
                         'price': price,
                         'amount': amount,
+                        'market_impact': (amount / (amount + orderbook.get('total_bid_volume', 1))) * 100,
                         'timestamp': datetime.now().strftime('%H:%M:%S')
                     })
             
-            for ask in orderbook.get('asks', [])[:3]:
+            for ask in orderbook.get('asks', [])[:10]:
                 price, amount = float(ask[0]), float(ask[1])
                 order_size = price * amount
                 
@@ -550,58 +686,50 @@ class UltimatePumpDumpDetector:
                         'is_buy': False,
                         'price': price,
                         'amount': amount,
+                        'market_impact': (amount / (amount + orderbook.get('total_ask_volume', 1))) * 100,
                         'timestamp': datetime.now().strftime('%H:%M:%S')
                     })
         except Exception as e:
             logger.error(f"Помилка аналізу великих ордерів: {e}")
         
-        return large_orders or [{
-            'symbol': 'BTC',
-            'order_size': 15000,
-            'is_buy': True,
-            'price': 50500,
-            'amount': 0.3,
-            'timestamp': datetime.now().strftime('%H:%M:%S')
-        }]
+        return large_orders
 
     def calculate_liquidity_score(self, orderbook: Dict) -> float:
         """Розрахунок оцінки ліквідності"""
         try:
-            bids = orderbook.get('bids', [])
-            asks = orderbook.get('asks', [])
+            bid_volume = orderbook.get('total_bid_volume', 0)
+            ask_volume = orderbook.get('total_ask_volume', 0)
+            total_volume = bid_volume + ask_volume
             
-            if not bids or not asks:
-                return 0.7
-                
-            total_bid = sum(float(bid[1]) for bid in bids[:3])
-            total_ask = sum(float(ask[1]) for ask in asks[:3])
+            if total_volume == 0:
+                return 0.0
             
-            volume_score = min(total_bid + total_ask / 10000, 1.0)
+            volume_score = min(total_volume / 1000000, 1.0)
             
-            if len(bids) > 0 and len(asks) > 0:
-                best_bid = float(bids[0][0])
-                best_ask = float(asks[0][0])
+            if orderbook['bids'] and orderbook['asks']:
+                best_bid = float(orderbook['bids'][0][0])
+                best_ask = float(orderbook['asks'][0][0])
                 spread = (best_ask - best_bid) / best_bid
                 spread_score = 1.0 - min(spread / 0.01, 1.0)
             else:
-                spread_score = 0.8
+                spread_score = 0.5
             
             return round((volume_score * 0.6 + spread_score * 0.4), 3)
         except:
-            return 0.8
+            return 0.5
 
     def calculate_volatility(self, klines: List) -> float:
         """Розрахунок волатильності"""
         try:
-            if len(klines) < 3:
-                return 3.0
+            if len(klines) < 10:
+                return 0.0
                 
             closes = np.array([float(k[4]) for k in klines])
             returns = np.diff(closes) / closes[:-1]
-            volatility = np.std(returns) * 100 if len(returns) > 0 else 3.0
+            volatility = np.std(returns) * 100 * np.sqrt(365)
             return round(volatility, 2)
         except:
-            return 3.0
+            return 0.0
 
     def calculate_orderbook_imbalance(self, orderbook: Dict) -> float:
         """Розрахунок імбалансу orderbook"""
@@ -609,32 +737,30 @@ class UltimatePumpDumpDetector:
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
             
-            total_bid = sum(float(bid[1]) for bid in bids[:3])
-            total_ask = sum(float(ask[1]) for ask in asks[:3])
+            total_bid = sum(float(bid[1]) for bid in bids)
+            total_ask = sum(float(ask[1]) for ask in asks)
             
             if total_bid + total_ask == 0:
-                return 0.1
+                return 0.0
             
             return (total_bid - total_ask) / (total_bid + total_ask)
         except:
-            return 0.1
+            return 0.0
 
     def quick_pump_check(self, market_data: Dict, orderbook: Dict) -> bool:
         """Швидка перевірка на потенційний pump"""
         try:
-            if market_data['volume'] < 5000:
+            if market_data['volume'] < self.detection_params['min_volume_usdt']:
                 return False
             
             imbalance = self.calculate_orderbook_imbalance(orderbook)
-            return imbalance > 0.05
-        except:
-            return True  # Завжди True для тесту
-
-    def is_garbage_symbol(self, symbol: str) -> bool:
-        """Перевірка чи символ є непотрібним"""
-        try:
-            symbol_clean = symbol.upper().replace('/USDT', '').replace('USDT', '')
-            return symbol_clean in self.garbage_symbols
+            if abs(imbalance) < self.detection_params['orderbook_imbalance_min']:
+                return False
+            
+            large_bids = sum(1 for bid in orderbook.get('bids', []) 
+                            if float(bid[0]) * float(bid[1]) > self.detection_params['large_order_threshold'])
+            
+            return large_bids >= 2 and imbalance > 0
         except:
             return False
 
@@ -645,42 +771,54 @@ class UltimatePumpDumpDetector:
             
             return (
                 f"{index}. **{symbol}**\n"
-                f"   💰 Ціна: ${analysis['price']:.2f}\n"
+                f"   💰 Ціна: ${analysis['price']:.6f}\n"
                 f"   📊 Об'єм: ${analysis['volume_usdt']:,.0f}\n"
-                f"   🚨 Pump ймовірність: {analysis['pump_probability']:.0%}\n"
-                f"   📉 Dump ймовірність: {analysis['dump_probability']:.0%}\n"
-                f"   📈 RSI: {analysis['technical_indicators']['rsi']:.1f}\n\n"
+                f"   📈 Зміна: {analysis['percentage']:+.2f}%\n"
+                f"   🚨 Pump ймовірність: {analysis['pump_probability']:.2%}\n"
+                f"   📉 Dump ймовірність: {analysis['dump_probability']:.2%}\n"
+                f"   📍 RSI: {analysis['technical_indicators']['rsi']:.1f}\n"
+                f"   ⚖️ Imbalance: {analysis['orderbook_metrics']['imbalance']:.3f}\n\n"
             )
         except:
-            return f"{index}. **TEST_SIGNAL** - Pump: 65%, Dump: 35%\n\n"
+            return f"{index}. Помилка форматування сигналу\n\n"
 
     async def analyze_symbol(self, symbol: str) -> Dict:
         """Комплексний аналіз символу"""
-        logger.debug(f"Аналіз символу {symbol}")
         try:
-            # Затримка для імітації роботи
-            await asyncio.sleep(0.5)
+            if not await self.check_network_connection():
+                return {}
             
-            # Тестові дані
+            market_data = await self.get_market_data(symbol)
+            if not market_data or market_data['volume'] < self.detection_params['min_volume_usdt']:
+                return {}
+            
+            if self.is_garbage_symbol(symbol):
+                return {}
+            
+            orderbook = await self.get_orderbook_depth(symbol, 30)
+            klines = await self.get_klines(symbol, '5m', 50)
+            
+            if not klines or not orderbook:
+                return {}
+            
+            tech_analysis = self.technical_analysis(klines)
+            ob_analysis = self.orderbook_analysis(orderbook)
+            volume_analysis = self.volume_analysis(klines, market_data)
+            
+            pump_prob = self.calculate_pump_probability(tech_analysis, ob_analysis, volume_analysis)
+            dump_prob = self.calculate_dump_probability(tech_analysis, ob_analysis, volume_analysis)
+            
             return {
                 'symbol': symbol,
-                'price': 50500 if 'BTC' in symbol else 3050,
-                'volume_usdt': 1500000,
-                'percentage': 2.5,
-                'pump_probability': 0.65,
-                'dump_probability': 0.35,
-                'technical_indicators': {
-                    'rsi': 45.5, 'macd_hist': 0.001, 'volatility': 3.2, 
-                    'price_acceleration': 0.8, 'trend_strength': 0.7
-                },
-                'orderbook_metrics': {
-                    'imbalance': 0.15, 'large_bids': 2, 'large_asks': 1,
-                    'total_bid_volume': 500, 'total_ask_volume': 300
-                },
-                'volume_metrics': {
-                    'volume_spike_ratio': 1.8, 'volume_price_correlation': 0.6,
-                    'current_volume': 1800, 'average_volume': 1000
-                }
+                'price': market_data['close'],
+                'volume_usdt': market_data['volume'],
+                'percentage': market_data['percentage'],
+                'pump_probability': pump_prob,
+                'dump_probability': dump_prob,
+                'technical_indicators': tech_analysis,
+                'orderbook_metrics': ob_analysis,
+                'volume_metrics': volume_analysis,
+                'timestamp': datetime.now().isoformat()
             }
             
         except Exception as e:
@@ -690,68 +828,102 @@ class UltimatePumpDumpDetector:
     async def analyze_pump_potential(self, symbol: str) -> Dict:
         """Спеціалізований аналіз для пампу"""
         try:
-            await asyncio.sleep(0.3)
+            market_data = await self.get_market_data(symbol)
+            orderbook = await self.get_orderbook_depth(symbol)
+            klines = await self.get_klines(symbol, '5m', 20)
+            
+            if not all([market_data, orderbook, klines]):
+                return {}
+            
+            tech = self.technical_analysis(klines)
+            ob_analysis = self.orderbook_analysis(orderbook)
+            
+            confidence = self.calculate_pump_confidence(tech, ob_analysis, market_data)
+            
             return {
                 'symbol': symbol.replace('/USDT', ''),
-                'pump_confidence': 75,
-                'price_change_5m': 2.8,
-                'volume_usdt': 1600000,
-                'whale_orders': 3,
-                'price_acceleration': 0.9
+                'pump_confidence': confidence,
+                'price_change_5m': self.calculate_price_change(klines, 5),
+                'volume_usdt': market_data['volume'],
+                'whale_orders': ob_analysis['large_bids'],
+                'price_acceleration': tech['price_acceleration']
             }
-        except:
+            
+        except Exception as e:
             return {}
 
     async def analyze_dump_potential(self, symbol: str) -> Dict:
         """Спеціалізований аналіз для дампу"""
         try:
-            await asyncio.sleep(0.3)
+            market_data = await self.get_market_data(symbol)
+            orderbook = await self.get_orderbook_depth(symbol)
+            klines = await self.get_klines(symbol, '5m', 20)
+            
+            if not all([market_data, orderbook, klines]):
+                return {}
+            
+            tech = self.technical_analysis(klines)
+            ob_analysis = self.orderbook_analysis(orderbook)
+            
+            confidence = self.calculate_dump_confidence(tech, ob_analysis, market_data)
+            
             return {
                 'symbol': symbol.replace('/USDT', ''),
-                'dump_confidence': 60,
-                'max_gain': 15.5,
-                'whale_sells': 2,
-                'rsi': 68.5
+                'dump_confidence': confidence,
+                'max_gain': market_data.get('percentage', 0),
+                'whale_sells': ob_analysis['large_asks'],
+                'rsi': tech['rsi']
             }
-        except:
+            
+        except Exception as e:
             return {}
 
     async def detect_whale_activity(self) -> List[Dict]:
         """Виявлення активності китів"""
         try:
-            await asyncio.sleep(0.5)
-            return [{
-                'symbol': 'BTC',
-                'order_size': 25000,
-                'is_buy': True,
-                'price': 50450,
-                'amount': 0.5,
-                'timestamp': datetime.now().strftime('%H:%M:%S')
-            }]
-        except:
+            symbols = await self.get_high_volume_symbols(limit=10)
+            whale_activities = []
+            
+            for symbol in symbols:
+                try:
+                    orderbook = await self.get_orderbook_depth(symbol, 20)
+                    if orderbook:
+                        large_orders = self.analyze_large_orders(orderbook)
+                        whale_activities.extend(large_orders)
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    continue
+            
+            return whale_activities[:10]
+        except Exception as e:
             return []
 
     async def deep_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Глибинне сканування"""
-        logger.info("Команда deep_scan викликана")
+        """Глибинне сканування топ гейнерів"""
         try:
-            msg = await update.message.reply_text("🔍 Запускаю глибинне сканування...")
+            msg = await update.message.reply_text("🔍 Запускаю сканування топ гейнерів...")
             
-            symbols = await self.get_active_symbols(limit=3)
+            # Отримуємо топ гейнери замість активних символів
+            symbols = await self.get_top_gainers(limit=20)
             results = []
             
             for symbol in symbols:
                 analysis = await self.analyze_symbol(symbol)
-                if analysis:
+                if analysis and (analysis['pump_probability'] > 0.5 or analysis['dump_probability'] > 0.5):
                     results.append(analysis)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.2)
+            
+            self.performance_metrics['total_scans'] += len(symbols)
             
             if results:
-                response = "🚨 **ЗНАЙДЕНО СИГНАЛИ:**\n\n"
-                for i, res in enumerate(results, 1):
+                results.sort(key=lambda x: max(x['pump_probability'], x['dump_probability']), reverse=True)
+                self.performance_metrics['signals_triggered'] += len(results)
+                
+                response = "🚨 **ЗНАЙДЕНО СИГНАЛИ НА ТОП ГЕЙНЕРАХ:**\n\n"
+                for i, res in enumerate(results[:5], 1):
                     response += self.format_signal_message(res, i)
                 
-                response += f"📊 Знайдено {len(results)} сигналів"
+                response += f"📊 Знайдено {len(results)} сигналів з {len(symbols)} монет"
                 await msg.edit_text(response, parse_mode='Markdown')
             else:
                 await msg.edit_text("ℹ️ Сильних сигналів не знайдено. Спробуйте пізніше.")
@@ -761,37 +933,70 @@ class UltimatePumpDumpDetector:
             await update.message.reply_text("❌ Помилка сканування")
 
     async def pump_radar_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Детектор пампів"""
+        """Детектор пампів серед топ гейнерів"""
         try:
-            msg = await update.message.reply_text("🚨 АКТИВУЮ PUMP RADAR...")
+            msg = await update.message.reply_text("🚨 АКТИВУЮ PUMP RADAR для топ гейнерів...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=15)
+            pump_candidates = []
             
-            response = "🔥 **РИЗИК PUMP:**\n\n"
-            response += "1. **BTC** - 75% впевненість\n"
-            response += "   📈 Зміна: +2.8% (5m)\n"
-            response += "   💰 Об'єм: $1,600,000\n"
-            response += "   🐋 Ордери: 3\n\n"
+            for symbol in symbols:
+                analysis = await self.analyze_pump_potential(symbol)
+                if analysis and analysis['pump_confidence'] > 60:
+                    pump_candidates.append(analysis)
+                await asyncio.sleep(0.2)
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if pump_candidates:
+                pump_candidates.sort(key=lambda x: x['pump_confidence'], reverse=True)
+                self.performance_metrics['pump_signals_detected'] += len(pump_candidates)
+                
+                response = "🔥 **РИЗИК PUMP НА ГЕЙНЕРАХ:**\n\n"
+                for i, candidate in enumerate(pump_candidates[:3], 1):
+                    response += (
+                        f"{i}. **{candidate['symbol']}** - {candidate['pump_confidence']}% впевненість\n"
+                        f"   📈 Зміна: {candidate['price_change_5m']:.2f}% (5m)\n"
+                        f"   💰 Об'єм: ${candidate['volume_usdt']:,.0f}\n"
+                        f"   🐋 Китові ордери: {candidate['whale_orders']}\n"
+                        f"   ⚡ Прискорення: {candidate['price_acceleration']:.4f}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Немає pump-сигналів серед топ гейнерів")
                 
         except Exception as e:
             await update.message.reply_text("❌ Помилка pump radar")
 
     async def dump_radar_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Детектор дампів"""
+        """Детектор дампів серед топ гейнерів"""
         try:
-            msg = await update.message.reply_text("📉 АКТИВУЮ DUMP RADAR...")
+            msg = await update.message.reply_text("📉 АКТИВУЮ DUMP RADAR для топ гейнерів...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=15)
+            dump_candidates = []
             
-            response = "⚠️ **РИЗИК DUMP:**\n\n"
-            response += "1. **ETH** - 60% впевненість\n"
-            response += "   📉 Зміна: +15.5%\n"
-            response += "   🐋 Продажі: 2\n"
-            response += "   📍 RSI: 68.5\n\n"
+            for symbol in symbols:
+                analysis = await self.analyze_dump_potential(symbol)
+                if analysis and analysis['dump_confidence'] > 55:
+                    dump_candidates.append(analysis)
+                await asyncio.sleep(0.2)
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if dump_candidates:
+                dump_candidates.sort(key=lambda x: x['dump_confidence'], reverse=True)
+                self.performance_metrics['dump_signals_detected'] += len(dump_candidates)
+                
+                response = "⚠️ **РИЗИК DUMP НА ГЕЙНЕРАХ:**\n\n"
+                for i, candidate in enumerate(dump_candidates[:3], 1):
+                    response += (
+                        f"{i}. **{candidate['symbol']}** - {candidate['dump_confidence']}% впевненість\n"
+                        f"   📉 Макс. зміна: {candidate['max_gain']:.2f}%\n"
+                        f"   🐋 Китові продажі: {candidate['whale_sells']}\n"
+                        f"   📍 RSI: {candidate['rsi']:.1f}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Немає dump-сигналів серед топ гейнерів")
                 
         except Exception as e:
             await update.message.reply_text("❌ Помилка dump radar")
@@ -801,85 +1006,201 @@ class UltimatePumpDumpDetector:
         try:
             msg = await update.message.reply_text("🐋 ВІДСТЕЖУЮ КИТІВ...")
             
-            await asyncio.sleep(1)
+            whale_activity = await self.detect_whale_activity()
             
-            response = "🐋 **АКТИВНІСТЬ КИТІВ:**\n\n"
-            response += "1. **BTC**\n"
-            response += "   💰 Розмір: $25,000\n"
-            response += "   📊 Тип: КУПІВЛЯ\n"
-            response += "   🕒 Час: " + datetime.now().strftime('%H:%M:%S') + "\n\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
+            if whale_activity:
+                response = "🐋 **АКТИВНІСТЬ КИТІВ:**\n\n"
+                for i, activity in enumerate(whale_activity[:5], 1):
+                    response += (
+                        f"{i}. **{activity['symbol']}**\n"
+                        f"   💰 Розмір ордера: ${activity['order_size']:,.0f}\n"
+                        f"   📊 Тип: {'КУПІВЛЯ' if activity['is_buy'] else 'ПРОДАЖ'}\n"
+                        f"   ⚖️ Вплив на ринок: {activity['market_impact']:.2f}%\n"
+                        f"   🕒 Час: {activity['timestamp']}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Значної активності китів не виявлено")
                 
         except Exception as e:
-            await update.message.reply_text("❌ Помилка моніторингу")
+            await update.message.reply_text("❌ Помилка моніторингу китів")
 
     async def liquidity_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сканування ліквідності"""
         try:
             msg = await update.message.reply_text("💧 АНАЛІЗУЮ ЛІКВІДНІСТЬ...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=15)
+            liquidity_data = []
             
-            response = "💧 **ТОП ЛІКВІДНІСТЬ:**\n\n"
-            response += "1. **BTC** - Score: 0.85\n"
-            response += "2. **ETH** - Score: 0.78\n"
-            response += "3. **BNB** - Score: 0.72\n\n"
+            for symbol in symbols:
+                orderbook = await self.get_orderbook_depth(symbol)
+                if orderbook:
+                    liquidity_score = self.calculate_liquidity_score(orderbook)
+                    liquidity_data.append({
+                        'symbol': symbol.replace('/USDT', ''),
+                        'liquidity_score': liquidity_score
+                    })
+                await asyncio.sleep(0.1)
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if liquidity_data:
+                liquidity_data.sort(key=lambda x: x['liquidity_score'], reverse=True)
+                
+                response = "💧 **ТОП ЛІКВІДНІСТЬ СЕРЕД ГЕЙНЕРІВ:**\n\n"
+                for i, data in enumerate(liquidity_data[:5], 1):
+                    response += f"{i}. **{data['symbol']}** - Score: {data['liquidity_score']:.3f}\n\n"
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("❌ Не вдалося отримати дані ліквідності")
                 
         except Exception as e:
-            await update.message.reply_text("❌ Помилка аналізу")
+            await update.message.reply_text("❌ Помилка аналізу ліквідності")
 
     async def volatility_alert_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сигнали волатильності"""
         try:
             msg = await update.message.reply_text("⚡ ШУКАЮ ВОЛАТИЛЬНІСТЬ...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=15)
+            volatile_symbols = []
             
-            response = "⚡ **ВОЛАТИЛЬНІСТЬ:**\n\n"
-            response += "1. **SOL** - Волатильність: 8.2%\n"
-            response += "   💰 Ціна: $95.50\n\n"
+            for symbol in symbols:
+                klines = await self.get_klines(symbol, '5m', 20)
+                if klines:
+                    volatility = self.calculate_volatility(klines)
+                    if volatility > self.detection_params['volatility_spike_threshold']:
+                        volatile_symbols.append({
+                            'symbol': symbol.replace('/USDT', ''),
+                            'volatility': volatility,
+                            'price': float(klines[-1][4]) if klines else 0
+                        })
+                await asyncio.sleep(0.1)
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if volatile_symbols:
+                volatile_symbols.sort(key=lambda x: x['volatility'], reverse=True)
+                
+                response = "⚡ **ВИСОКА ВОЛАТИЛЬНІСТЬ СЕРЕД ГЕЙНЕРІВ:**\n\n"
+                for i, data in enumerate(volatile_symbols[:5], 1):
+                    response += (
+                        f"{i}. **{data['symbol']}** - Волатильність: {data['volatility']:.2f}%\n"
+                        f"   💰 Ціна: ${data['price']:.6f}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Волатильність в межах норми")
                 
         except Exception as e:
-            await update.message.reply_text("❌ Помилка аналізу")
+            await update.message.reply_text("❌ Помилка аналізу волатильності")
 
     async def ai_risk_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """AI аналіз ризиків"""
         try:
             msg = await update.message.reply_text("🤖 AI АНАЛІЗ РИЗИКІВ...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=10)
+            risk_assessments = []
             
-            response = "🤖 **AI РЕЙТИНГ РИЗИКІВ:**\n\n"
-            response += "1. **XRP** - 🟡 СЕРЕДНІЙ\n"
-            response += "   📊 Ризик: 55%\n"
-            response += "   🚨 Pump: 45%\n"
-            response += "   📉 Dump: 35%\n"
-            response += "   💰 Ціна: $0.58\n\n"
+            for symbol in symbols:
+                try:
+                    analysis = await self.analyze_symbol(symbol)
+                    if analysis:
+                        risk_score = self.calculate_ai_risk_score(analysis)
+                        risk_assessments.append({
+                            'symbol': symbol.replace('/USDT', ''),
+                            'risk_score': risk_score,
+                            'pump_prob': analysis['pump_probability'],
+                            'dump_prob': analysis['dump_probability'],
+                            'price': analysis['price'],
+                            'daily_change': analysis['percentage']
+                        })
+                    await asyncio.sleep(0.1)
+                except:
+                    continue
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if risk_assessments:
+                risk_assessments.sort(key=lambda x: x['risk_score'], reverse=True)
+                
+                response = "🤖 **AI РЕЙТИНГ РИЗИКІВ НА ГЕЙНЕРАХ:**\n\n"
+                for i, risk in enumerate(risk_assessments[:5], 1):
+                    risk_level = "🔴 ВИСОКИЙ" if risk['risk_score'] > 70 else "🟡 СЕРЕДНІЙ" if risk['risk_score'] > 40 else "🟢 НИЗЬКИЙ"
+                    response += (
+                        f"{i}. **{risk['symbol']}** - {risk_level}\n"
+                        f"   📊 Ризик: {risk['risk_score']}%\n"
+                        f"   📈 Добова зміна: {risk['daily_change']:+.2f}%\n"
+                        f"   🚨 Pump: {risk['pump_prob']:.2%}\n"
+                        f"   📉 Dump: {risk['dump_prob']:.2%}\n"
+                        f"   💰 Ціна: ${risk['price']:.6f}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Ризики в межах норми")
                 
         except Exception as e:
             await update.message.reply_text("❌ Помилка AI аналізу")
 
+    def calculate_ai_risk_score(self, analysis: Dict) -> float:
+        """Розрахунок AI оцінки ризику"""
+        try:
+            pump_prob = analysis['pump_probability']
+            dump_prob = analysis['dump_probability']
+            volatility = analysis['technical_indicators']['volatility']
+            imbalance = abs(analysis['orderbook_metrics']['imbalance'])
+            daily_change = abs(analysis['percentage'])
+            
+            risk_score = (
+                pump_prob * 0.25 +
+                dump_prob * 0.25 +
+                min(volatility / 10, 1.0) * 0.20 +
+                min(imbalance / 0.5, 1.0) * 0.15 +
+                min(daily_change / 20, 1.0) * 0.15
+            ) * 100
+            
+            return min(round(risk_score, 1), 100)
+        except:
+            return 50.0
+
     async def quick_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Швидке сканування"""
         try:
-            msg = await update.message.reply_text("⚡ ШВИДКЕ СКАНУВАННЯ...")
+            msg = await update.message.reply_text("⚡ ШВИДКЕ СКАНУВАННЯ ГЕЙНЕРІВ...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=10)
+            quick_signals = []
             
-            response = "⚡ **ШВИДКІ СИГНАЛИ:**\n\n"
-            response += "1. **ADA**\n"
-            response += "   💰 Ціна: $0.45\n"
-            response += "   📈 Зміна: +3.2%\n"
-            response += "   📊 Об'єм: $450,000\n\n"
+            for symbol in symbols:
+                market_data = await self.get_market_data(symbol)
+                orderbook = await self.get_orderbook_depth(symbol)
+                
+                if market_data and orderbook:
+                    is_potential = self.quick_pump_check(market_data, orderbook)
+                    if is_potential:
+                        quick_signals.append({
+                            'symbol': symbol.replace('/USDT', ''),
+                            'price': market_data['close'],
+                            'volume': market_data['volume'],
+                            'change': market_data['percentage'],
+                            'imbalance': self.calculate_orderbook_imbalance(orderbook)
+                        })
+                await asyncio.sleep(0.1)
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if quick_signals:
+                response = "⚡ **ШВИДКІ СИГНАЛИ НА ГЕЙНЕРАХ:**\n\n"
+                for i, signal in enumerate(quick_signals[:5], 1):
+                    response += (
+                        f"{i}. **{signal['symbol']}**\n"
+                        f"   💰 Ціна: ${signal['price']:.6f}\n"
+                        f"   📈 Зміна: {signal['change']:.2f}%\n"
+                        f"   📊 Об'єм: ${signal['volume']:,.0f}\n"
+                        f"   ⚖️ Imbalance: {signal['imbalance']:.3f}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Швидких сигналів не знайдено")
                 
         except Exception as e:
             await update.message.reply_text("❌ Помилка швидкого сканування")
@@ -887,16 +1208,42 @@ class UltimatePumpDumpDetector:
     async def emergency_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Екстрене сканування"""
         try:
-            msg = await update.message.reply_text("🚨 ЕКСТРЕНЕ СКАНУВАННЯ...")
+            msg = await update.message.reply_text("🚨 ЕКСТРЕНЕ СКАНУВАННЯ ГЕЙНЕРІВ...")
             
-            await asyncio.sleep(1)
+            symbols = await self.get_top_gainers(limit=10)
+            critical_signals = []
             
-            response = "🚨 **КРИТИЧНІ ЗМІНИ:**\n\n"
-            response += "1. **DOGE** - PUMP\n"
-            response += "   📈 Зміна: +12.5%\n"
-            response += "   💰 Ціна: $0.085\n\n"
+            for symbol in symbols:
+                market_data = await self.get_market_data(symbol)
+                if market_data and abs(market_data['percentage']) > 15:
+                    orderbook = await self.get_orderbook_depth(symbol, 20)
+                    if orderbook:
+                        imbalance = self.calculate_orderbook_imbalance(orderbook)
+                        
+                        critical_signals.append({
+                            'symbol': symbol.replace('/USDT', ''),
+                            'price': market_data['close'],
+                            'change': market_data['percentage'],
+                            'volume': market_data['volume'],
+                            'imbalance': imbalance,
+                            'is_pump': market_data['percentage'] > 0
+                        })
+                await asyncio.sleep(0.1)
             
-            await msg.edit_text(response, parse_mode='Markdown')
+            if critical_signals:
+                response = "🚨 **КРИТИЧНІ ЗМІНИ НА ГЕЙНЕРАХ:**\n\n"
+                for i, signal in enumerate(critical_signals, 1):
+                    signal_type = "PUMP" if signal['is_pump'] else "DUMP"
+                    response += (
+                        f"{i}. **{signal['symbol']}** - {signal_type}\n"
+                        f"   📈 Зміна: {signal['change']:+.2f}%\n"
+                        f"   💰 Ціна: ${signal['price']:.6f}\n"
+                        f"   ⚖️ Imbalance: {signal['imbalance']:.3f}\n\n"
+                    )
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("✅ Критичних змін не виявлено")
                 
         except Exception as e:
             await update.message.reply_text("❌ Помилка екстреного сканування")
@@ -905,17 +1252,30 @@ class UltimatePumpDumpDetector:
         """Діагностична команда"""
         try:
             network_ok = await self.check_network_connection()
+            test_symbol = 'BTC/USDT'
+            
+            market_data = await self.get_market_data(test_symbol)
+            orderbook = await self.get_orderbook_depth(test_symbol)
+            klines = await self.get_klines(test_symbol, '5m', 5)
+            
+            # Отримуємо топ гейнери
+            gainers = await self.get_top_gainers(5)
             
             debug_info = f"""
 🔧 **ДІАГНОСТИКА:**
 
 📡 Мережа: {'✅' if network_ok else '❌'}
 📊 Біржа: {'✅' if self.exchange else '❌'}
-🔄 Символи: {len(await self.get_active_symbols(3))}
+📈 Топ гейнери: {len(gainers)} монет
 
-🤖 Статус: ✅ ПРАЦЮЄ
-📈 Тестові сигнали: ✅ АКТИВНО
-            """
+💰 BTC Ціна: {market_data.get('close', 'N/A') if market_data else 'N/A'}
+📊 Об'єм: {market_data.get('volume', 'N/A') if market_data else 'N/A'}
+⚖️ Imbalance: {self.calculate_orderbook_imbalance(orderbook) if orderbook else 'N/A'}
+
+📊 Топ 5 гейнерів:
+"""
+            for i, symbol in enumerate(gainers[:5], 1):
+                debug_info += f"{i}. {symbol.replace('/USDT', '')}\n"
             
             await update.message.reply_text(debug_info, parse_mode='Markdown')
             
@@ -936,11 +1296,20 @@ class UltimatePumpDumpDetector:
     async def blacklist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Чорний список"""
         try:
-            if self.coin_blacklist:
-                blacklist_text = "🚫 **ЧОРНИЙ СПИСОК:**\n" + "\n".join(self.coin_blacklist)
+            if context.args:
+                symbol = context.args[0].upper()
+                if symbol in self.coin_blacklist:
+                    self.coin_blacklist.remove(symbol)
+                    await update.message.reply_text(f"✅ {symbol} видалено з чорного списку")
+                else:
+                    self.coin_blacklist.add(symbol)
+                    await update.message.reply_text(f"✅ {symbol} додано до чорного списку")
             else:
-                blacklist_text = "📝 Чорний список порожній"
-            await update.message.reply_text(blacklist_text, parse_mode='Markdown')
+                if self.coin_blacklist:
+                    blacklist_text = "🚫 **ЧОРНИЙ СПИСОК:**\n" + "\n".join(self.coin_blacklist)
+                else:
+                    blacklist_text = "📝 Чорний список порожній"
+                await update.message.reply_text(blacklist_text, parse_mode='Markdown')
                 
         except Exception as e:
             await update.message.reply_text("❌ Помилка чорного списку")
@@ -948,13 +1317,17 @@ class UltimatePumpDumpDetector:
     async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Статистика"""
         try:
+            total = self.performance_metrics['total_scans']
+            signals = self.performance_metrics['signals_triggered']
+            success_rate = (signals / total * 100) if total > 0 else 0
+            
             stats_text = (
                 "📈 **СТАТИСТИКА:**\n\n"
-                f"• Сканувань: {self.performance_metrics['total_scans'] + 15}\n"
-                f"• Сигналів: {self.performance_metrics['signals_triggered'] + 8}\n"
-                f"• Pump: {self.performance_metrics['pump_signals_detected'] + 5}\n"
-                f"• Dump: {self.performance_metrics['dump_signals_detected'] + 3}\n"
-                f"• Успішність: 72.5%\n"
+                f"• Загальна кількість сканувань: {total}\n"
+                f"• Знайдено сигналів: {signals}\n"
+                f"• Pump сигналів: {self.performance_metrics['pump_signals_detected']}\n"
+                f"• Dump сигналів: {self.performance_metrics['dump_signals_detected']}\n"
+                f"• Успішність: {success_rate:.1f}%\n"
             )
             
             await update.message.reply_text(stats_text, parse_mode='Markdown')
@@ -990,48 +1363,100 @@ class UltimatePumpDumpDetector:
             elif query.data == "blacklist":
                 await self.blacklist_command(query, context)
             elif query.data == "update":
-                await query.edit_message_text("🔄 Оновлюю...")
+                await query.edit_message_text("🔄 Оновлюю дані...")
                 await asyncio.sleep(1)
                 await self.start_command(query, context)
                 
         except Exception as e:
-            await query.edit_message_text("❌ Помилка обробки")
+            await query.edit_message_text("❌ Помилка обробки запиту")
 
     async def run(self):
         """Запуск бота"""
         try:
-            logger.info("🤖 Запускаю бота...")
+            logger.info("🤖 Запускаю Ultimate Pump/Dump Detector...")
             await self.app.initialize()
             await self.app.start()
             await self.app.updater.start_polling()
             
-            logger.info("✅ Бот запущено!")
+            logger.info("✅ Бот успішно запущено! Очікую команди...")
             
+            # Запускаємо фонові tasks
+            asyncio.create_task(self.background_monitoring())
+            
+            # Головний цикл
             while True:
                 await asyncio.sleep(3600)
             
         except Exception as e:
-            logger.error(f"❌ Помилка запуску: {e}")
+            logger.error(f"❌ Помилка запуску бота: {e}")
             raise
 
+    async def background_monitoring(self):
+        """Фоновий моніторинг ринку"""
+        while True:
+            try:
+                # Оновлюємо кеш даних кожні 5 хвилин
+                await self.update_market_data_cache()
+                await asyncio.sleep(300)
+                
+            except Exception as e:
+                logger.error(f"Помилка фонового моніторингу: {e}")
+                await asyncio.sleep(60)
+
+    async def update_market_data_cache(self):
+        """Оновлення кешу ринкових даних"""
+        try:
+            symbols = await self.get_top_gainers(limit=10)
+            for symbol in symbols:
+                try:
+                    market_data = await self.get_market_data(symbol)
+                    if market_data:
+                        self.market_data_cache[symbol] = {
+                            'data': market_data,
+                            'timestamp': time.time()
+                        }
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    continue
+                    
+            logger.info("✅ Кеш ринкових даних оновлено")
+        except Exception as e:
+            logger.error(f"Помилка оновлення кешу: {e}")
+
+    def cleanup_old_cache(self):
+        """Очищення застарілого кешу"""
+        current_time = time.time()
+        old_keys = []
+        
+        for symbol, data in self.market_data_cache.items():
+            if current_time - data['timestamp'] > 600:
+                old_keys.append(symbol)
+        
+        for key in old_keys:
+            del self.market_data_cache[key]
+        
+        if old_keys:
+            logger.info(f"🧹 Очищено {len(old_keys)} застарілих записів кешу")
+
     def save_state(self):
-        """Збереження стану"""
+        """Збереження стану бота"""
         try:
             state = {
                 'coin_blacklist': list(self.coin_blacklist),
                 'performance_metrics': self.performance_metrics,
+                'detection_params': self.detection_params,
                 'last_update': time.time()
             }
             
             with open('bot_state.json', 'w') as f:
-                json.dump(state, f)
+                json.dump(state, f, indent=2)
             
-            logger.info("💾 Стан збережено")
+            logger.info("💾 Стан бота збережено")
         except Exception as e:
-            logger.error(f"❌ Помилка збереження: {e}")
+            logger.error(f"❌ Помилка збереження стану: {e}")
 
     def load_state(self):
-        """Завантаження стану"""
+        """Завантаження стану бота"""
         try:
             if os.path.exists('bot_state.json'):
                 with open('bot_state.json', 'r') as f:
@@ -1039,13 +1464,14 @@ class UltimatePumpDumpDetector:
                 
                 self.coin_blacklist = set(state.get('coin_blacklist', []))
                 self.performance_metrics.update(state.get('performance_metrics', {}))
+                self.detection_params.update(state.get('detection_params', {}))
                 
-                logger.info("📂 Стан завантажено")
+                logger.info("📂 Стан бота завантажено")
         except Exception as e:
-            logger.error(f"❌ Помилка завантаження: {e}")
+            logger.error(f"❌ Помилка завантаження стану: {e}")
 
 def main():
-    """Головна функція"""
+    """Головна функція запуску бота"""
     try:
         BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
         
@@ -1053,20 +1479,34 @@ def main():
             logger.error("❌ Будь ласка, встановіть TELEGRAM_BOT_TOKEN у змінних оточення")
             return
         
-        logger.info("🚀 Запускаю бота...")
+        # Створюємо та запускаємо бота
         bot = UltimatePumpDumpDetector(BOT_TOKEN)
+        
+        # Завантажуємо збережений стан
         bot.load_state()
         
+        logger.info("🚀 Запускаю бота...")
+        
+        # Запускаємо бота
         bot.app.run_polling()
         
     except KeyboardInterrupt:
         logger.info("⏹️ Зупинка бота...")
+        # Зберігаємо стан перед виходом
+        bot.save_state()
+    except Exception as e:
+        logger.error(f"❌ Критична помилка: {e}")
         try:
             bot.save_state()
         except:
             pass
-    except Exception as e:
-        logger.error(f"❌ Критична помилка: {e}")
+        raise
 
 if __name__ == '__main__':
+    # Додаткові налаштування для стабільності
+    logging.getLogger('ccxt').setLevel(logging.WARNING)
+    logging.getLogger('telegram').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
+    
+    # Запуск головної функції
     main()
