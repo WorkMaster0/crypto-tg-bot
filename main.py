@@ -106,7 +106,6 @@ class FuturesRevolutionBot:
             CommandHandler("correlation_matrix", self.correlation_matrix_command),
             CommandHandler("funding_analysis", self.funding_analysis_command),
             CommandHandler("open_interest", self.open_interest_command),
-            CommandHandler("gamma_exposure", self.gamma_exposure_command),
             CommandHandler("market_depth", self.market_depth_command),
             CommandHandler("price_action", self.price_action_command),
             CommandHandler("backtest", self.backtest_command),
