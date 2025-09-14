@@ -117,7 +117,8 @@ class UltimatePumpDumpDetector:
             'XRP', 'ADA', 'DOT', 'DOGE', 'SHIB', 'VIB', 'SOL', 'AVAX', 'FTM',
             'SXP', 'CHZ', 'OOKI', 'CREAM', 'FTT', 'BTT', 'WIN', 'TRX', 'BCH',
             'LTC', 'HARD', 'XLM', 'XMR', 'XTZ', 'WTC', 'DASH', 'ETC', 'BETA',
-            'BURGER', 'FIRO', 'CVP', 'EPX', 'PROS', 'SLF', 'OAX'
+            'BURGER', 'FIRO', 'CVP', 'EPX', 'PROS', 'SLF', 'OAX', 'VIDT',
+            'WING', 'CLV', 'FOR', 'VITE', 'TROY'
         }
         
         patterns = {
