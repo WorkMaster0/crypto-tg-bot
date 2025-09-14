@@ -1008,8 +1008,8 @@ class UltimatePumpDumpDetector:
         except Exception as e:
             await query.edit_message_text("❌ Помилка обробки запиту")
 
-    async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Діагностична команда"""
+async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Діагностична команда"""
     try:
         network_ok = await self.check_network_connection()
         exchange_ok = await self.check_exchange_connection()
