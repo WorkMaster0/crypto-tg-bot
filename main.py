@@ -200,6 +200,33 @@ class UltimatePumpDumpDetector:
             parse_mode='Markdown'
         )
 
+async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Діагностична команда"""
+    try:
+        network_ok = await self.check_network_connection()
+        exchange_ok = await self.check_exchange_connection()
+        
+        debug_info = f"""
+🔧 **ДІАГНОСТИКА СИСТЕМИ:**
+
+📡 Мережа: {'✅' if network_ok else '❌'}
+📊 Біржа: {'✅' if exchange_ok else '❌'}
+📈 Символів у кеші: {len(self.symbols_cache)}
+💾 Даних у кеші: {len(self.market_data_cache)}
+⚡ Воркерів: {self.executor._max_workers}
+
+📊 **СТАТИСТИКА:**
+• Сканувань: {self.performance_metrics['total_scans']}
+• Сигналів: {self.performance_metrics['signals_triggered']}
+• Успішність: {self.performance_metrics['success_rate']:.1f}%
+"""
+
+        await update.message.reply_text(debug_info, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Помилка діагностики: {e}")
+        await update.message.reply_text(f"❌ Помилка діагностики: {e}")
+    
     async def mass_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Масове сканування 100+ токенів"""
         try:
@@ -1007,33 +1034,6 @@ class UltimatePumpDumpDetector:
                 
         except Exception as e:
             await query.edit_message_text("❌ Помилка обробки запиту")
-
-async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Діагностична команда"""
-    try:
-        network_ok = await self.check_network_connection()
-        exchange_ok = await self.check_exchange_connection()
-        
-        debug_info = f"""
-🔧 **ДІАГНОСТИКА СИСТЕМИ:**
-
-📡 Мережа: {'✅' if network_ok else '❌'}
-📊 Біржа: {'✅' if exchange_ok else '❌'}
-📈 Символів у кеші: {len(self.symbols_cache)}
-💾 Даних у кеші: {len(self.market_data_cache)}
-⚡ Воркерів: {self.executor._max_workers}
-
-📊 **СТАТИСТИКА:**
-• Сканувань: {self.performance_metrics['total_scans']}
-• Сигналів: {self.performance_metrics['signals_triggered']}
-• Успішність: {self.performance_metrics['success_rate']:.1f}%
-"""
-
-        await update.message.reply_text(debug_info, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Помилка діагностики: {e}")
-        await update.message.reply_text(f"❌ Помилка діагностики: {e}")
     
     async def run(self):
         """Запуск бота"""
