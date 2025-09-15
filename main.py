@@ -18,13 +18,13 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('vwmc_bot.log', encoding='utf-8'),
+        logging.FileHandler('real_analysis_bot.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class VWMCStrategyBot:
+class RealAnalysisBot:
     def __init__(self, token: str):
         self.token = token
         self.app = Application.builder().token(token).build()
@@ -35,50 +35,25 @@ class VWMCStrategyBot:
             'options': {'defaultType': 'future'}
         })
         
-        # Унікальні параметри VWMC стратегії
-        self.vwmc_params = {
-            'volume_weight_period': 21,
-            'momentum_window': 14,
-            'convergence_threshold': 0.85,
-            'divergence_sensitivity': 1.5,
-            'liquidity_zone_depth': 0.003,
-            'entry_confidence_min': 0.7,
-            'trend_filter_strength': 0.6,
-            'volatility_adjustment': True,
-            'dynamic_position_sizing': True
-        }
-        
-        # Статистика стратегії
-        self.strategy_stats = {
-            'total_signals': 0,
-            'successful_signals': 0,
-            'avg_profit_per_trade': 0.0,
-            'max_runup': 0.0,
-            'max_drawdown': 0.0,
-            'sharpe_ratio': 0.0,
-            'win_rate': 0.0,
-            'profit_factor': 0.0
-        }
-        
-        # Історичні дані для аналізу
-        self.historical_data = {}
-        self.pattern_recognition = {}
+        # Кеш даних
+        self.market_data = {}
+        self.last_analysis = {}
+        self.analysis_timestamp = {}
         
         self.setup_handlers()
-        logger.info("VWMC Strategy Bot ініціалізовано")
+        logger.info("Real Analysis Bot ініціалізовано")
 
     def setup_handlers(self):
-        """Унікальні команди для VWMC стратегії"""
+        """Реальні команди аналізу"""
         handlers = [
             CommandHandler("start", self.start_command),
-            CommandHandler("vwmc_scan", self.vwmc_scan_command),
-            CommandHandler("volume_analysis", self.volume_analysis_command),
-            CommandHandler("momentum_matrix", self.momentum_matrix_command),
-            CommandHandler("liquidity_map", self.liquidity_map_command),
-            CommandHandler("pattern_recognition", self.pattern_recognition_command),
-            CommandHandler("market_insights", self.market_insights_command),
-            CommandHandler("risk_assessment", self.risk_assessment_command),
-            CommandHandler("performance", self.performance_command),
+            CommandHandler("analyze", self.analyze_command),
+            CommandHandler("scan", self.scan_market_command),
+            CommandHandler("levels", self.key_levels_command),
+            CommandHandler("volume", self.volume_analysis_command),
+            CommandHandler("momentum", self.momentum_analysis_command),
+            CommandHandler("correlation", self.correlation_analysis_command),
+            CommandHandler("opportunities", self.opportunities_command),
             CallbackQueryHandler(self.handle_callback)
         ]
         
@@ -86,709 +61,422 @@ class VWMCStrategyBot:
             self.app.add_handler(handler)
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Стартова команда з VWMC стратегією"""
+        """Стартова команда"""
         keyboard = [
-            [InlineKeyboardButton("🔍 VWMC СКАН", callback_data="vwmc_scan"),
-             InlineKeyboardButton("📊 АНАЛІЗ ОБ'ЄМІВ", callback_data="volume_analysis")],
-            [InlineKeyboardButton("⚡ МОМЕНТУМ МАТРИЦЯ", callback_data="momentum_matrix"),
-             InlineKeyboardButton("💰 КАРТА ЛІКВІДНОСТІ", callback_data="liquidity_map")],
-            [InlineKeyboardButton("🎯 РОЗПІЗНАВАННЯ ПАТТЕРНІВ", callback_data="pattern_recognition"),
-             InlineKeyboardButton("💡 ІНСАЙТИ РИНКУ", callback_data="market_insights")],
-            [InlineKeyboardButton("⚠️ ОЦІНКА РИЗИКІВ", callback_data="risk_assessment"),
-             InlineKeyboardButton("📊 ПРОДУКТИВНІСТЬ", callback_data="performance")]
+            [InlineKeyboardButton("🔍 Аналізувати ринок", callback_data="analyze"),
+             InlineKeyboardButton("📊 Сканувати", callback_data="scan")],
+            [InlineKeyboardButton("🎯 Ключові рівні", callback_data="levels"),
+             InlineKeyboardButton("📈 Аналіз об'ємів", callback_data="volume")],
+            [InlineKeyboardButton("⚡ Моментум", callback_data="momentum"),
+             InlineKeyboardButton("🔗 Кореляції", callback_data="correlation")],
+            [InlineKeyboardButton("💰 Можливості", callback_data="opportunities")]
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🚀 **VWMC STRATEGY BOT**\n\n"
-            "🎯 *Volume-Weighted Momentum Convergence*\n"
-            "Унікальна стратегія на основі аналізу історії ринку\n\n"
-            "📊 *Ключові переваги:*\n"
-            "• 🤖 Автоматичне розпізнавання паттернів\n"
-            "• 📈 Weighted Volume Analysis\n"
-            "• ⚡ Momentum Convergence Detection\n"
-            "• 💰 Liquidity Zone Mapping\n"
-            "• 🎯 High-Probability Entries\n\n"
-            "🔮 *Статистика стратегії:*\n"
-            f"• Win Rate: {self.strategy_stats['win_rate']:.1f}%\n"
-            f"• Profit Factor: {self.strategy_stats['profit_factor']:.2f}\n"
-            f"• Sharpe Ratio: {self.strategy_stats['sharpe_ratio']:.2f}",
+            "📊 **РЕАЛЬНИЙ АНАЛІТИЧНИЙ БОТ**\n\n"
+            "Аналіз ринку в реальному часі на основі даних\n\n"
+            "⚡ *Останній аналіз:*\n"
+            f"• Час: {datetime.now().strftime('%H:%M:%S')}\n"
+            f"• Статус: 🟢 АКТИВНИЙ\n\n"
+            "🎯 *Оберіть опцію аналізу:*",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
 
-    async def vwmc_scan_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Сканування за VWMC стратегією"""
+    async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Повний аналіз ринку"""
         try:
-            msg = await update.message.reply_text("🔍 Запускаю VWMC сканування...")
+            msg = await update.message.reply_text("📊 Запускаю повний аналіз ринку...")
             
-            symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
-            vwmc_signals = []
+            # Отримуємо реальні дані
+            btc_data = await self.get_real_time_data('BTC/USDT')
+            eth_data = await self.get_real_time_data('ETH/USDT')
+            sol_data = await self.get_real_time_data('SOL/USDT')
             
-            for symbol in symbols:
-                signal_data = await self.analyze_vwmc_pattern(symbol)
-                if signal_data and signal_data['confidence'] >= self.vwmc_params['entry_confidence_min']:
-                    vwmc_signals.append(signal_data)
+            if not all([btc_data, eth_data, sol_data]):
+                await msg.edit_text("❌ Не вдалося отримати дані для аналізу")
+                return
             
-            if vwmc_signals:
-                vwmc_signals.sort(key=lambda x: x['score'], reverse=True)
-                
-                response = "🎯 **VWMC СИГНАЛИ:**\n\n"
-                
-                for i, signal in enumerate(vwmc_signals[:3], 1):
-                    response += f"{i}. 🌟 **{signal['symbol']}** - Score: {signal['score']}/100\n"
-                    response += f"   📈 Напрям: {signal['direction']}\n"
-                    response += f"   💰 Вірогідність: {signal['confidence']:.0%}\n"
-                    response += f"   ⚡ Моментум: {signal['momentum_strength']:.2f}\n"
-                    response += f"   📊 Об'ємний тиск: {signal['volume_pressure']:.2f}\n\n"
-                
-                response += "🔍 **VWMC КРИТЕРІЇ:**\n"
-                response += "• Конвергенція ціни та об'єму\n"
-                response += "• Моментум акселерація\n"
-                response += "• Ліквідність кластеризація\n"
-                response += "• Волатильність адаптація\n"
-                
-                await msg.edit_text(response, parse_mode='Markdown')
-            else:
-                await msg.edit_text("📉 VWMC сигналів не знайдено. Очікуйте кращих умов.")
-                
+            # Аналізуємо кожен актив
+            btc_analysis = await self.analyze_symbol('BTC/USDT', btc_data)
+            eth_analysis = await self.analyze_symbol('ETH/USDT', eth_data)
+            sol_analysis = await self.analyze_symbol('SOL/USDT', sol_data)
+            
+            response = "📊 **РЕЗУЛЬТАТИ АНАЛІЗУ:**\n\n"
+            
+            for analysis in [btc_analysis, eth_analysis, sol_analysis]:
+                if analysis:
+                    emoji = "🟢" if analysis['trend'] == 'bullish' else "🔴"
+                    response += f"{emoji} **{analysis['symbol']}** - ${analysis['price']:.2f}\n"
+                    response += f"   📈 Тренд: {analysis['trend']}\n"
+                    response += f"   📊 RSI: {analysis['rsi']:.1f}\n"
+                    response += f"   ⚡ Моментум: {analysis['momentum']:.2f}\n"
+                    response += f"   💰 Об'єм: ${analysis['volume']:,.0f}\n\n"
+            
+            # Додаємо загальну оцінку ринку
+            market_status = await self.assess_market_status([btc_analysis, eth_analysis, sol_analysis])
+            response += f"🌐 **СТАТУС РИНКУ: {market_status}**\n"
+            
+            await msg.edit_text(response, parse_mode='Markdown')
+            
         except Exception as e:
-            logger.error(f"VWMC scan error: {e}")
-            await update.message.reply_text("❌ Помилка VWMC сканування")
+            logger.error(f"Помилка аналізу: {e}")
+            await update.message.reply_text("❌ Помилка аналізу ринку")
 
-    async def analyze_vwmc_pattern(self, symbol: str) -> Optional[Dict]:
-        """Аналіз VWMC паттерну"""
+    async def get_real_time_data(self, symbol: str) -> Optional[Dict]:
+        """Отримання реальних даних з біржі"""
         try:
-            # Отримання даних для аналізу
-            ohlcv = await self.get_ohlcv(symbol, '1h', 100)
+            # Отримуємо останні дані
+            ohlcv = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.exchange.fetch_ohlcv(symbol, '1h', 100)
+            )
+            
             if not ohlcv or len(ohlcv) < 50:
                 return None
+            
+            # Отримуємо поточний ticker
+            ticker = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.exchange.fetch_ticker(symbol)
+            )
+            
+            return {
+                'symbol': symbol,
+                'ohlcv': ohlcv,
+                'ticker': ticker,
+                'timestamp': datetime.now()
+            }
+            
+        except Exception as e:
+            logger.error(f"Помилка отримання даних для {symbol}: {e}")
+            return None
+
+    async def analyze_symbol(self, symbol: str, market_data: Dict) -> Optional[Dict]:
+        """Реальний аналіз символу"""
+        try:
+            ohlcv = market_data['ohlcv']
+            ticker = market_data['ticker']
             
             closes = np.array([x[4] for x in ohlcv])
             highs = np.array([x[2] for x in ohlcv])
             lows = np.array([x[3] for x in ohlcv])
             volumes = np.array([x[5] for x in ohlcv])
             
-            # VWMC аналіз
-            volume_weighted_analysis = self.calculate_volume_weighted_metrics(closes, volumes)
-            momentum_convergence = self.analyze_momentum_convergence(closes, volumes)
-            liquidity_zones = self.identify_liquidity_zones(highs, lows, volumes)
-            pattern_recognition = self.recognize_price_patterns(closes, volumes)
+            # Технічні індикатори
+            rsi = talib.RSI(closes, 14)
+            macd, macd_signal, _ = talib.MACD(closes)
+            stoch = talib.STOCH(highs, lows, closes)
+            atr = talib.ATR(highs, lows, closes, 14)
             
-            # Комбінована оцінка
-            vwmc_score = self.calculate_vwmc_score(
-                volume_weighted_analysis,
-                momentum_convergence,
-                liquidity_zones,
-                pattern_recognition
-            )
+            # Аналіз тренду
+            ema20 = talib.EMA(closes, 20)
+            ema50 = talib.EMA(closes, 50)
             
-            if vwmc_score < 60:  # Мінімальний поріг
+            if np.isnan(ema20[-1]) or np.isnan(ema50[-1]):
                 return None
             
-            # Визначення напрямку
-            direction = self.determine_direction(
-                volume_weighted_analysis,
-                momentum_convergence,
-                pattern_recognition
-            )
+            # Визначення тренду
+            if ema20[-1] > ema50[-1] and closes[-1] > ema20[-1]:
+                trend = 'bullish'
+            elif ema20[-1] < ema50[-1] and closes[-1] < ema20[-1]:
+                trend = 'bearish'
+            else:
+                trend = 'neutral'
+            
+            # Аналіз моментуму
+            momentum = self.calculate_momentum_strength(closes, volumes)
             
             return {
                 'symbol': symbol,
-                'direction': direction,
-                'score': vwmc_score,
-                'confidence': vwmc_score / 100,
-                'momentum_strength': momentum_convergence['strength'],
-                'volume_pressure': volume_weighted_analysis['pressure'],
-                'liquidity_zones': liquidity_zones,
-                'pattern': pattern_recognition['pattern']
+                'price': ticker['last'],
+                'trend': trend,
+                'rsi': rsi[-1] if not np.isnan(rsi[-1]) else 50,
+                'momentum': momentum,
+                'volume': np.mean(volumes[-5:]),
+                'volatility': atr[-1] / closes[-1] * 100 if not np.isnan(atr[-1]) else 0,
+                'timestamp': datetime.now()
             }
             
         except Exception as e:
-            logger.error(f"VWMC analysis error for {symbol}: {e}")
+            logger.error(f"Помилка аналізу {symbol}: {e}")
             return None
 
-    def calculate_volume_weighted_metrics(self, prices: np.ndarray, volumes: np.ndarray) -> Dict:
-        """Розрахунок volume-weighted метрик"""
-        # Volume Weighted Moving Average
-        vwma = np.sum(prices * volumes) / np.sum(volumes)
-        
-        # Volume Pressure Index
-        volume_ma = talib.SMA(volumes, self.vwmc_params['volume_weight_period'])
-        volume_pressure = volumes[-1] / volume_ma[-1] if volume_ma[-1] > 0 else 1.0
-        
-        # Volume-Weighted Momentum
-        returns = np.diff(prices) / prices[:-1]
-        weighted_returns = returns * volumes[1:] / np.sum(volumes[1:])
-        vwmomentum = np.sum(weighted_returns)
-        
-        return {
-            'vwma': vwma,
-            'pressure': volume_pressure,
-            'momentum': vwmomentum,
-            'trend': 1 if vwmomentum > 0 else -1
-        }
-
-    def analyze_momentum_convergence(self, prices: np.ndarray, volumes: np.ndarray) -> Dict:
-        """Аналіз конвергенції моментуму"""
-        # RSI з об'ємною зваженою
-        rsi = talib.RSI(prices, self.vwmc_params['momentum_window'])
-        
-        # Volume-Weighted MACD
-        macd, macd_signal, _ = talib.MACD(prices)
-        
-        # Momentum Convergence Index
-        price_momentum = talib.MOM(prices, self.vwmc_params['momentum_window'])
-        volume_momentum = talib.MOM(volumes, self.vwmc_params['momentum_window'])
-        
-        # Конвергенція/дивергенція
-        convergence = np.corrcoef(price_momentum[-20:], volume_momentum[-20:])[0, 1]
-        
-        return {
-            'rsi': rsi[-1],
-            'macd_convergence': macd[-1] - macd_signal[-1],
-            'convergence_strength': abs(convergence),
-            'convergence_direction': 1 if convergence > 0 else -1,
-            'strength': np.mean([abs(convergence), abs(macd[-1] - macd_signal[-1]) / np.std(prices)])
-        }
-
-    def identify_liquidity_zones(self, highs: np.ndarray, lows: np.ndarray, volumes: np.ndarray) -> List[float]:
-        """Ідентифікація зон ліквідності"""
-        # Volume Profile Analysis
-        price_levels = np.linspace(np.min(lows), np.max(highs), 100)
-        volume_at_price = []
-        
-        for i in range(len(price_levels) - 1):
-            mask = (highs >= price_levels[i]) & (lows <= price_levels[i + 1])
-            volume_at_price.append(np.sum(volumes[mask]))
-        
-        # Знаходження значущих рівнів
-        significant_levels = []
-        mean_volume = np.mean(volume_at_price)
-        std_volume = np.std(volume_at_price)
-        
-        for i, vol in enumerate(volume_at_price):
-            if vol > mean_volume + std_volume * self.vwmc_params['divergence_sensitivity']:
-                significant_levels.append(price_levels[i])
-        
-        return significant_levels[:5]  # Топ-5 рівнів
-
-    def recognize_price_patterns(self, prices: np.ndarray, volumes: np.ndarray) -> Dict:
-        """Розпізнавання ценових паттернів"""
-        # Аналіз паттернів на основі історії
-        patterns = {
-            'bullish_engulfing': self.detect_bullish_engulfing(prices, volumes),
-            'bearish_engulfing': self.detect_bearish_engulfing(prices, volumes),
-            'double_bottom': self.detect_double_bottom(prices),
-            'double_top': self.detect_double_top(prices),
-            'volume_spike': self.detect_volume_spike(volumes)
-        }
-        
-        # Визначення найсильнішого паттерну
-        strongest_pattern = max(patterns.items(), key=lambda x: x[1]['strength'])
-        
-        return {
-            'pattern': strongest_pattern[0],
-            'strength': strongest_pattern[1]['strength'],
-            'direction': strongest_pattern[1]['direction']
-        }
-
-    def detect_bullish_engulfing(self, prices: np.ndarray, volumes: np.ndarray) -> Dict:
-        """Детекція бичого поглинаючого паттерну"""
-        if len(prices) < 3:
-            return {'strength': 0, 'direction': 'none'}
-        
-        # Перевірка умов bullish engulfing
-        current_close = prices[-1]
-        current_open = prices[-1] - (prices[-1] - prices[-2])  # Approximation
-        prev_close = prices[-2]
-        prev_open = prices[-2] - (prices[-2] - prices[-3])
-        
-        is_engulfing = (current_close > prev_open and 
-                       current_open < prev_close and 
-                       current_close > current_open)
-        
-        strength = 0.7 if is_engulfing else 0
-        if is_engulfing and volumes[-1] > np.mean(volumes[-5:]):
-            strength = 0.9
-        
-        return {'strength': strength, 'direction': 'bullish'}
-
-    def detect_bearish_engulfing(self, prices: np.ndarray, volumes: np.ndarray) -> Dict:
-        """Детекція ведмежого поглинаючого паттерну"""
-        if len(prices) < 3:
-            return {'strength': 0, 'direction': 'none'}
-        
-        current_close = prices[-1]
-        current_open = prices[-1] - (prices[-1] - prices[-2])
-        prev_close = prices[-2]
-        prev_open = prices[-2] - (prices[-2] - prices[-3])
-        
-        is_engulfing = (current_close < prev_open and 
-                       current_open > prev_close and 
-                       current_close < current_open)
-        
-        strength = 0.7 if is_engulfing else 0
-        if is_engulfing and volumes[-1] > np.mean(volumes[-5:]):
-            strength = 0.9
-        
-        return {'strength': strength, 'direction': 'bearish'}
-
-    def detect_double_bottom(self, prices: np.ndarray) -> Dict:
-        """Детекція подвійного дна"""
+    def calculate_momentum_strength(self, prices: np.ndarray, volumes: np.ndarray) -> float:
+        """Розрахунок сили моментуму"""
         if len(prices) < 20:
-            return {'strength': 0, 'direction': 'none'}
+            return 0.0
         
-        # Пошук локальних мінімумів
-        minima_indices = signal.argrelextrema(prices, np.less_equal, order=5)[0]
+        # Price momentum
+        price_change = (prices[-1] - prices[-20]) / prices[-20] * 100
         
-        if len(minima_indices) < 2:
-            return {'strength': 0, 'direction': 'none'}
+        # Volume momentum
+        volume_change = (volumes[-1] - np.mean(volumes[-20:-10])) / np.mean(volumes[-20:-10]) * 100
         
-        # Перевірка умов double bottom
-        last_minima = minima_indices[-2:]
-        price_diff = abs(prices[last_minima[0]] - prices[last_minima[1]]) / prices[last_minima[0]]
+        # Combined momentum score
+        momentum_score = (price_change * 0.6 + volume_change * 0.4) / 10
+        return max(min(momentum_score, 10.0), -10.0)
+
+    async def assess_market_status(self, analyses: List[Dict]) -> str:
+        """Оцінка загального стану ринку"""
+        if not analyses:
+            return "НЕВІДОМИЙ"
         
-        if price_diff < 0.02:  # Максимальна різниця 2%
-            strength = 0.8
-            # Перевірка пробою neckline
-            neckline = np.max(prices[last_minima[0]:last_minima[1]])
-            if prices[-1] > neckline:
-                strength = 0.95
+        bullish_count = sum(1 for a in analyses if a and a['trend'] == 'bullish')
+        bearish_count = sum(1 for a in analyses if a and a['trend'] == 'bearish')
+        
+        if bullish_count >= 2:
+            return "БИЧИЙ"
+        elif bearish_count >= 2:
+            return "МЕДВЕЖИЙ"
+        else:
+            return "НЕЙТРАЛЬНИЙ"
+
+    async def scan_market_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сканування ринку на можливості"""
+        try:
+            msg = await update.message.reply_text("🔍 Сканую ринок на торгові можливості...")
             
-            return {'strength': strength, 'direction': 'bullish'}
-        
-        return {'strength': 0, 'direction': 'none'}
-
-    def detect_double_top(self, prices: np.ndarray) -> Dict:
-        """Детекція подвійної вершини"""
-        if len(prices) < 20:
-            return {'strength': 0, 'direction': 'none'}
-        
-        # Пошук локальних максимумів
-        maxima_indices = signal.argrelextrema(prices, np.greater_equal, order=5)[0]
-        
-        if len(maxima_indices) < 2:
-            return {'strength': 0, 'direction': 'none'}
-        
-        # Перевірка умов double top
-        last_maxima = maxima_indices[-2:]
-        price_diff = abs(prices[last_maxima[0]] - prices[last_maxima[1]]) / prices[last_maxima[0]]
-        
-        if price_diff < 0.02:
-            strength = 0.8
-            # Перевірка пробою neckline
-            neckline = np.min(prices[last_maxima[0]:last_maxima[1]])
-            if prices[-1] < neckline:
-                strength = 0.95
+            symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
+            opportunities = []
             
-            return {'strength': strength, 'direction': 'bearish'}
-        
-        return {'strength': 0, 'direction': 'none'}
+            for symbol in symbols:
+                data = await self.get_real_time_data(symbol)
+                if data:
+                    analysis = await self.analyze_symbol(symbol, data)
+                    if analysis and self.is_trading_opportunity(analysis):
+                        opportunities.append(analysis)
+            
+            if opportunities:
+                response = "🎯 **ТОРГОВІ МОЖЛИВОСТІ:**\n\n"
+                
+                for i, opp in enumerate(opportunities[:5], 1):
+                    emoji = "🟢" if opp['trend'] == 'bullish' else "🔴"
+                    response += f"{i}. {emoji} **{opp['symbol']}**\n"
+                    response += f"   💰 Ціна: ${opp['price']:.2f}\n"
+                    response += f"   📈 Тренд: {opp['trend']}\n"
+                    response += f"   📊 RSI: {opp['rsi']:.1f}\n"
+                    response += f"   ⚡ Моментум: {opp['momentum']:.2f}\n\n"
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("📉 Наразі якісних торгових можливостей не знайдено")
+                
+        except Exception as e:
+            logger.error(f"Помилка сканування: {e}")
+            await update.message.reply_text("❌ Помилка сканування ринку")
 
-    def detect_volume_spike(self, volumes: np.ndarray) -> Dict:
-        """Детекція спайку об'ємів"""
-        if len(volumes) < 10:
-            return {'strength': 0, 'direction': 'none'}
+    def is_trading_opportunity(self, analysis: Dict) -> bool:
+        """Перевірка чи є аналіз торговою можливістю"""
+        if not analysis:
+            return False
         
-        current_volume = volumes[-1]
-        avg_volume = np.mean(volumes[-10:-1])
-        volume_ratio = current_volume / avg_volume
+        # Критерії якісної можливості
+        rsi_ok = (analysis['rsi'] < 35 and analysis['trend'] == 'bullish') or \
+                 (analysis['rsi'] > 65 and analysis['trend'] == 'bearish')
         
-        if volume_ratio > 2.0:
-            return {'strength': 0.7, 'direction': 'breakout'}
-        elif volume_ratio > 3.0:
-            return {'strength': 0.9, 'direction': 'breakout'}
+        momentum_ok = abs(analysis['momentum']) > 2.0
+        volume_ok = analysis['volume'] > 1000000  # Мінімальний об'єм
         
-        return {'strength': 0, 'direction': 'none'}
+        return rsi_ok and momentum_ok and volume_ok
 
-    def calculate_vwmc_score(self, volume_analysis: Dict, momentum_analysis: Dict, 
-                           liquidity_zones: List, pattern_analysis: Dict) -> float:
-        """Розрахунок загального VWMC score"""
-        weights = {
-            'volume_pressure': 0.25,
-            'momentum_strength': 0.25,
-            'pattern_strength': 0.20,
-            'liquidity_zones': 0.15,
-            'convergence': 0.15
-        }
+    async def key_levels_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Ключові рівні підтримки/опору"""
+        try:
+            msg = await update.message.reply_text("🎯 Визначаю ключові рівні...")
+            
+            symbol = 'BTC/USDT'
+            data = await self.get_real_time_data(symbol)
+            
+            if not data:
+                await msg.edit_text("❌ Не вдалося отримати дані")
+                return
+            
+            levels = self.find_key_levels(data['ohlcv'])
+            
+            response = f"🎯 **КЛЮЧОВІ РІВНІ {symbol}:**\n\n"
+            response += f"📊 Поточна ціна: ${data['ticker']['last']:.2f}\n\n"
+            
+            response += "🛡️ **ПІДТРИМКА:**\n"
+            for level in levels['support'][:3]:
+                response += f"• ${level:.2f}\n"
+            
+            response += "\n📈 **ОПІР:**\n"
+            for level in levels['resistance'][:3]:
+                response += f"• ${level:.2f}\n"
+            
+            response += f"\n📏 Відстань до найближчого рівня: {levels['distance_to_nearest']:.2f}%"
+            
+            await msg.edit_text(response, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Помилка пошуку рівнів: {e}")
+            await update.message.reply_text("❌ Помилка аналізу рівнів")
+
+    def find_key_levels(self, ohlcv: List) -> Dict:
+        """Знаходження ключових рівнів підтримки/опору"""
+        highs = np.array([x[2] for x in ohlcv])
+        lows = np.array([x[3] for x in ohlcv])
+        closes = np.array([x[4] for x in ohlcv])
         
-        # Нормалізація компонентів
-        volume_score = min(volume_analysis['pressure'] * 50, 100)
-        momentum_score = momentum_analysis['strength'] * 100
-        pattern_score = pattern_analysis['strength'] * 100
-        liquidity_score = min(len(liquidity_zones) * 20, 100)
-        convergence_score = momentum_analysis['convergence_strength'] * 100
+        # Знаходимо локальні екстремуми
+        support_levels = []
+        resistance_levels = []
         
-        # Загальна оцінка
-        total_score = (
-            volume_score * weights['volume_pressure'] +
-            momentum_score * weights['momentum_strength'] +
-            pattern_score * weights['pattern_strength'] +
-            liquidity_score * weights['liquidity_zones'] +
-            convergence_score * weights['convergence']
+        # Простий алгоритм пошуку рівнів
+        for i in range(2, len(ohlcv) - 2):
+            # Перевірка для підтримки
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                support_levels.append(lows[i])
+            
+            # Перевірка для опору
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                resistance_levels.append(highs[i])
+        
+        # Унікальні рівні
+        support_levels = sorted(set(support_levels))
+        resistance_levels = sorted(set(resistance_levels))
+        
+        # Відстань до найближчого рівня
+        current_price = closes[-1]
+        nearest_level = min(
+            [abs(price - current_price) for price in support_levels + resistance_levels],
+            default=0
         )
+        distance_pct = nearest_level / current_price * 100
         
-        return min(total_score, 100)
-
-    def determine_direction(self, volume_analysis: Dict, momentum_analysis: Dict, 
-                          pattern_analysis: Dict) -> str:
-        """Визначення напрямку торгівлі"""
-        # Голосування між різними компонентами
-        votes = {
-            'LONG': 0,
-            'SHORT': 0
+        return {
+            'support': support_levels,
+            'resistance': resistance_levels,
+            'distance_to_nearest': distance_pct
         }
-        
-        # Volume analysis vote
-        if volume_analysis['trend'] > 0:
-            votes['LONG'] += 1
-        else:
-            votes['SHORT'] += 1
-        
-        # Momentum analysis vote
-        if momentum_analysis['convergence_direction'] > 0:
-            votes['LONG'] += 1
-        else:
-            votes['SHORT'] += 1
-        
-        # Pattern analysis vote
-        if pattern_analysis['direction'] in ['bullish', 'breakout']:
-            votes['LONG'] += 1
-        elif pattern_analysis['direction'] in ['bearish']:
-            votes['SHORT'] += 1
-        
-        return 'LONG' if votes['LONG'] > votes['SHORT'] else 'SHORT'
 
     async def volume_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Глибинний аналіз об'ємів"""
+        """Аналіз об'ємів"""
         try:
             msg = await update.message.reply_text("📊 Аналізую об'ємні паттерни...")
             
-            volume_data = await self.deep_volume_analysis('BTC/USDT')
+            symbol = 'BTC/USDT'
+            data = await self.get_real_time_data(symbol)
             
-            response = "📊 **ГЛИБИННИЙ АНАЛІЗ ОБ'ЄМІВ:**\n\n"
-            response += f"🔍 **BTC/USDT**\n"
-            response += f"• Об'ємний тиск: {volume_data['volume_pressure']:.2f}\n"
-            response += f"• VWMA відхилення: {volume_data['vwma_deviation']:.2f}%\n"
-            response += f"• Об'ємний тренд: {volume_data['volume_trend']}\n"
-            response += f"• Кластеризація: {volume_data['clustering_score']:.2f}\n\n"
+            if not data:
+                await msg.edit_text("❌ Не вдалося отримати дані")
+                return
             
-            response += "🎯 **ІНТЕРПРЕТАЦІЯ:**\n"
-            if volume_data['volume_pressure'] > 1.5:
-                response += "• Сильний об'ємний тиск\n"
-                response += "• Можливість пробою\n"
-            elif volume_data['volume_pressure'] < 0.7:
-                response += "• Низька об'ємна активність\n"
-                response += "• Консолідація\n"
+            volume_analysis = self.analyze_volume_patterns(data['ohlcv'])
+            
+            response = f"📊 **АНАЛІЗ ОБ'ЄМІВ {symbol}:**\n\n"
+            response += f"📈 Поточний об'єм: ${volume_analysis['current_volume']:,.0f}\n"
+            response += f"📊 Середній об'єм: ${volume_analysis['avg_volume']:,.0f}\n"
+            response += f"⚡ Об'ємний тиск: {volume_analysis['volume_pressure']:.2f}\n"
+            response += f"🎯 Тренд об'ємів: {volume_analysis['volume_trend']}\n\n"
+            
+            response += "💡 **ІНТЕРПРЕТАЦІЯ:**\n"
+            if volume_analysis['volume_pressure'] > 1.5:
+                response += "• Сильний об'ємний тиск\n• Можливість пробою\n"
+            elif volume_analysis['volume_pressure'] < 0.7:
+                response += "• Низька об'ємна активність\n• Консолідація\n"
+            else:
+                response += "• Нормальна об'ємна активність\n"
             
             await msg.edit_text(response, parse_mode='Markdown')
             
         except Exception as e:
-            logger.error(f"Volume analysis error: {e}")
+            logger.error(f"Помилка аналізу об'ємів: {e}")
             await update.message.reply_text("❌ Помилка аналізу об'ємів")
 
-    async def deep_volume_analysis(self, symbol: str) -> Dict:
-        """Глибинний аналіз об'ємів"""
-        ohlcv = await self.get_ohlcv(symbol, '4h', 50)
-        if not ohlcv:
-            return {}
-        
-        closes = np.array([x[4] for x in ohlcv])
+    def analyze_volume_patterns(self, ohlcv: List) -> Dict:
+        """Аналіз об'ємних паттернів"""
         volumes = np.array([x[5] for x in ohlcv])
         
-        # Volume Pressure
-        volume_ma = talib.SMA(volumes, 20)
-        volume_pressure = volumes[-1] / volume_ma[-1] if volume_ma[-1] > 0 else 1.0
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-20:])
+        volume_pressure = current_volume / avg_volume if avg_volume > 0 else 1.0
         
-        # VWMA Deviation
-        vwma = np.sum(closes * volumes) / np.sum(volumes)
-        price_ma = talib.SMA(closes, 20)
-        vwma_deviation = (vwma - price_ma[-1]) / price_ma[-1] * 100
-        
-        # Volume Trend
-        volume_trend = "ВИСХІДНИЙ" if volumes[-1] > np.mean(volumes[-5:]) else "НИЗХІДНИЙ"
-        
-        # Clustering Analysis
-        volume_std = np.std(volumes)
-        clustering_score = volume_std / np.mean(volumes)
+        # Визначення тренду об'ємів
+        if current_volume > np.mean(volumes[-5:]):
+            volume_trend = "ЗРОСТАННЯ"
+        elif current_volume < np.mean(volumes[-5:]):
+            volume_trend = "СПАДАННЯ"
+        else:
+            volume_trend = "СТАБІЛЬНІСТЬ"
         
         return {
+            'current_volume': current_volume,
+            'avg_volume': avg_volume,
             'volume_pressure': volume_pressure,
-            'vwma_deviation': vwma_deviation,
-            'volume_trend': volume_trend,
-            'clustering_score': clustering_score
+            'volume_trend': volume_trend
         }
 
-    async def momentum_matrix_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Матриця моментуму"""
+    async def momentum_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Аналіз моментуму"""
         try:
-            msg = await update.message.reply_text("⚡ Розраховую матрицю моментуму...")
+            msg = await update.message.reply_text("⚡ Аналізую моментум...")
             
-            momentum_data = await self.calculate_momentum_matrix()
+            symbol = 'BTC/USDT'
+            data = await self.get_real_time_data(symbol)
             
-            response = "⚡ **МАТРИЦЯ МОМЕНТУМУ:**\n\n"
+            if not data:
+                await msg.edit_text("❌ Не вдалося отримати дані")
+                return
             
-            for asset, data in momentum_data.items():
-                response += f"🎯 **{asset}**\n"
-                response += f"   RSI: {data['rsi']:.1f}\n"
-                response += f"   MACD: {data['macd']:.4f}\n"
-                response += f"   Моментум: {data['momentum']:.2f}\n\n"
+            momentum_analysis = self.analyze_momentum(data['ohlcv'])
             
-            response += "🔍 **КЛЮЧОВІ РІВНІ:**\n"
-            response += "• RSI > 70: перекупленість\n"
-            response += "• RSI < 30: перепроданість\n"
-            response += "• MACD > 0: бичий моментум\n"
+            response = f"⚡ **АНАЛІЗ МОМЕНТУМУ {symbol}:**\n\n"
+            response += f"📈 Сила моментуму: {momentum_analysis['momentum_strength']:.2f}\n"
+            response += f"📊 Напрямок: {momentum_analysis['momentum_direction']}\n"
+            response += f"🎯 RSI: {momentum_analysis['rsi']:.1f}\n"
+            response += f"📉 Stochastic: {momentum_analysis['stoch']:.1f}\n\n"
+            
+            response += "🔍 **СИГНАЛИ:**\n"
+            if momentum_analysis['rsi'] < 30:
+                response += "• Перепроданість (RSI < 30)\n"
+            elif momentum_analysis['rsi'] > 70:
+                response += "• Перекупленість (RSI > 70)\n"
+            
+            if momentum_analysis['stoch'] < 20:
+                response += "• Перепроданість (Stoch < 20)\n"
+            elif momentum_analysis['stoch'] > 80:
+                response += "• Перекупленість (Stoch > 80)\n"
             
             await msg.edit_text(response, parse_mode='Markdown')
             
         except Exception as e:
-            logger.error(f"Momentum matrix error: {e}")
-            await update.message.reply_text("❌ Помилка матриці моментуму")
+            logger.error(f"Помилка аналізу моментуму: {e}")
+            await update.message.reply_text("❌ Помилка аналізу моментуму")
 
-    async def calculate_momentum_matrix(self) -> Dict:
-        """Розрахунок матриці моментуму"""
-        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
-        momentum_data = {}
+    def analyze_momentum(self, ohlcv: List) -> Dict:
+        """Аналіз моментуму"""
+        closes = np.array([x[4] for x in ohlcv])
+        highs = np.array([x[2] for x in ohlcv])
+        lows = np.array([x[3] for x in ohlcv])
         
-        for symbol in symbols:
-            ohlcv = await self.get_ohlcv(symbol, '1h', 50)
-            if ohlcv:
-                closes = np.array([x[4] for x in ohlcv])
-                
-                rsi = talib.RSI(closes, 14)
-                macd, macd_signal, _ = talib.MACD(closes)
-                momentum = talib.MOM(closes, 10)
-                
-                momentum_data[symbol] = {
-                    'rsi': rsi[-1] if not np.isnan(rsi[-1]) else 50,
-                    'macd': macd[-1] - macd_signal[-1] if len(macd) > 0 else 0,
-                    'momentum': momentum[-1] if len(momentum) > 0 else 0
-                }
+        # RSI
+        rsi = talib.RSI(closes, 14)
         
-        return momentum_data
-
-    async def liquidity_map_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Карта ліквідності"""
-        try:
-            msg = await update.message.reply_text("💰 Створюю карту ліквідності...")
-            
-            liquidity_map = await self.generate_liquidity_map()
-            
-            response = "💰 **КАРТА ЛІКВІДНОСТІ:**\n\n"
-            
-            for symbol, levels in liquidity_map.items():
-                response += f"📊 **{symbol}**\n"
-                response += f"   🎯 Ключові рівні: {len(levels)}\n"
-                if levels:
-                    response += f"   💰 Найближчий: ${levels[0]:.2f}\n"
-                response += "\n"
-            
-            response += "🔍 **ВАЖЛИВІСТЬ:**\n"
-            response += "• Ціла прагнуть до зон ліквідності\n"
-            response += "• Пробиття веде до сильних рухів\n"
-            response += "• Ідеальні точки для входу/виходу\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Liquidity map error: {e}")
-            await update.message.reply_text("❌ Помилка карти ліквідності")
-
-    async def generate_liquidity_map(self) -> Dict:
-        """Генерація карти ліквідності"""
-        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
-        liquidity_map = {}
+        # Stochastic
+        stoch_k, stoch_d = talib.STOCH(highs, lows, closes)
         
-        for symbol in symbols:
-            ohlcv = await self.get_ohlcv(symbol, '4h', 100)
-            if ohlcv:
-                highs = np.array([x[2] for x in ohlcv])
-                lows = np.array([x[3] for x in ohlcv])
-                volumes = np.array([x[5] for x in ohlcv])
-                
-                levels = self.identify_liquidity_zones(highs, lows, volumes)
-                liquidity_map[symbol] = levels
+        # MACD
+        macd, macd_signal, _ = talib.MACD(closes)
         
-        return liquidity_map
-
-    async def pattern_recognition_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Розпізнавання паттернів"""
-        try:
-            msg = await update.message.reply_text("🎯 Аналізую ценові паттерни...")
-            
-            patterns = await self.recognize_market_patterns()
-            
-            response = "🎯 **РОЗПІЗНАННЯ ПАТТЕРНІВ:**\n\n"
-            
-            for symbol, pattern in patterns.items():
-                response += f"📈 **{symbol}**\n"
-                response += f"   Паттерн: {pattern['name']}\n"
-                response += f"   Сила: {pattern['strength']:.2f}\n"
-                response += f"   Напрям: {pattern['direction']}\n\n"
-            
-            response += "🔮 **ТОРГОВІ НАСЛІДКИ:**\n"
-            response += "• Поглинаючі паттерни: високоякісні\n"
-            response += "• Подвійне дно/вершина: сильні рівні\n"
-            response += "• Спайки об'єму: потенційні пробої\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Pattern recognition error: {e}")
-            await update.message.reply_text("❌ Помилка розпізнавання паттернів")
-
-    async def recognize_market_patterns(self) -> Dict:
-        """Розпізнавання ринкових паттернів"""
-        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
-        patterns = {}
+        # Визначення напрямку моментуму
+        if len(macd) > 1 and macd[-1] > macd_signal[-1]:
+            momentum_direction = "БИЧИЙ"
+        elif len(macd) > 1 and macd[-1] < macd_signal[-1]:
+            momentum_direction = "МЕДВЕЖИЙ"
+        else:
+            momentum_direction = "НЕЙТРАЛЬНИЙ"
         
-        for symbol in symbols:
-            ohlcv = await self.get_ohlcv(symbol, '1h', 50)
-            if ohlcv:
-                closes = np.array([x[4] for x in ohlcv])
-                volumes = np.array([x[5] for x in ohlcv])
-                
-                pattern_data = self.recognize_price_patterns(closes, volumes)
-                patterns[symbol] = {
-                    'name': pattern_data['pattern'],
-                    'strength': pattern_data['strength'],
-                    'direction': pattern_data['direction']
-                }
+        # Сила моментуму
+        momentum_strength = abs(macd[-1] - macd_signal[-1]) / np.std(closes) * 100 if len(macd) > 1 else 0
         
-        return patterns
-
-    async def market_insights_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Інсайти ринку"""
-        try:
-            msg = await update.message.reply_text("💡 Генерую ринкові інсайти...")
-            
-            insights = await self.generate_market_insights()
-            
-            response = "💡 **РИНКОВІ ІНСАЙТИ:**\n\n"
-            
-            for i, insight in enumerate(insights[:5], 1):
-                response += f"{i}. {insight}\n"
-            
-            response += "\n🎯 **РЕКОМЕНДАЦІЇ:**\n"
-            response += "• Уважно моніторйте ключові рівні\n"
-            response += "• Слідкуйте за об'ємними паттернами\n"
-            response += "• Використовуйте VWMC сигнали для входу\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Market insights error: {e}")
-            await update.message.reply_text("❌ Помилка генерації інсайтів")
-
-    async def generate_market_insights(self) -> List[str]:
-        """Генерація ринкових інсайтів"""
-        insights = [
-            "Сильний об'ємний тиск на BTC - можливість пробою",
-            "Конвергенція моментуму на ETH - потенційний розворот",
-            "Висока ліквідність на ключових рівнях BNB",
-            "Поглинаючі паттерни на малих таймфреймах",
-            "Зростання волатильності в ALT-секторі",
-            "VWMA показує перевищення над SMA - бичий сигнал",
-            "Низька об'ємна активність на фіатних парах",
-            "Моментум прискорюється на верхніх таймфреймах"
-        ]
-        
-        return insights
-
-    async def risk_assessment_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Оцінка ризиків"""
-        try:
-            msg = await update.message.reply_text("⚠️ Оцінюю ринкові ризики...")
-            
-            risk_data = await self.assess_market_risk()
-            
-            response = "⚠️ **ОЦІНКА РИЗИКІВ:**\n\n"
-            response += f"📊 Загальний рівень ризику: {risk_data['overall_risk']}/10\n"
-            response += f"⚡ Волатильність: {risk_data['volatility_risk']}\n"
-            response += f"📉 Кореляція ризиків: {risk_data['correlation_risk']}\n"
-            response += f"💰 Ліквідність: {risk_data['liquidity_risk']}\n\n"
-            
-            response += "🎯 **РЕКОМЕНДАЦІЇ:**\n"
-            if risk_data['overall_risk'] > 7:
-                response += "• Зменшіть розміри позицій\n"
-                response += "• Збільшіть стоп-лоси\n"
-                response += "• Уникайте агресивних стратегій\n"
-            else:
-                response += "• Нормальні умови для торгівлі\n"
-                response += "• Дотримуйтесь стандартного ризик-менеджменту\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Risk assessment error: {e}")
-            await update.message.reply_text("❌ Помилка оцінки ризиків")
-
-    async def assess_market_risk(self) -> Dict:
-        """Оцінка ринкових ризиків"""
-        # Симуляція оцінки ризиків на основі різних факторів
         return {
-            'overall_risk': np.random.randint(3, 8),
-            'volatility_risk': "ВИСОКА" if np.random.random() > 0.5 else "ПОМІРНА",
-            'correlation_risk': "СЕРЕДНЯ",
-            'liquidity_risk': "НИЗЬКА",
-            'recommendations': [
-                "Моніторйте об'єми",
-                "Диверсифікуйте портфель",
-                "Використовуйте стоп-лоси"
-            ]
+            'rsi': rsi[-1] if not np.isnan(rsi[-1]) else 50,
+            'stoch': stoch_k[-1] if not np.isnan(stoch_k[-1]) else 50,
+            'momentum_direction': momentum_direction,
+            'momentum_strength': momentum_strength
         }
-
-    async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Продуктивність стратегії"""
-        try:
-            performance = await self.calculate_strategy_performance()
-            
-            response = "📊 **ПРОДУКТИВНІСТЬ СТРАТЕГІЇ:**\n\n"
-            response += f"🎯 Загальна ефективність: {performance['overall_score']}/100\n"
-            response += f"✅ Win Rate: {performance['win_rate']:.1f}%\n"
-            response += f"💰 Profit Factor: {performance['profit_factor']:.2f}\n"
-            response += f"⚡ Sharpe Ratio: {performance['sharpe_ratio']:.2f}\n"
-            response += f"📉 Max Drawdown: {performance['max_drawdown']:.2f}%\n"
-            response += f"📈 Avg Profit/Trade: {performance['avg_profit']:.2f}%\n\n"
-            
-            response += "🔮 **СТАТУС СТРАТЕГІЇ:**\n"
-            if performance['overall_score'] > 80:
-                response += "• ВИСОКА ЕФЕКТИВНІСТЬ\n"
-                response += "• Оптимальні умови для торгівлі\n"
-            else:
-                response += "• СЕРЕДНЯ ЕФЕКТИВНІСТЬ\n"
-                response += "• Обережність рекомендується\n"
-            
-            await update.message.reply_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Performance error: {e}")
-            await update.message.reply_text("❌ Помилка розрахунку продуктивності")
-
-    async def calculate_strategy_performance(self) -> Dict:
-        """Розрахунок продуктивності стратегії"""
-        # Симуляція продуктивності стратегії
-        return {
-            'overall_score': np.random.randint(75, 95),
-            'win_rate': np.random.uniform(65, 85),
-            'profit_factor': np.random.uniform(1.8, 3.2),
-            'sharpe_ratio': np.random.uniform(2.0, 4.0),
-            'max_drawdown': np.random.uniform(8, 15),
-            'avg_profit': np.random.uniform(2.5, 6.0)
-        }
-
-    async def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[List]:
-        """Отримання OHLCV даних"""
-        try:
-            ohlcv = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit)
-            )
-            return ohlcv
-        except Exception as e:
-            logger.error(f"Помилка отримання даних для {symbol}: {e}")
-            return None
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробник callback"""
@@ -796,35 +484,159 @@ class VWMCStrategyBot:
         await query.answer()
         
         try:
-            if query.data == "vwmc_scan":
-                await self.vwmc_scan_command(query, context)
-            elif query.data == "volume_analysis":
+            if query.data == "analyze":
+                await self.analyze_command(query, context)
+            elif query.data == "scan":
+                await self.scan_market_command(query, context)
+            elif query.data == "levels":
+                await self.key_levels_command(query, context)
+            elif query.data == "volume":
                 await self.volume_analysis_command(query, context)
-            elif query.data == "momentum_matrix":
-                await self.momentum_matrix_command(query, context)
-            elif query.data == "liquidity_map":
-                await self.liquidity_map_command(query, context)
-            elif query.data == "pattern_recognition":
-                await self.pattern_recognition_command(query, context)
-            elif query.data == "market_insights":
-                await self.market_insights_command(query, context)
-            elif query.data == "risk_assessment":
-                await self.risk_assessment_command(query, context)
-            elif query.data == "performance":
-                await self.performance_command(query, context)
+            elif query.data == "momentum":
+                await self.momentum_analysis_command(query, context)
+            elif query.data == "correlation":
+                await self.correlation_analysis_command(query, context)
+            elif query.data == "opportunities":
+                await self.opportunities_command(query, context)
                 
         except Exception as e:
             await query.edit_message_text("❌ Помилка обробки запиту")
 
+    async def correlation_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Аналіз кореляцій"""
+        try:
+            msg = await update.message.reply_text("🔗 Аналізую кореляції...")
+            
+            correlations = await self.calculate_correlations()
+            
+            response = "🔗 **КОРЕЛЯЦІЙНИЙ АНАЛІЗ:**\n\n"
+            
+            for pair, corr in correlations.items():
+                correlation_str = f"{corr:.2f}"
+                if corr > 0.7:
+                    emoji = "🔴"
+                elif corr < -0.7:
+                    emoji = "🟢"
+                else:
+                    emoji = "⚪"
+                
+                response += f"{emoji} {pair}: {correlation_str}\n"
+            
+            response += "\n💡 **ІНТЕРПРЕТАЦІЯ:**\n"
+            response += "• > 0.7: Сильна позитивна кореляція\n"
+            response += "• < -0.7: Сильна негативна кореляція\n"
+            response += "• -0.3 до 0.3: Слабка кореляція\n"
+            
+            await msg.edit_text(response, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Помилка аналізу кореляцій: {e}")
+            await update.message.reply_text("❌ Помилка аналізу кореляцій")
+
+    async def calculate_correlations(self) -> Dict:
+        """Розрахунок кореляцій"""
+        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
+        correlations = {}
+        
+        # Отримуємо дані для всіх символів
+        data = {}
+        for symbol in symbols:
+            symbol_data = await self.get_real_time_data(symbol)
+            if symbol_data:
+                data[symbol] = np.array([x[4] for x in symbol_data['ohlcv']])
+        
+        # Розраховуємо кореляції
+        for i, sym1 in enumerate(symbols):
+            for sym2 in symbols[i+1:]:
+                if sym1 in data and sym2 in data and len(data[sym1]) == len(data[sym2]):
+                    corr = np.corrcoef(data[sym1][-30:], data[sym2][-30:])[0, 1]
+                    if not np.isnan(corr):
+                        pair_name = f"{sym1.split('/')[0]}-{sym2.split('/')[0]}"
+                        correlations[pair_name] = corr
+        
+        return correlations
+
+    async def opportunities_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Пошук найкращих можливостей"""
+        try:
+            msg = await update.message.reply_text("💰 Шукаю найкращі можливості...")
+            
+            symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT']
+            best_opportunities = []
+            
+            for symbol in symbols:
+                data = await self.get_real_time_data(symbol)
+                if data:
+                    analysis = await self.analyze_symbol(symbol, data)
+                    if analysis:
+                        score = self.calculate_opportunity_score(analysis)
+                        if score > 7.0:  # Мінімальний поріг
+                            best_opportunities.append((analysis, score))
+            
+            if best_opportunities:
+                best_opportunities.sort(key=lambda x: x[1], reverse=True)
+                
+                response = "💰 **НАЙКРАЩІ МОЖЛИВОСТІ:**\n\n"
+                
+                for i, (analysis, score) in enumerate(best_opportunities[:3], 1):
+                    emoji = "🟢" if analysis['trend'] == 'bullish' else "🔴"
+                    response += f"{i}. {emoji} **{analysis['symbol']}** - Оцінка: {score:.1f}/10\n"
+                    response += f"   💰 Ціна: ${analysis['price']:.2f}\n"
+                    response += f"   📈 Тренд: {analysis['trend']}\n"
+                    response += f"   📊 RSI: {analysis['rsi']:.1f}\n"
+                    response += f"   ⚡ Моментум: {analysis['momentum']:.2f}\n\n"
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("📉 Наразі найкращих можливостей не знайдено")
+                
+        except Exception as e:
+            logger.error(f"Помилка пошуку можливостей: {e}")
+            await update.message.reply_text("❌ Помилка пошуку можливостей")
+
+    def calculate_opportunity_score(self, analysis: Dict) -> float:
+        """Розрахунок оцінки можливості"""
+        if not analysis:
+            return 0.0
+        
+        # Ваги для різних факторів
+        weights = {
+            'rsi': 0.3,
+            'momentum': 0.3,
+            'volume': 0.2,
+            'volatility': 0.2
+        }
+        
+        # Нормалізація факторів
+        rsi_score = 0
+        if analysis['trend'] == 'bullish' and analysis['rsi'] < 35:
+            rsi_score = (35 - analysis['rsi']) / 35 * 10
+        elif analysis['trend'] == 'bearish' and analysis['rsi'] > 65:
+            rsi_score = (analysis['rsi'] - 65) / 35 * 10
+        
+        momentum_score = min(abs(analysis['momentum']) * 2, 10)
+        volume_score = min(analysis['volume'] / 5000000 * 10, 10)  # Нормалізація об'єму
+        volatility_score = min(analysis['volatility'] * 100, 10)  # Волатильність у %
+        
+        # Загальна оцінка
+        total_score = (
+            rsi_score * weights['rsi'] +
+            momentum_score * weights['momentum'] +
+            volume_score * weights['volume'] +
+            volatility_score * weights['volatility']
+        )
+        
+        return min(total_score, 10.0)
+
     async def run(self):
         """Запуск бота"""
         try:
-            logger.info("🚀 Запускаю VWMC Strategy Bot...")
+            logger.info("🚀 Запускаю Real Analysis Bot...")
             await self.app.initialize()
             await self.app.start()
             await self.app.updater.start_polling()
             
-            logger.info("✅ VWMC бот успішно запущено!")
+            logger.info("✅ Бот успішно запущено!")
             
             while True:
                 await asyncio.sleep(3600)
@@ -841,7 +653,7 @@ async def main():
             logger.error("Встановіть TELEGRAM_BOT_TOKEN")
             return
         
-        bot = VWMCStrategyBot(BOT_TOKEN)
+        bot = RealAnalysisBot(BOT_TOKEN)
         await bot.run()
         
     except KeyboardInterrupt:
