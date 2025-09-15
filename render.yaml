@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: ai-futures-bot
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT --workers 2
+    envVars:
+      - key: TELEGRAM_TOKEN
+        value: "8245514256:AAGADCQOF7nBb59wRX6QY6hXhqoPOuBbM9Y"
+      - key: CHAT_ID
+        value: "6053907025"
+      - key: BINANCE_API_KEY
+        value: "<твій_binance_api_key>"
+      - key: BINANCE_API_SECRET
+        value: "<твій_binance_api_secret>"
+      - key: SCAN_INTERVAL_MINUTES
+        value: "1"
+      - key: MONITOR_INTERVAL_MINUTES
+        value: "5"
+      - key: PARALLEL_WORKERS
+        value: "6"
