@@ -25,3 +25,4 @@ asyncio>=3.4.3
 aiofiles>=23.1.0
 apscheduler
 python-binance
+joblib
