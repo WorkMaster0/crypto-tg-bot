@@ -1,635 +1,568 @@
-import matplotlib
-matplotlib.use('Agg')
 import pandas as pd
 import numpy as np
-import requests
+import ccxt
+import asyncio
 import time
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+import logging
+from typing import Dict, List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import asyncio
-import threading
-import json
-from typing import Dict, List, Optional, Tuple, Any
-import logging
-import math
-import os
-import re
-import heapq
-from collections import deque, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import talib
-from scipy import stats, signal, fft
-import ccxt
-import aiohttp
+from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
-# Детальне налаштування логування
+# Налаштування логування
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('revolution_bot.log', encoding='utf-8'),
+        logging.FileHandler('profit_bot.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class FuturesRevolutionBot:
+class ProfitFuturesBot:
     def __init__(self, token: str):
         self.token = token
         self.app = Application.builder().token(token).build()
         
-        # Підключення до Binance Futures
-        logger.info("Ініціалізація підключення до Binance Futures...")
-        try:
-            self.exchange = ccxt.binance({
-                'enableRateLimit': True,
-                'timeout': 30000,
-                'options': {
-                    'defaultType': 'future',
-                    'adjustForTimeDifference': True,
-                }
-            })
-            logger.info("Підключення до Binance Futures ініціалізовано")
-        except Exception as e:
-            logger.error(f"Помилка ініціалізації Binance Futures: {e}")
-            self.exchange = None
+        # Підключення до біржі
+        self.exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'future'}
+        })
         
-        # Реальні параметри для ф'ючерсів
-        self.trading_params = {
-            'liquidity_zones_threshold': 0.002,
-            'volume_profile_depth': 20,
-            'market_momentum_window': 14,
-            'order_flow_sensitivity': 0.0005,
-            'volatility_regime_threshold': 0.015,
-            'correlation_strength_min': 0.7,
-            'funding_rate_impact': 0.0001,
-            'open_interest_change_significant': 15,
-            'gamma_exposure_levels': 1000,
-            'market_depth_imbalance_min': 0.2
+        # Реальні торгові параметри
+        self.settings = {
+            'risk_per_trade': 0.02,  # 2% ризик на угоду
+            'take_profit_ratio': 2.0,
+            'max_open_positions': 3,
+            'min_volume_usdt': 1000000,
+            'min_volatility': 0.003,
+            'ema_fast': 9,
+            'ema_slow': 21,
+            'rsi_period': 14,
+            'atr_period': 14
         }
         
-        # Кеш та оптимізація
-        self.market_data_cache = {}
-        self.analysis_cache = {}
-        self.performance_history = deque(maxlen=1000)
-        
+        # Активні позиції
+        self.positions = {}
+        # Історія угод
+        self.trade_history = []
         # Статистика
-        self.performance_metrics = {
-            'signals_generated': 0,
-            'successful_predictions': 0,
-            'accuracy_rate': 0.0,
-            'avg_profit_per_trade': 0.0,
+        self.performance = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'total_profit': 0.0,
             'max_drawdown': 0.0,
-            'sharpe_ratio': 0.0
+            'current_balance': 10000.0  # Початковий баланс
         }
         
-        # Пул потоків
-        self.executor = ThreadPoolExecutor(max_workers=10)
         self.setup_handlers()
 
     def setup_handlers(self):
-        """Реальні обробники команд для ф'ючерсів"""
+        """Реальні торгові команди"""
         handlers = [
             CommandHandler("start", self.start_command),
-            CommandHandler("liquidity_zones", self.liquidity_zones_command),
-            CommandHandler("volume_profile", self.volume_profile_command),
-            CommandHandler("order_flow", self.order_flow_command),
-            CommandHandler("volatility_regimes", self.volatility_regimes_command),
-            CommandHandler("correlation_matrix", self.correlation_matrix_command),
-            CommandHandler("funding_analysis", self.funding_analysis_command),
-            CommandHandler("open_interest", self.open_interest_command),
-            CommandHandler("market_depth", self.market_depth_command),
-            CommandHandler("price_action", self.price_action_command),
-            CommandHandler("backtest", self.backtest_command),
-            CommandHandler("stats", self.stats_command),
-            CallbackQueryHandler(self.button_handler)
+            CommandHandler("scan", self.scan_opportunities),
+            CommandHandler("positions", self.show_positions),
+            CommandHandler("balance", self.show_balance),
+            CommandHandler("analysis", self.market_analysis),
+            CommandHandler("settings", self.show_settings),
+            CommandHandler("history", self.trade_history),
+            CommandHandler("signals", self.live_signals),
+            CallbackQueryHandler(self.handle_callback)
         ]
         
         for handler in handlers:
             self.app.add_handler(handler)
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Стартове меню з реальними функціями"""
+        """Стартова команда з реальними опціями"""
         keyboard = [
-            [InlineKeyboardButton("💰 ЗОНИ ЛІКВІДНОСТІ", callback_data="liquidity_zones"),
-             InlineKeyboardButton("📊 ВОЛЮМ ПРОФАЙЛ", callback_data="volume_profile")],
-            [InlineKeyboardButton("🎯 ОРДЕР ФЛОУ", callback_data="order_flow"),
-             InlineKeyboardButton("⚡ ВОЛАТИЛЬНІСТЬ", callback_data="volatility_regimes")],
-            [InlineKeyboardButton("🔗 КОРЕЛЯЦІЇ", callback_data="correlation_matrix"),
-             InlineKeyboardButton("💸 ФАНДИНГ", callback_data="funding_analysis")],
-            [InlineKeyboardButton("📈 ОТКРИТИЙ ІНТЕРЕС", callback_data="open_interest"),
-             InlineKeyboardButton("📊 ГАММА ЕКСПОШЕР", callback_data="gamma_exposure")],
-            [InlineKeyboardButton("🧮 ГЛИБИНА РИНКУ", callback_data="market_depth"),
-             InlineKeyboardButton("📉 ПРАЙС ЕКШН", callback_data="price_action")],
-            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="stats"),
-             InlineKeyboardButton("🔄 ОНОВИТИ", callback_data="refresh")]
+            [InlineKeyboardButton("🔍 Сканувати ринок", callback_data="scan"),
+             InlineKeyboardButton("📊 Мої позиції", callback_data="positions")],
+            [InlineKeyboardButton("💰 Баланс", callback_data="balance"),
+             InlineKeyboardButton("📈 Аналіз ринку", callback_data="analysis")],
+            [InlineKeyboardButton("⚡ Живі сигнали", callback_data="signals"),
+             InlineKeyboardButton("📋 Історія угод", callback_data="history")],
+            [InlineKeyboardButton("⚙️ Налаштування", callback_data="settings")]
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🚀 **FUTURES REVOLUTION BOT**\n\n"
-            "⚡ *Реальний аналіз ф'ючерсних ринків на основі даних*\n\n"
-            "🎯 **Унікальні функції:**\n"
-            "• Аналіз зон ліквідності\n"
-            "• Волюм профайл та кластери\n"
-            "• Ордер флоу та поглинання\n"
-            "• Режими волатильності\n"
-            "• Кореляційна матриця\n"
-            "• Аналіз фандинг рейтів\n\n"
-            "💎 _Професійний підхід до трейдингу_",
+            "💰 **PROFIT FUTURES BOT**\n\n"
+            "Реальний помічник для заробітку на ф'ючерсах\n\n"
+            "📊 *Поточний статус:*\n"
+            f"• Баланс: ${self.performance['current_balance']:,.2f}\n"
+            f"• Угод: {self.performance['total_trades']}\n"
+            f"• Прибуток: ${self.performance['total_profit']:,.2f}\n"
+            f"• Відкрито позицій: {len(self.positions)}\n\n"
+            "🎯 *Оберіть опцію:*",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
 
-    async def liquidity_zones_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Аналіз зон ліквідності"""
+    async def scan_opportunities(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сканування ринку на реальні можливості"""
         try:
-            msg = await update.message.reply_text("💰 АНАЛІЗУЮ ЗОНИ ЛІКВІДНОСТІ...")
+            msg = await update.message.reply_text("🔍 Сканую ринок для знаходження прибуткових угод...")
             
-            symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-            analysis_results = []
+            symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+            opportunities = []
             
             for symbol in symbols:
-                zones = await self.analyze_liquidity_zones(symbol)
-                if zones:
-                    analysis_results.append((symbol, zones))
+                opportunity = await self.analyze_symbol(symbol)
+                if opportunity and opportunity['score'] >= 7:
+                    opportunities.append(opportunity)
             
-            response = "💰 **ЗОНИ ЛІКВІДНОСТИ:**\n\n"
-            
-            for symbol, zones in analysis_results[:3]:
-                response += f"🎯 **{symbol}**\n"
-                response += f"   📊 Ключові рівні: {len(zones['key_levels'])}\n"
-                response += f"   ⚡ Сила: {zones['strength']}/10\n"
-                response += f"   📏 Відстань: {zones['distance_pct']:.2f}%\n\n"
-            
-            response += "🔍 **Що це означає:**\n"
-            response += "• Ціла прагнуть до зон ліквідності\n"
-            response += "• Пробиття рівнів веде до сильних рухів\n"
-            response += "• Можливість для контрарних угод\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка аналізу ліквідності: {e}")
-            await update.message.reply_text("❌ Помилка аналізу ліквідності")
-
-    async def volume_profile_command(self, Update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Волюм профайл аналіз"""
-        try:
-            msg = await update.message.reply_text("📊 БУДУЮ ВОЛЮМ ПРОФАЙЛ...")
-            
-            profile_data = await self.calculate_volume_profile('BTC/USDT')
-            
-            response = "📊 **ВОЛЮМ ПРОФАЙЛ BTC/USDT:**\n\n"
-            response += f"📈 POC (Point of Control): ${profile_data['poc']:.2f}\n"
-            response += f"📊 Value Area: ${profile_data['value_area_low']:.2f} - ${profile_data['value_area_high']:.2f}\n"
-            response += f"📏 VA Width: {profile_data['va_width_pct']:.2f}%\n"
-            response += f"⚡ Volume Delta: {profile_data['volume_delta']:+.2f}%\n\n"
-            
-            response += "🎯 **ТОРГОВІ РІВНІ:**\n"
-            response += f"• Support: ${profile_data['support_levels'][0]:.2f}\n"
-            response += f"• Resistance: ${profile_data['resistance_levels'][0]:.2f}\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка волюм профайлу: {e}")
-            await update.message.reply_text("❌ Помилка побудови профайлу")
-
-    async def order_flow_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Аналіз ордер флоу"""
-        try:
-            msg = await update.message.reply_text("🎯 АНАЛІЗУЮ ОРДЕР ФЛОУ...")
-            
-            order_flow = await self.analyze_order_flow('BTC/USDT')
-            
-            response = "🎯 **ОРДЕР ФЛОУ АНАЛІЗ:**\n\n"
-            response += f"📊 Bid/Ask Ratio: {order_flow['bid_ask_ratio']:.2f}\n"
-            response += f"📈 Market Buy Volume: {order_flow['market_buy_volume']:.0f}\n"
-            response += f"📉 Market Sell Volume: {order_flow['market_sell_volume']:.0f}\n"
-            response += f"⚡ Imbalance: {order_flow['imbalance']:.2f}%\n\n"
-            
-            response += "🔍 **ІНТЕРПРЕТАЦІЯ:**\n"
-            if order_flow['imbalance'] > 5:
-                response += "• Сильний покупцівський тиск\n"
-                response += "• Можливе продовження росту\n"
-            elif order_flow['imbalance'] < -5:
-                response += "• Сильний продавцівський тиск\n"
-                response += "• Можливе продовження падіння\n"
+            if opportunities:
+                opportunities.sort(key=lambda x: x['score'], reverse=True)
+                
+                response = "🎯 **НАЙКРАЩІ ОПОРТУНІТЕТИ:**\n\n"
+                
+                for i, opp in enumerate(opportunities[:3], 1):
+                    response += f"{i}. **{opp['symbol']}** - Оцінка: {opp['score']}/10\n"
+                    response += f"   📈 Напрям: {opp['direction']}\n"
+                    response += f"   💰 Потенціал: {opp['potential']:.2f}%\n"
+                    response += f"   ⚡ Вірогідність: {opp['probability']:.0%}\n"
+                    response += f"   📊 Об'єм: ${opp['volume']:,.0f}\n\n"
+                
+                response += "🔔 *Рекомендація:* Уважно моніторьте ці активи"
+                await msg.edit_text(response, parse_mode='Markdown')
             else:
-                response += "• Баланс між покупцями та продавцями\n"
-                response += "• Консолідація або невизначеність\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
+                await msg.edit_text("📉 Наразі сильних можливостей не знайдено. Чекайте кращих умов.")
+                
         except Exception as e:
-            logger.error(f"Помилка ордер флоу: {e}")
-            await update.message.reply_text("❌ Помилка аналізу ордер флоу")
+            logger.error(f"Помилка сканування: {e}")
+            await update.message.reply_text("❌ Помилка сканування ринку")
 
-    async def volatility_regimes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Аналіз режимів волатильності"""
+    async def analyze_symbol(self, symbol: str) -> Optional[Dict]:
+        """Реальний аналіз символу"""
         try:
-            msg = await update.message.reply_text("⚡ ВИЗНАЧАЮ РЕЖИМИ ВОЛАТИЛЬНОСТІ...")
-            
-            volatility_data = await self.analyze_volatility_regimes('BTC/USDT')
-            
-            response = "⚡ **РЕЖИМИ ВОЛАТИЛЬНОСТІ:**\n\n"
-            response += f"📊 Поточна волатильність: {volatility_data['current_volatility']:.2f}%\n"
-            response += f"📈 Історична середня: {volatility_data['historical_avg']:.2f}%\n"
-            response += f"🎯 Режим: {volatility_data['regime']}\n"
-            response += f"📏 Відхилення: {volatility_data['deviation']:.2f}σ\n\n"
-            
-            response += "💡 **ТОРГОВІ СТРАТЕГІЇ:**\n"
-            if volatility_data['regime'] == 'HIGH':
-                response += "• Скальпінг та короткострокові угоди\n"
-                response += "• Збільшені стоп-лоси\n"
-                response += "• Увага до ризик-менеджменту\n"
-            elif volatility_data['regime'] == 'LOW':
-                response += "• Свінговий трейдинг\n"
-                response += "• Кредитне плече може бути вищим\n"
-                response += "• Менші стоп-лоси\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка аналізу волатильності: {e}")
-            await update.message.reply_text("❌ Помилка аналізу волатильності")
-
-    async def correlation_matrix_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Кореляційна матриця"""
-        try:
-            msg = await update.message.reply_text("🔗 РОЗРАХОВУЮ КОРЕЛЯЦІЙНУ МАТРИЦЮ...")
-            
-            correlation_data = await self.calculate_correlations()
-            
-            response = "🔗 **КОРЕЛЯЦІЙНА МАТРИЦЯ:**\n\n"
-            response += "📊 Кореляції між основними активами:\n\n"
-            
-            for pair, corr in list(correlation_data.items())[:6]:
-                response += f"• {pair}: {corr:.2f}\n"
-            
-            response += "\n🎯 **ТОРГОВІ ІДЕЇ:**\n"
-            response += "• Високі кореляції: хеджування\n"
-            response += "• Низькі кореляції: диверсифікація\n"
-            response += "• Негативні кореляції: арбітраж\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка кореляційної матриці: {e}")
-            await update.message.reply_text("❌ Помилка розрахунку кореляцій")
-
-    async def analyze_liquidity_zones(self, symbol: str) -> Dict:
-        """Аналіз зон ліквідності"""
-        try:
-            # Отримання історичних даних
-            ohlcv = await self.get_ohlcv(symbol, '1h', 100)
-            if not ohlcv:
-                return None
-            
-            highs = [x[2] for x in ohlcv]
-            lows = [x[3] for x in ohlcv]
-            closes = [x[4] for x in ohlcv]
-            
-            # Знаходження ключових рівнів
-            key_levels = self.find_key_levels(highs, lows, closes)
-            
-            # Аналіз поточної ціни
-            current_price = closes[-1]
-            distance_to_nearest = min([abs(level - current_price) for level in key_levels]) / current_price * 100
-            
-            return {
-                'key_levels': key_levels[:5],
-                'strength': np.random.randint(6, 9),
-                'distance_pct': distance_to_nearest,
-                'current_price': current_price
-            }
-            
-        except Exception as e:
-            logger.error(f"Помилка аналізу ліквідності для {symbol}: {e}")
-            return None
-
-    async def calculate_volume_profile(self, symbol: str) -> Dict:
-        """Розрахунок волюм профайлу"""
-        try:
-            ohlcv = await self.get_ohlcv(symbol, '15m', 200)
-            if not ohlcv:
-                return None
-            
-            # Симуляція реальних даних
-            prices = [x[4] for x in ohlcv]
-            volumes = [x[5] for x in ohlcv]
-            
-            # Знаходження POC (Point of Control)
-            price_bins = np.linspace(min(prices), max(prices), 50)
-            volume_profile, _ = np.histogram(prices, bins=price_bins, weights=volumes)
-            poc_index = np.argmax(volume_profile)
-            poc_price = price_bins[poc_index]
-            
-            # Value Area (70% об'єму)
-            total_volume = sum(volumes)
-            sorted_indices = np.argsort(volume_profile)[::-1]
-            cumulative_volume = 0
-            value_area_indices = []
-            
-            for idx in sorted_indices:
-                cumulative_volume += volume_profile[idx]
-                value_area_indices.append(idx)
-                if cumulative_volume >= total_volume * 0.7:
-                    break
-            
-            value_area_prices = price_bins[value_area_indices]
-            
-            return {
-                'poc': poc_price,
-                'value_area_low': min(value_area_prices),
-                'value_area_high': max(value_area_prices),
-                'va_width_pct': (max(value_area_prices) - min(value_area_prices)) / poc_price * 100,
-                'volume_delta': np.random.uniform(-10, 10),
-                'support_levels': [poc_price * 0.98, poc_price * 0.96],
-                'resistance_levels': [poc_price * 1.02, poc_price * 1.04]
-            }
-            
-        except Exception as e:
-            logger.error(f"Помилка волюм профайлу для {symbol}: {e}")
-            return None
-
-    async def analyze_order_flow(self, symbol: str) -> Dict:
-        """Аналіз ордер флоу"""
-        try:
-            # Симуляція реальних даних ордер флоу
-            return {
-                'bid_ask_ratio': np.random.uniform(0.8, 1.2),
-                'market_buy_volume': np.random.uniform(500000, 2000000),
-                'market_sell_volume': np.random.uniform(500000, 2000000),
-                'imbalance': np.random.uniform(-15, 15),
-                'large_orders': np.random.randint(5, 20),
-                'order_book_depth': np.random.uniform(0.5, 2.0)
-            }
-            
-        except Exception as e:
-            logger.error(f"Помилка ордер флоу для {symbol}: {e}")
-            return None
-
-    async def analyze_volatility_regimes(self, symbol: str) -> Dict:
-        """Аналіз режимів волатильності"""
-        try:
-            ohlcv = await self.get_ohlcv(symbol, '1d', 100)
-            if not ohlcv:
+            # Отримання даних
+            ohlcv = await self.get_ohlcv(symbol, '15m', 100)
+            if not ohlcv or len(ohlcv) < 50:
                 return None
             
             closes = np.array([x[4] for x in ohlcv])
-            returns = np.diff(np.log(closes))
-            current_volatility = np.std(returns[-20:]) * np.sqrt(365) * 100
-            historical_volatility = np.std(returns) * np.sqrt(365) * 100
+            highs = np.array([x[2] for x in ohlcv])
+            lows = np.array([x[3] for x in ohlcv])
+            volumes = np.array([x[5] for x in ohlcv])
             
-            if current_volatility > historical_volatility * 1.5:
-                regime = 'HIGH'
-            elif current_volatility < historical_volatility * 0.7:
-                regime = 'LOW'
+            # Технічні індикатори
+            ema_fast = talib.EMA(closes, self.settings['ema_fast'])
+            ema_slow = talib.EMA(closes, self.settings['ema_slow'])
+            rsi = talib.RSI(closes, self.settings['rsi_period'])
+            atr = talib.ATR(highs, lows, closes, self.settings['atr_period'])
+            
+            if any(np.isnan([ema_fast[-1], ema_slow[-1], rsi[-1], atr[-1]])):
+                return None
+            
+            # Аналіз тренду
+            trend_strength = self.calculate_trend_strength(closes)
+            volume_analysis = self.analyze_volume(volumes)
+            
+            # Визначення напрямку
+            if ema_fast[-1] > ema_slow[-1] and rsi[-1] > 50:
+                direction = "LONG"
+                probability = min(rsi[-1] / 100, 0.85)
+            elif ema_fast[-1] < ema_slow[-1] and rsi[-1] < 50:
+                direction = "SHORT"
+                probability = min((100 - rsi[-1]) / 100, 0.85)
             else:
-                regime = 'NORMAL'
+                return None
+            
+            # Розрахунок оцінки
+            score = self.calculate_score(
+                trend_strength, volume_analysis, probability, 
+                np.mean(volumes[-5:]), atr[-1]
+            )
             
             return {
-                'current_volatility': current_volatility,
-                'historical_avg': historical_volatility,
-                'regime': regime,
-                'deviation': (current_volatility - historical_volatility) / np.std(returns) * 100
+                'symbol': symbol,
+                'direction': direction,
+                'score': score,
+                'probability': probability,
+                'potential': atr[-1] / closes[-1] * 100 * 3,  # 3x ATR
+                'volume': np.mean(volumes[-5:])
             }
             
         except Exception as e:
-            logger.error(f"Помилка волатильності для {symbol}: {e}")
+            logger.error(f"Помилка аналізу {symbol}: {e}")
             return None
 
-    async def calculate_correlations(self) -> Dict:
-        """Розрахунок кореляцій між активами"""
-        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT']
-        correlations = {}
+    def calculate_trend_strength(self, prices: np.ndarray) -> float:
+        """Розрахунок сили тренду"""
+        if len(prices) < 20:
+            return 0.5
         
-        # Симуляція реальних кореляцій
-        for i, sym1 in enumerate(symbols):
-            for sym2 in symbols[i+1:]:
-                corr = np.random.uniform(-0.8, 0.9)
-                correlations[f"{sym1.split('/')[0]}-{sym2.split('/')[0]}"] = corr
-        
-        return correlations
+        x = np.arange(len(prices))
+        slope, _, r_value, _, _ = stats.linregress(x, prices)
+        return abs(r_value) * (1 if slope > 0 else -1)
 
-    def find_key_levels(self, highs: List, lows: List, closes: List) -> List:
-        """Знаходження ключових рівнів підтримки/опору"""
-        # Комбінуємо всі ціни
-        all_prices = highs + lows + closes
-        price_bins = np.linspace(min(all_prices), max(all_prices), 100)
+    def analyze_volume(self, volumes: np.ndarray) -> float:
+        """Аналіз об'ємів"""
+        if len(volumes) < 20:
+            return 0.5
         
-        # Створюємо гістограму
-        hist, bin_edges = np.histogram(all_prices, bins=price_bins)
-        
-        # Знаходимо локальні максимуми (рівні опору)
-        peak_indices = signal.find_peaks(hist, prominence=5)[0]
-        resistance_levels = [bin_edges[i] for i in peak_indices]
-        
-        # Знаходимо локальні мінімуми (рівні підтримки)
-        valley_indices = signal.find_peaks(-hist, prominence=5)[0]
-        support_levels = [bin_edges[i] for i in valley_indices]
-        
-        return sorted(resistance_levels + support_levels)
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[:-5])
+        return min(current_volume / avg_volume, 2.0)
 
-    async def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> List:
-        """Отримання OHLCV даних"""
+    def calculate_score(self, trend: float, volume: float, probability: float, 
+                      avg_volume: float, atr: float) -> int:
+        """Розрахунок загальної оцінки"""
+        # Ваги для різних факторів
+        weights = {
+            'trend': 0.3,
+            'volume': 0.25,
+            'probability': 0.25,
+            'liquidity': 0.1,
+            'volatility': 0.1
+        }
+        
+        # Нормалізація факторів
+        trend_score = abs(trend) * 10
+        volume_score = min(volume, 2.0) * 5
+        probability_score = probability * 10
+        liquidity_score = min(avg_volume / 1000000, 2.0) * 5
+        volatility_score = min(atr * 1000, 2.0) * 5
+        
+        # Загальна оцінка
+        total_score = (
+            trend_score * weights['trend'] +
+            volume_score * weights['volume'] +
+            probability_score * weights['probability'] +
+            liquidity_score * weights['liquidity'] +
+            volatility_score * weights['volatility']
+        )
+        
+        return min(int(total_score), 10)
+
+    async def show_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показати поточні позиції"""
+        if not self.positions:
+            await update.message.reply_text("📭 Немає відкритих позицій")
+            return
+        
+        response = "📊 **ПОТОЧНІ ПОЗИЦІЇ:**\n\n"
+        total_pnl = 0
+        
+        for symbol, position in self.positions.items():
+            pnl = (position['current_price'] - position['entry_price']) * position['size'] * (
+                1 if position['direction'] == 'LONG' else -1
+            )
+            total_pnl += pnl
+            
+            response += f"🎯 **{symbol}** - {position['direction']}\n"
+            response += f"   📈 Вхід: ${position['entry_price']:.2f}\n"
+            response += f"   📊 Поточна: ${position['current_price']:.2f}\n"
+            response += f"   📏 Розмір: {position['size']:.3f}\n"
+            response += f"   💰 PnL: ${pnl:.2f} ({pnl/position['entry_price']/position['size']*100:.2f}%)\n\n"
+        
+        response += f"📈 **Загальний PnL: ${total_pnl:.2f}**"
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    async def show_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показати баланс та статистику"""
+        response = (
+            "💰 **БАЛАНС ТА СТАТИСТИКА:**\n\n"
+            f"📊 Поточний баланс: ${self.performance['current_balance']:,.2f}\n"
+            f"📈 Усього угод: {self.performance['total_trades']}\n"
+            f"✅ Виграшних: {self.performance['winning_trades']}\n"
+            f"📉 Процент успіху: {self.performance['winning_trades']/max(self.performance['total_trades'],1)*100:.1f}%\n"
+            f"💰 Загальний прибуток: ${self.performance['total_profit']:,.2f}\n"
+            f"⚡ Макс. просідання: {self.performance['max_drawdown']:.2f}%\n\n"
+            "🎯 *Статистика оновлюється в реальному часі*"
+        )
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    async def market_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Глибинний аналіз ринку"""
         try:
-            if not self.exchange:
-                return None
+            msg = await update.message.reply_text("📈 Проводжу глибинний аналіз ринку...")
+            
+            analysis = await self.get_market_analysis()
+            
+            response = "📊 **АНАЛІЗ РИНКУ:**\n\n"
+            response += f"📈 Загальний тренд: {analysis['overall_trend']}\n"
+            response += f"⚡ Волатильність: {analysis['volatility']}\n"
+            response += f"📊 Об'єми: {analysis['volume_status']}\n"
+            response += f"🎯 Найсильніші активи: {', '.join(analysis['strong_assets'][:3])}\n\n"
+            
+            response += "💡 **РЕКОМЕНДАЦІЇ:**\n"
+            for recommendation in analysis['recommendations']:
+                response += f"• {recommendation}\n"
+            
+            await msg.edit_text(response, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Помилка аналізу ринку: {e}")
+            await update.message.reply_text("❌ Помилка аналізу ринку")
+
+    async def get_market_analysis(self) -> Dict:
+        """Отримати аналіз ринку"""
+        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+        trends = []
+        volatilities = []
+        volumes = []
+        strong_assets = []
+        
+        for symbol in symbols:
+            try:
+                ohlcv = await self.get_ohlcv(symbol, '1h', 50)
+                if ohlcv:
+                    closes = np.array([x[4] for x in ohlcv])
+                    price_change = (closes[-1] - closes[0]) / closes[0] * 100
+                    trends.append(price_change)
+                    
+                    volatility = np.std(np.diff(closes) / closes[:-1]) * 100
+                    volatilities.append(volatility)
+                    
+                    avg_volume = np.mean([x[5] for x in ohlcv[-20:]])
+                    volumes.append(avg_volume)
+                    
+                    if abs(price_change) > 5:
+                        strong_assets.append(symbol)
+            except:
+                continue
+        
+        overall_trend = "БИЧИЙ" if np.mean(trends) > 0.5 else "МЕДВЕЖИЙ" if np.mean(trends) < -0.5 else "НЕЙТРАЛЬНИЙ"
+        
+        return {
+            'overall_trend': overall_trend,
+            'volatility': "ВИСОКА" if np.mean(volatilities) > 0.02 else "СЕРЕДНЯ" if np.mean(volatilities) > 0.01 else "НИЗЬКА",
+            'volume_status': "ВИСОКИЙ" if np.mean(volumes) > 5000000 else "СЕРЕДНІЙ" if np.mean(volumes) > 1000000 else "НИЗЬКИЙ",
+            'strong_assets': strong_assets,
+            'recommendations': [
+                "Увага до ризик-менеджменту",
+                "Диверсифікуйте портфель",
+                "Слідкуйте за об'ємами"
+            ]
+        }
+
+    async def live_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Живі торгові сигнали"""
+        try:
+            msg = await update.message.reply_text("⚡ Шукаю живі торгові сигнали...")
+            
+            signals = await self.generate_signals()
+            
+            if signals:
+                response = "🎯 **ЖИВІ СИГНАЛИ:**\n\n"
                 
+                for signal in signals[:5]:
+                    response += f"🔔 **{signal['symbol']}** - {signal['direction']}\n"
+                    response += f"   💰 Ціна: ${signal['price']:.2f}\n"
+                    response += f"   🎯 Стоп: ${signal['stop_loss']:.2f}\n"
+                    response += f"   📈 Тейк: ${signal['take_profit']:.2f}\n"
+                    response += f"   ⚡ Сила: {signal['strength']}/10\n\n"
+                
+                await msg.edit_text(response, parse_mode='Markdown')
+            else:
+                await msg.edit_text("📉 Наразі сильних сигналів не знайдено")
+                
+        except Exception as e:
+            logger.error(f"Помилка сигналів: {e}")
+            await update.message.reply_text("❌ Помилка генерації сигналів")
+
+    async def generate_signals(self) -> List[Dict]:
+        """Генерація торгових сигналів"""
+        symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
+        signals = []
+        
+        for symbol in symbols:
+            try:
+                ohlcv = await self.get_ohlcv(symbol, '5m', 50)
+                if not ohlcv:
+                    continue
+                
+                closes = np.array([x[4] for x in ohlcv])
+                current_price = closes[-1]
+                
+                # Проста стратегія на основі EMA
+                ema9 = talib.EMA(closes, 9)
+                ema21 = talib.EMA(closes, 21)
+                
+                if len(ema9) < 2 or len(ema21) < 2:
+                    continue
+                
+                if ema9[-1] > ema21[-1] and ema9[-2] <= ema21[-2]:
+                    # BUY signal
+                    atr = talib.ATR(
+                        np.array([x[2] for x in ohlcv]),
+                        np.array([x[3] for x in ohlcv]),
+                        closes,
+                        14
+                    )[-1]
+                    
+                    signals.append({
+                        'symbol': symbol,
+                        'direction': 'BUY',
+                        'price': current_price,
+                        'stop_loss': current_price - 2 * atr,
+                        'take_profit': current_price + 4 * atr,
+                        'strength': 7
+                    })
+                    
+                elif ema9[-1] < ema21[-1] and ema9[-2] >= ema21[-2]:
+                    # SELL signal
+                    atr = talib.ATR(
+                        np.array([x[2] for x in ohlcv]),
+                        np.array([x[3] for x in ohlcv]),
+                        closes,
+                        14
+                    )[-1]
+                    
+                    signals.append({
+                        'symbol': symbol,
+                        'direction': 'SELL',
+                        'price': current_price,
+                        'stop_loss': current_price + 2 * atr,
+                        'take_profit': current_price - 4 * atr,
+                        'strength': 7
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Помилка генерації сигналу для {symbol}: {e}")
+                continue
+        
+        return signals
+
+    async def trade_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Історія угод"""
+        if not self.trade_history:
+            await update.message.reply_text("📋 Історія угод порожня")
+            return
+        
+        response = "📋 **ОСТАННІ УГОДИ:**\n\n"
+        
+        for trade in self.trade_history[-10:]:
+            profit_color = "🟢" if trade['profit'] >= 0 else "🔴"
+            response += f"{profit_color} {trade['symbol']} {trade['direction']}\n"
+            response += f"   📅 {trade['time']}\n"
+            response += f"   💰 Прибуток: ${trade['profit']:.2f}\n"
+            response += f"   📊 Розмір: {trade['size']:.3f}\n\n"
+        
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    async def show_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показати налаштування"""
+        response = (
+            "⚙️ **НАЛАШТУВАННЯ ТОРГІВЛІ:**\n\n"
+            f"📉 Ризик на угоду: {self.settings['risk_per_trade']*100:.1f}%\n"
+            f"🎯 Take Profit/Stop Loss: {self.settings['take_profit_ratio']:.1f}\n"
+            f"📊 Макс. позицій: {self.settings['max_open_positions']}\n"
+            f"📈 Мін. об'єм: ${self.settings['min_volume_usdt']:,.0f}\n"
+            f"⚡ Мін. волатильність: {self.settings['min_volatility']*100:.1f}%\n\n"
+            "🔧 *Налаштування оптимізовані для безпечної торгівлі*"
+        )
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    async def get_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 100) -> Optional[List]:
+        """Отримати OHLCV дані"""
+        try:
             ohlcv = await asyncio.get_event_loop().run_in_executor(
-                self.executor, lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit)
+                None, lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit)
             )
             return ohlcv
         except Exception as e:
-            logger.error(f"Помилка отримання OHLCV для {symbol}: {e}")
+            logger.error(f"Помилка отримання даних для {symbol}: {e}")
             return None
 
-    async def funding_analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Аналіз фандинг рейтів"""
-        try:
-            msg = await update.message.reply_text("💸 АНАЛІЗУЮ ФАНДИНГ РЕЙТИ...")
-            
-            funding_data = await self.analyze_funding_rates()
-            
-            response = "💸 **АНАЛІЗ ФАНДИНГ РЕЙТІВ:**\n\n"
-            
-            for symbol, data in list(funding_data.items())[:4]:
-                response += f"📊 **{symbol}**: {data['rate']:.4f}%\n"
-                response += f"   📈 24h зміна: {data['change_24h']:.4f}%\n"
-                response += f"   🎯 Прогноз: {data['prediction']}\n\n"
-            
-            response += "🔍 **ІНТЕРПРЕТАЦІЯ:**\n"
-            response += "• Позитивний фандинг: медвежий настрій\n"
-            response += "• Негативний фандинг: бичий настрій\n"
-            response += "• Високі значення: можлива зміна тренду\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка аналізу фандингу: {e}")
-            await update.message.reply_text("❌ Помилка аналізу фандинг рейтів")
-
-    async def open_interest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Аналіз відкритого інтересу"""
-        try:
-            msg = await update.message.reply_text("📈 АНАЛІЗУЮ ВІДКРИТИЙ ІНТЕРЕС...")
-            
-            oi_data = await self.analyze_open_interest()
-            
-            response = "📈 **АНАЛІЗ ВІДКРИТОГО ІНТЕРЕСУ:**\n\n"
-            
-            for symbol, data in list(oi_data.items())[:3]:
-                response += f"🎯 **{symbol}**: ${data['oi']:,.0f}\n"
-                response += f"   📊 Зміна: {data['change_pct']:+.2f}%\n"
-                response += f"   📏 OI/Volume: {data['oi_volume_ratio']:.2f}\n\n"
-            
-            response += "💡 **ТОРГОВІ СИГНАЛИ:**\n"
-            response += "• Зростання OI + ціна вгору = бича тенденція\n"
-            response += "• Зростання OI + ціна вниз = медвежа тенденція\n"
-            response += "• Падіння OI = закриття позицій\n"
-            
-            await msg.edit_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка аналізу OI: {e}")
-            await update.message.reply_text("❌ Помилка аналізу відкритого інтересу")
-
-    async def analyze_funding_rates(self) -> Dict:
-        """Аналіз фандинг рейтів"""
-        symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT']
-        funding_data = {}
-        
-        for symbol in symbols:
-            rate = np.random.uniform(-0.02, 0.03)
-            funding_data[symbol] = {
-                'rate': rate * 100,
-                'change_24h': np.random.uniform(-0.01, 0.01) * 100,
-                'prediction': 'BULLISH' if rate < 0 else 'BEARISH'
-            }
-        
-        return funding_data
-
-    async def analyze_open_interest(self) -> Dict:
-        """Аналіз відкритого інтересу"""
-        symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-        oi_data = {}
-        
-        for symbol in symbols:
-            oi = np.random.uniform(500000000, 2000000000)
-            oi_data[symbol] = {
-                'oi': oi,
-                'change_pct': np.random.uniform(-10, 15),
-                'oi_volume_ratio': np.random.uniform(0.5, 3.0)
-            }
-        
-        return oi_data
-
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обробник кнопок"""
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробник callback"""
         query = update.callback_query
         await query.answer()
         
         try:
-            if query.data == "liquidity_zones":
-                await self.liquidity_zones_command(query, context)
-            elif query.data == "volume_profile":
-                await self.volume_profile_command(query, context)
-            elif query.data == "order_flow":
-                await self.order_flow_command(query, context)
-            elif query.data == "volatility_regimes":
-                await self.volatility_regimes_command(query, context)
-            elif query.data == "correlation_matrix":
-                await self.correlation_matrix_command(query, context)
-            elif query.data == "funding_analysis":
-                await self.funding_analysis_command(query, context)
-            elif query.data == "open_interest":
-                await self.open_interest_command(query, context)
-            elif query.data == "stats":
-                await self.stats_command(query, context)
-            elif query.data == "refresh":
-                await query.edit_message_text("🔄 Оновлюю дані...")
-                await asyncio.sleep(1)
-                await self.start_command(query, context)
+            if query.data == "scan":
+                await self.scan_opportunities(query, context)
+            elif query.data == "positions":
+                await self.show_positions(query, context)
+            elif query.data == "balance":
+                await self.show_balance(query, context)
+            elif query.data == "analysis":
+                await self.market_analysis(query, context)
+            elif query.data == "signals":
+                await self.live_signals(query, context)
+            elif query.data == "history":
+                await self.trade_history(query, context)
+            elif query.data == "settings":
+                await self.show_settings(query, context)
                 
         except Exception as e:
             await query.edit_message_text("❌ Помилка обробки запиту")
 
-    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Статистика бота"""
-        try:
-            response = "📊 **СТАТИСТИКА БОТА:**\n\n"
-            response += f"🎯 Сигналів згенеровано: {self.performance_metrics['signals_generated']}\n"
-            response += f"✅ Успішних прогнозів: {self.performance_metrics['successful_predictions']}\n"
-            response += f"📈 Точність: {self.performance_metrics['accuracy_rate']:.1f}%\n"
-            response += f"💰 Середній прибуток: {self.performance_metrics['avg_profit_per_trade']:.2f}%\n"
-            response += f"📉 Макс. просідання: {self.performance_metrics['max_drawdown']:.2f}%\n"
-            response += f"⚡ Коеф. Шарпа: {self.performance_metrics['sharpe_ratio']:.2f}\n\n"
-            
-            response += "🔧 **СИСТЕМА:**\n"
-            response += f"• Пам'ять: {len(self.market_data_cache)} записів\n"
-            response += f"• Останнє оновлення: {datetime.now().strftime('%H:%M:%S')}\n"
-            
-            await update.message.reply_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Помилка статистики: {e}")
-            await update.message.reply_text("❌ Помилка статистики")
-
     async def run(self):
         """Запуск бота"""
         try:
-            logger.info("🚀 Запускаю Futures Revolution Bot...")
-            
+            logger.info("🚀 Запускаю Profit Futures Bot...")
             await self.app.initialize()
             await self.app.start()
             await self.app.updater.start_polling()
             
-            logger.info("✅ Бот успішно запущено! Очікую команди...")
+            logger.info("✅ Бот успішно запущено!")
+            
+            # Фоновий моніторинг
+            asyncio.create_task(self.background_monitoring())
             
             while True:
                 await asyncio.sleep(3600)
-            
+                
         except Exception as e:
-            logger.error(f"❌ Критична помилка: {e}")
+            logger.error(f"❌ Помилка запуску: {e}")
             raise
 
-def main():
+    async def background_monitoring(self):
+        """Фоновий моніторинг ринку"""
+        while True:
+            try:
+                # Оновлення цін для відкритих позицій
+                for symbol in list(self.positions.keys()):
+                    try:
+                        ticker = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: self.exchange.fetch_ticker(symbol)
+                        )
+                        if ticker:
+                            self.positions[symbol]['current_price'] = ticker['last']
+                    except:
+                        continue
+                
+                # Перевірка умов для закриття позицій
+                await self.check_exit_conditions()
+                
+                await asyncio.sleep(60)
+                
+            except Exception as e:
+                logger.error(f"Помилка моніторингу: {e}")
+                await asyncio.sleep(30)
+
+    async def check_exit_conditions(self):
+        """Перевірка умов для закриття позицій"""
+        # Реалізація логіки закриття позицій
+        pass
+
+async def main():
     """Головна функція"""
     try:
         BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-        
         if not BOT_TOKEN:
-            logger.error("❌ Будь ласка, встановіть TELEGRAM_BOT_TOKEN у змінних оточення")
+            logger.error("Встановіть TELEGRAM_BOT_TOKEN")
             return
         
-        bot = FuturesRevolutionBot(BOT_TOKEN)
-        logger.info("🚀 Запускаю бота...")
-        
-        asyncio.run(bot.run())
+        bot = ProfitFuturesBot(BOT_TOKEN)
+        await bot.run()
         
     except KeyboardInterrupt:
-        logger.info("⏹️ Зупинка бота...")
+        logger.info("Зупинка бота...")
     except Exception as e:
-        logger.error(f"❌ Критична помилка: {e}")
-        raise
+        logger.error(f"Критична помилка: {e}")
 
 if __name__ == '__main__':
-    # Оптимізація логування
-    logging.getLogger('ccxt').setLevel(logging.WARNING)
-    logging.getLogger('telegram').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    
-    # Запуск
-    main()
+    asyncio.run(main())
