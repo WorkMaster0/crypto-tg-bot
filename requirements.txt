@@ -26,3 +26,5 @@ aiofiles>=23.1.0
 apscheduler
 python-binance
 joblib
+gunicorn
+ta
