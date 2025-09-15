@@ -23,3 +23,5 @@ psutil>=5.9.0
 cryptography>=41.0.0
 asyncio>=3.4.3
 aiofiles>=23.1.0
+apscheduler
+python-binance
