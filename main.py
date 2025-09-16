@@ -1,4 +1,4 @@
-# main.py (updated)
+# main.py (updated with extra pattern analysis + new confidence)
 import os
 import time
 import json
@@ -43,6 +43,15 @@ HIST_WINRATE_THRESHOLD = 0.55  # if below -> consider anti-signal or warn
 ML_PROB_THRESHOLD = 0.6
 MIN_TRADES_FOR_STATS = 10
 VOLUME_MULTIPLIER_THRESHOLD = 1.5  # volume spike factor vs rolling mean
+
+# New tuning: weights for confidence components (can be tuned)
+CONF_WEIGHTS = {
+    "hist": 0.35,
+    "ml_prob": 0.25,
+    "ml_acc": 0.15,
+    "pattern_agreement": 0.18,
+    "volume": 0.05
+}
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -164,18 +173,44 @@ def get_klines_df(symbol, interval, limit=500, retry=3):
 # -------------------------
 def apply_indicators(df):
     df = df.copy()
+    if df is None or len(df) == 0:
+        return df
     try:
-        df['ATR_10'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=10)
-        df['ATR_50'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=50)
-        df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-        macd = ta.trend.MACD(df['close'])
+        # compute ATRs (only if enough length)
+        if len(df) >= 10:
+            df['ATR_10'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=10)
+        else:
+            df['ATR_10'] = np.nan
+        if len(df) >= 50:
+            df['ATR_50'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=50)
+        else:
+            df['ATR_50'] = np.nan
+
+        if len(df) >= 14:
+            df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+        else:
+            df['RSI'] = np.nan
+
+        macd = ta.trend.MACD(df['close'])  # internal handles short series with NaN
         df['MACD_hist'] = macd.macd_diff()
+
         df['Donchian_High'] = df['high'].rolling(window=20).max()
         df['Donchian_Low'] = df['low'].rolling(window=20).min()
+
         df['ema_8'] = ta.trend.EMAIndicator(df['close'], window=8).ema_indicator()
         df['ema_21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
         df['ema_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
         df['ema_200'] = ta.trend.EMAIndicator(df['close'], window=200).ema_indicator()
+
+        # Bollinger Bands
+        if len(df) >= 20:
+            bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+            df['bb_h'] = bb.bollinger_hband()
+            df['bb_l'] = bb.bollinger_lband()
+        else:
+            df['bb_h'] = np.nan
+            df['bb_l'] = np.nan
+
         df['vol_ma_20'] = df['volume'].rolling(window=20).mean()
     except Exception as e:
         logging.exception("apply_indicators error: %s", e)
@@ -184,14 +219,14 @@ def apply_indicators(df):
 def generate_signal_from_row(row):
     try:
         long_signal = (
-            row['ATR_10'] < row['ATR_50'] and
-            row['close'] > row['Donchian_High'] and
-            (row['MACD_hist'] > 0 or row['RSI'] > 55)
+            row.get('ATR_10', np.nan) < row.get('ATR_50', np.nan) and
+            row['close'] > row.get('Donchian_High', np.nan) and
+            (row.get('MACD_hist', 0) > 0 or row.get('RSI', 0) > 55)
         )
         short_signal = (
-            row['ATR_10'] < row['ATR_50'] and
-            row['close'] < row['Donchian_Low'] and
-            (row['MACD_hist'] < 0 or row['RSI'] < 45)
+            row.get('ATR_10', np.nan) < row.get('ATR_50', np.nan) and
+            row['close'] < row.get('Donchian_Low', np.nan) and
+            (row.get('MACD_hist', 0) < 0 or row.get('RSI', 0) < 45)
         )
         if long_signal:
             return "LONG"
@@ -202,20 +237,84 @@ def generate_signal_from_row(row):
     return None
 
 def detect_ema_crossover(df, short='ema_8', long='ema_21'):
-    if len(df) < 3:
+    if df is None or len(df) < 3:
         return None
     a = df[short].iloc[-2]
     b = df[long].iloc[-2]
     a1 = df[short].iloc[-1]
     b1 = df[long].iloc[-1]
+    if pd.isna(a) or pd.isna(b) or pd.isna(a1) or pd.isna(b1):
+        return None
     if a <= b and a1 > b1:
         return "bull_cross"
     if a >= b and a1 < b1:
         return "bear_cross"
     return None
 
+# --- New detectors ---
+def detect_bollinger_breakout(df):
+    # returns 'bb_up', 'bb_down', or None
+    if df is None or len(df) < 20:
+        return None
+    h = df['bb_h'].iloc[-1]
+    l = df['bb_l'].iloc[-1]
+    c = df['close'].iloc[-1]
+    if pd.isna(h) or pd.isna(l):
+        return None
+    if c > h:
+        return 'bb_up'
+    if c < l:
+        return 'bb_down'
+    return None
+
+def detect_rsi_flip(df):
+    # simple RSI flip: oversold cross up or overbought cross down
+    if df is None or len(df) < 15:
+        return None
+    prev = df['RSI'].iloc[-2]
+    cur = df['RSI'].iloc[-1]
+    if pd.isna(prev) or pd.isna(cur):
+        return None
+    # oversold bounce
+    if prev < 30 and cur >= 30:
+        return 'rsi_up'
+    # overbought drop
+    if prev > 70 and cur <= 70:
+        return 'rsi_down'
+    return None
+
+def detect_macd_signal(df):
+    if df is None or len(df) < 3:
+        return None
+    prev = df['MACD_hist'].iloc[-2]
+    cur = df['MACD_hist'].iloc[-1]
+    if pd.isna(prev) or pd.isna(cur):
+        return None
+    if prev <= 0 and cur > 0:
+        return 'macd_up'
+    if prev >= 0 and cur < 0:
+        return 'macd_down'
+    return None
+
+def detect_ma50_200_cross(df):
+    if df is None or len(df) < 201:
+        # if not enough bars for 200, skip
+        return None
+    a = df['ema_50'].iloc[-2]
+    b = df['ema_200'].iloc[-2]
+    a1 = df['ema_50'].iloc[-1]
+    b1 = df['ema_200'].iloc[-1]
+    if pd.isna(a) or pd.isna(b) or pd.isna(a1) or pd.isna(b1):
+        return None
+    if a <= b and a1 > b1:
+        return 'ma50_up'
+    if a >= b and a1 < b1:
+        return 'ma50_down'
+    return None
+
 # -------------------------
 # BACKTEST / HISTORICAL PATTERN ANALYSIS
+# (unchanged from your code)
 # -------------------------
 def backtest_pattern(df, lookahead=BACKTEST_LOOKAHEAD):
     df = df.copy()
@@ -241,7 +340,7 @@ def backtest_pattern(df, lookahead=BACKTEST_LOOKAHEAD):
     return out
 
 # -------------------------
-# MACHINE LEARNING PER SYMBOL
+# MACHINE LEARNING PER SYMBOL (unchanged)
 # -------------------------
 def features_for_ml(df):
     df = df.copy()
@@ -277,7 +376,6 @@ def train_or_load_model(symbol, df, lookahead=5):
             return model, float(acc)
         except Exception as e:
             logging.exception("Loading model failed, will retrain: %s", e)
-            # remove corrupted file to avoid repeated loading attempts
             try:
                 os.remove(model_path)
                 logging.info("Removed corrupted model file %s", model_path)
@@ -300,14 +398,9 @@ def train_or_load_model(symbol, df, lookahead=5):
         return None, None
 
 # -------------------------
-# EMA HISTORICAL STATS (NEW)
+# EMA HISTORICAL STATS (unchanged)
 # -------------------------
 def compute_ema_historical_stats(df, short_col='ema_8', long_col='ema_21', lookahead=10):
-    """
-    Scans historical df for cross events (short crossing long)
-    and measures returns lookahead bars after the cross.
-    Returns dict with golden/death stats.
-    """
     df = df.copy()
     df = apply_indicators(df)
     res = {'golden': {'count': 0, 'win_rate': None, 'avg_return': None, 'returns': []},
@@ -317,11 +410,9 @@ def compute_ema_historical_stats(df, short_col='ema_8', long_col='ema_21', looka
         prev_long = df[long_col].iloc[i-1]
         cur_short = df[short_col].iloc[i]
         cur_long = df[long_col].iloc[i]
-        # golden cross
         if prev_short <= prev_long and cur_short > cur_long:
             fut = (df['close'].iloc[i+lookahead] / df['close'].iloc[i]) - 1
             res['golden']['returns'].append(fut)
-        # death cross
         if prev_short >= prev_long and cur_short < cur_long:
             fut = (df['close'].iloc[i+lookahead] / df['close'].iloc[i]) - 1
             res['death']['returns'].append(fut)
@@ -355,22 +446,68 @@ def ensure_ema_stats_for_symbol(symbol, interval='5m', force_recompute=False):
     return ema_stats[key]
 
 # -------------------------
-# SIGNAL SCORING & DECISION
+# NEW: confidence (updated)
 # -------------------------
-def compute_confidence(hist_stats, ml_prob, ml_acc, volume_spike):
+def direction_from_signal(sig):
+    if not sig:
+        return None
+    s = sig.lower()
+    if 'long' in s or 'bull' in s or 'up' in s:
+        return 'LONG'
+    if 'short' in s or 'bear' in s or 'down' in s:
+        return 'SHORT'
+    return None
+
+def compute_confidence(hist_stats, ml_prob, ml_acc, volume_spike, patterns):
+    """
+    patterns: dict of signals, e.g.
+    {'ema_cross': 'bull_cross', 'bb': 'bb_up', 'rsi': 'rsi_up', 'macd': 'macd_up', 'ma50': 'ma50_up'}
+    """
     score = 0.0
+    # history
     if hist_stats and 'win_rate' in hist_stats and hist_stats['win_rate'] is not None:
-        score += min(1.0, hist_stats['win_rate']) * 0.5
+        score += min(1.0, hist_stats['win_rate']) * CONF_WEIGHTS['hist']
+    # ml prob
     if ml_prob is not None:
-        score += ml_prob * 0.3
+        score += ml_prob * CONF_WEIGHTS['ml_prob']
+    # ml acc
     if ml_acc:
-        score += min(0.2, ml_acc * 0.2)
+        score += min(0.2, ml_acc * CONF_WEIGHTS['ml_acc'])  # scaled
+    # volume
     if volume_spike:
-        score += 0.05
-    return min(1.0, score)
+        score += CONF_WEIGHTS['volume']
+    # pattern agreement: count how many indicators point to same direction
+    # Build a direction map
+    dirs = []
+    for k, v in (patterns or {}).items():
+        d = direction_from_signal(v)
+        if d:
+            dirs.append(d)
+    # if no patterns, pattern_score = 0
+    pattern_score = 0.0
+    if dirs:
+        # majority direction
+        counts = {'LONG': dirs.count('LONG'), 'SHORT': dirs.count('SHORT')}
+        maj = 'LONG' if counts['LONG'] >= counts['SHORT'] else 'SHORT'
+        maj_count = max(counts['LONG'], counts['SHORT'])
+        # normalise by number of pattern signals
+        pattern_ratio = maj_count / len(dirs)
+        pattern_score = pattern_ratio * CONF_WEIGHTS['pattern_agreement']
+        score += pattern_score
+    # penalty if ML direction contradicts majority of patterns
+    if ml_prob is not None and dirs:
+        ml_dir = 'LONG' if ml_prob >= 0.5 else 'SHORT'
+        counts = {'LONG': dirs.count('LONG'), 'SHORT': dirs.count('SHORT')}
+        maj = 'LONG' if counts['LONG'] >= counts['SHORT'] else 'SHORT'
+        if ml_dir != maj:
+            # small penalty
+            score -= 0.05
+    # clamp
+    score = max(0.0, min(1.0, score))
+    return score
 
 # -------------------------
-# SCAN WORKER FOR A SYMBOL
+# SCAN WORKER FOR A SYMBOL (enhanced patterns)
 # -------------------------
 def analyze_symbol(symbol, interval='1h'):
     try:
@@ -387,59 +524,85 @@ def analyze_symbol(symbol, interval='1h'):
         model, acc = train_or_load_model(symbol, df, lookahead=BACKTEST_LOOKAHEAD)
         ml_prob = None
         if model is not None:
-            # create DataFrame with same feature names to avoid sklearn warning
             feat_row = features_for_ml(df).iloc[-1]
             features = ['ATR_10','ATR_50','RSI','MACD_hist','ret1','ret5','vol_change','ema8_21_diff','ema21_50_diff']
             X_row = pd.DataFrame([feat_row[features].values], columns=features)
             ml_prob = float(model.predict_proba(X_row)[0][1])
+
         vol_spike = False
         if latest['volume'] > (latest['vol_ma_20'] * VOLUME_MULTIPLIER_THRESHOLD):
             vol_spike = True
+
+        # new pattern detectors
         ema_cross = detect_ema_crossover(df, short='ema_8', long='ema_21')
+        bb = detect_bollinger_breakout(df)  # bb_up / bb_down
+        rsi = detect_rsi_flip(df)           # rsi_up / rsi_down
+        macd = detect_macd_signal(df)       # macd_up / macd_down
+        ma50 = detect_ma50_200_cross(df)    # ma50_up / ma50_down (may be None)
+
+        # aggregate pattern signals
+        patterns = {
+            'ema_cross': ema_cross,
+            'bb': bb,
+            'rsi': rsi,
+            'macd': macd,
+            'ma50': ma50
+        }
+
+        # compute confidence using new function
+        conf = compute_confidence(hist_stats, ml_prob, acc, vol_spike, patterns)
+
+        # derive final signal logic: prefer base_signal if present, else EMA/BB/MACD consensus
         final_signal = None
         if base_signal:
+            # if historical is very bad, invert to ANTI
             if hist_stats and hist_stats['count'] >= MIN_TRADES_FOR_STATS and hist_stats['win_rate'] < HIST_WINRATE_THRESHOLD:
                 final_signal = "ANTI_"+("SHORT" if base_signal=="LONG" else "LONG")
             else:
                 final_signal = base_signal
-            conf = compute_confidence(hist_stats, ml_prob, acc, vol_spike)
-            return {
-                'symbol': symbol,
-                'interval': interval,
-                'base_signal': base_signal,
-                'final_signal': final_signal,
-                'hist_stats': hist_stats,
-                'ml_prob': ml_prob,
-                'ml_acc': acc,
-                'vol_spike': vol_spike,
-                'ema_cross': ema_cross,
-                'confidence': conf,
-                'last_price': float(latest['close']),
-                'timestamp': str(df.index[-1])
-            }
         else:
-            if ema_cross:
-                conf = 0.25 + (0.1 if vol_spike else 0.0)
-                return {
-                    'symbol': symbol,
-                    'interval': interval,
-                    'base_signal': None,
-                    'final_signal': 'EMA_'+ema_cross,
-                    'hist_stats': None,
-                    'ml_prob': ml_prob,
-                    'ml_acc': acc,
-                    'vol_spike': vol_spike,
-                    'ema_cross': ema_cross,
-                    'confidence': conf,
-                    'last_price': float(latest['close']),
-                    'timestamp': str(df.index[-1])
-                }
+            # use pattern majority to decide
+            # build directions from patterns
+            dirs = []
+            for v in patterns.values():
+                d = direction_from_signal(v)
+                if d:
+                    dirs.append(d)
+            if dirs:
+                # majority
+                if dirs.count('LONG') > dirs.count('SHORT'):
+                    final_signal = "LONG" if conf >= 0.2 else None
+                elif dirs.count('SHORT') > dirs.count('LONG'):
+                    final_signal = "SHORT" if conf >= 0.2 else None
+                else:
+                    final_signal = None
+
+        # attach more metadata
+        return {
+            'symbol': symbol,
+            'interval': interval,
+            'base_signal': base_signal,
+            'final_signal': final_signal,
+            'hist_stats': hist_stats,
+            'ml_prob': ml_prob,
+            'ml_acc': acc,
+            'vol_spike': vol_spike,
+            'ema_cross': ema_cross,
+            'bb': bb,
+            'rsi': rsi,
+            'macd': macd,
+            'ma50': ma50,
+            'patterns': patterns,
+            'confidence': conf,
+            'last_price': float(latest['close']),
+            'timestamp': str(df.index[-1])
+        }
     except Exception as e:
         logging.exception("analyze_symbol error %s: %s", symbol, e)
     return None
 
 # -------------------------
-# EMA SCAN (ALL SYMBOLS) - parallel (uses EMA stats)
+# EMA SCAN & MONITOR (unchanged but will now use new analyze_symbol outputs)
 # -------------------------
 def ema_scan_all(interval='5m'):
     logging.info("Starting EMA scan for all symbols (interval=%s)...", interval)
@@ -452,26 +615,34 @@ def ema_scan_all(interval='5m'):
             s = futures[fut]
             try:
                 res = fut.result()
-                if res and res.get('confidence', 0) >= 0.3:
+                if res and res.get('confidence', 0) >= 0.2:  # lowered watch threshold so we see more
                     results.append(res)
             except Exception as e:
                 logging.exception("Future error for %s: %s", s, e)
     logging.info("EMA scan finished, hits=%d", len(results))
     if results:
-        results_sorted = sorted(results, key=lambda x: x['confidence'], reverse=True)[:50]
+        results_sorted = sorted(results, key=lambda x: x['confidence'], reverse=True)[:80]
         for r in results_sorted:
-            # ensure ema stats available (compute if missing)
             key = f"{r['symbol']}_{interval}"
             stats_entry = ema_stats.get(key)
             if not stats_entry:
                 stats_entry = ensure_ema_stats_for_symbol(r['symbol'], interval=interval, force_recompute=False)
-            # build message
+            # build message with richer info
             text = "*EMA Alert* 🔔\n"
-            text += f"Symbol: `{r['symbol']}`\nInterval: `{r['interval']}`\nEvent: *{r['final_signal']}* (ema8/21)\nPrice: `{r['last_price']}`\nConfidence: `{r['confidence']:.2f}`\nTime: `{r['timestamp']}`"
+            text += f"Symbol: `{r['symbol']}`\nInterval: `{r['interval']}`\nEvent: *{r['final_signal'] or 'WATCH'}*\nPrice: `{r['last_price']}`\nConfidence: `{r['confidence']:.2f}`\nTime: `{r['timestamp']}`"
             if r['ml_prob'] is not None:
-                text += f"\n🤖 ML Prob Up: `{r['ml_prob']:.2f}` | ML Acc: `{r['ml_acc']:.2f}`"
+                text += f"\n🤖 ML ProbUp: `{r['ml_prob']:.2f}` | ML Acc: `{r['ml_acc']:.2f}`"
             if r['vol_spike']:
                 text += "\n📈 Volume spike detected"
+            # patterns
+            patt = []
+            if r['ema_cross']: patt.append(r['ema_cross'])
+            if r['bb']: patt.append(r['bb'])
+            if r['macd']: patt.append(r['macd'])
+            if r['rsi']: patt.append(r['rsi'])
+            if r['ma50']: patt.append(r['ma50'])
+            if patt:
+                text += f"\n🧩 Patterns: {', '.join(patt)}"
             # append historical EMA stats if available
             if stats_entry and 'stats' in stats_entry:
                 g = stats_entry['stats'].get('golden')
@@ -483,9 +654,6 @@ def ema_scan_all(interval='5m'):
             send_telegram_message(text)
             safe_sleep(0.12)
 
-# -------------------------
-# MONITOR TOP SYMBOLS (DETAILED SIGNALS)
-# -------------------------
 def monitor_top_symbols():
     logging.info("Start detailed monitor for top symbols")
     symbols = get_top_symbols_by_volume(limit=60)
@@ -502,8 +670,9 @@ def monitor_top_symbols():
                 if res:
                     conf = res.get('confidence', 0)
                     ml_prob = res.get('ml_prob')
+                    # alerting rule: final_signal present AND (conf >= 0.45 OR ml high and acc decent)
                     should_alert = False
-                    if res.get('final_signal') and (conf >= 0.45 or (ml_prob and ml_prob >= ML_PROB_THRESHOLD)):
+                    if res.get('final_signal') and (conf >= 0.45 or (ml_prob and ml_prob >= ML_PROB_THRESHOLD and res.get('ml_acc',0) >= 0.55)):
                         should_alert = True
                     key = f"{res['symbol']}_{res['interval']}"
                     prev = state.get('signals', {}).get(key)
@@ -516,7 +685,12 @@ def monitor_top_symbols():
                         if res.get('ml_prob') is not None:
                             ml_text = f"\n🤖 ML ProbUp: {res['ml_prob']:.2f} | ML Acc: {res['ml_acc']:.2f}"
                         vol_text = "\n📈 Volume spike" if res.get('vol_spike') else ""
-                        msg = f"⚡ *Signal*\nSymbol: `{res['symbol']}`\nInterval: `{res['interval']}`\nSignal: *{res['final_signal']}* (base: {res.get('base_signal')})\nPrice: `{res['last_price']}`\nConfidence: `{res['confidence']:.2f}`{hist_text}{ml_text}{vol_text}\nTime: `{res['timestamp']}`"
+                        patt = []
+                        for k in ['ema_cross','bb','macd','rsi','ma50']:
+                            if res.get(k):
+                                patt.append(res.get(k))
+                        patt_text = f"\n🧩 Patterns: {', '.join(patt)}" if patt else ""
+                        msg = f"⚡ *Signal*\nSymbol: `{res['symbol']}`\nInterval: `{res['interval']}`\nSignal: *{res['final_signal']}* (base: {res.get('base_signal')})\nPrice: `{res['last_price']}`\nConfidence: `{res['confidence']:.2f}`{hist_text}{ml_text}{vol_text}{patt_text}\nTime: `{res['timestamp']}`"
                         send_telegram_message(msg)
                         state.setdefault('signals', {})[key] = res['final_signal']
                         state.setdefault('last_seen', {})[key] = {'time': res['timestamp'], 'price': res['last_price']}
@@ -561,7 +735,7 @@ def status():
     return jsonify(out)
 
 # -------------------------
-# BOOTSTRAP: Warm-up models and EMA-stats for top symbols (background)
+# BOOTSTRAP
 # -------------------------
 def warmup_models_and_stats():
     logging.info("Warmup models and EMA stats for top symbols")
@@ -571,9 +745,7 @@ def warmup_models_and_stats():
             df = get_klines_df(s, '1h', limit=800)
             if df is None:
                 continue
-            # train/load model
             train_or_load_model(s, df, lookahead=BACKTEST_LOOKAHEAD)
-            # compute ema stats for 5m and 1h (slow)
             ensure_ema_stats_for_symbol(s, interval='5m', force_recompute=False)
             ensure_ema_stats_for_symbol(s, interval='1h', force_recompute=False)
             safe_sleep(0.5 + random.random()*0.5)
