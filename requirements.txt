@@ -29,4 +29,3 @@ joblib
 gunicorn
 ta
 aiogram
-rss-parser
