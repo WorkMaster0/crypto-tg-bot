@@ -4,7 +4,6 @@ import aiohttp
 import numpy as np
 from flask import Flask, request
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils.executor import start_webhook
 import feedparser
 
 # --- Environment Variables ---
@@ -18,8 +17,10 @@ WEBHOOK_FULL_URL = WEBHOOK_URL + WEBHOOK_PATH
 app = Flask(__name__)
 
 # --- Telegram Bot ---
-bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher(bot)
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode="HTML")
+dp = Dispatcher()
+
+dp.startup.register(lambda _: bot)  # реєстрація бота в dispatcher
 
 # --- Live Market Bot with Social & Agents ---
 class LiveMarketBot:
@@ -30,9 +31,7 @@ class LiveMarketBot:
         self.order_books = {s:{} for s in symbols}
         self.prev_imbalances = {s:0 for s in symbols}
         self.social_signal = 0
-        # Telegram RSS
         self.rss_urls = rss_urls or ["https://t.me/s/public_crypto_channel?format=rss"]
-        # Twitter RSS via Nitter
         self.twitter_rss_urls = twitter_rss_urls or [
             "https://nitter.net/search/rss?q=%23BTC",
             "https://nitter.net/search/rss?q=%23ETH"
@@ -60,13 +59,12 @@ class LiveMarketBot:
             for entry in feed.entries[:5]:
                 text = entry.title + " " + getattr(entry, 'summary', '')
                 sentiment_score += self.analyze_sentiment(text)
-        # Twitter RSS (публічні потоки через Nitter)
+        # Twitter RSS
         for url in self.twitter_rss_urls:
             feed = feedparser.parse(url)
             for entry in feed.entries[:5]:
                 text = entry.title + " " + getattr(entry, 'summary', '')
                 sentiment_score += self.analyze_sentiment(text)
-        # нормалізація
         total_sources = len(self.rss_urls) + len(self.twitter_rss_urls)
         self.social_signal = max(min(sentiment_score / total_sources, 1), -1)
 
@@ -134,24 +132,24 @@ class LiveMarketBot:
         return high, low
 
 # --- Telegram Commands ---
-@dp.message_handler(commands=['start'])
+@dp.message(commands=["start"])
 async def start_handler(message: types.Message):
     await message.reply("Живий ринок запущений! Очікуйте сигнали та аналіз топ токенів.")
 
-@dp.message_handler(commands=['status'])
+@dp.message(commands=["status"])
 async def status_handler(message: types.Message):
     await message.reply("Бот працює. Сигнали генеруються на основі imbalance, whales і соцхвиль.")
 
-@dp.message_handler(commands=['help'])
+@dp.message(commands=["help"])
 async def help_handler(message: types.Message):
     await message.reply("/start - запуск\n/status - стан\n/highlow - топ хай/лоу токени за місяць\n/help - допомога")
 
-@dp.message_handler(commands=['highlow'])
+@dp.message(commands=["highlow"])
 async def highlow_handler(message: types.Message):
     highs = []
     lows = []
     for symbol in bot_core.symbols:
-        high, low = asyncio.run(bot_core.fetch_monthly_highlow(symbol))
+        high, low = await bot_core.fetch_monthly_highlow(symbol)
         if high and low:
             highs.append({'symbol': symbol, 'highPrice': high})
             lows.append({'symbol': symbol, 'lowPrice': low})
@@ -162,11 +160,11 @@ async def highlow_handler(message: types.Message):
     await message.reply(text)
 
 # --- Flask Webhook ---
-@app.route(WEBHOOK_PATH, methods=['POST'])
-def webhook():
-    update = types.Update.de_json(request.get_json(force=True))
-    asyncio.run(dp.process_update(update))
-    return "OK", 200
+@app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+async def webhook():
+    update = types.Update.de_json(await request.get_json())
+    await dp.process_update(update)
+    return "OK"
 
 # --- Background Market Task ---
 async def live_market_task():
