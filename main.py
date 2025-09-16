@@ -1,4 +1,4 @@
-# main.py — enhanced with 10 extra features and robust Telegram messaging
+# main.py — Smart Money level + pre-top + pump/dump + ML + patterns
 import os
 import time
 import json
@@ -11,7 +11,7 @@ import traceback
 import re
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,32 +29,34 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
-PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))  # <=8 recommended
+PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))  # parallelism for scans
 STATE_FILE = "state.json"
 MODEL_DIR = "models"
 EMA_STATS_FILE = "ema_stats.json"
 LOG_FILE = "bot.log"
-SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
-MONITOR_INTERVAL_MINUTES = int(os.getenv("MONITOR_INTERVAL_MINUTES", "5"))
+SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))  # ema scan freq
+MONITOR_INTERVAL_MINUTES = int(os.getenv("MONITOR_INTERVAL_MINUTES", "5"))  # detailed monitor freq
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 BACKTEST_LOOKAHEAD = int(os.getenv("BACKTEST_LOOKAHEAD", "5"))
 
-# thresholds
-HIST_WINRATE_THRESHOLD = 0.55
-ML_PROB_THRESHOLD = 0.6
-MIN_TRADES_FOR_STATS = 10
-VOLUME_MULTIPLIER_THRESHOLD = 1.5
+# thresholds & tunables
+MIN_CONFIDENCE_FOR_ALERT = float(os.getenv("MIN_CONFIDENCE_FOR_ALERT", "0.45"))
+VOLUME_SPIKE_MULTIPLIER = float(os.getenv("VOLUME_SPIKE_MULTIPLIER", "2.0"))
+PUMP_MOVE_THRESHOLD = float(os.getenv("PUMP_MOVE_THRESHOLD", "0.04"))
+DUMP_MOVE_THRESHOLD = float(os.getenv("DUMP_MOVE_THRESHOLD", "-0.04"))
+LEVEL_PROXIMITY_PCT = float(os.getenv("LEVEL_PROXIMITY_PCT", "0.015"))  # 1.5% proximity to level counts as 'approaching'
+ORDER_BLOCK_LOOKBACK = int(os.getenv("ORDER_BLOCK_LOOKBACK", "30"))  # bars to search for order-block-ish candle
 
-# confidence weights (tunable)
+# confidence components weights (tune)
 CONF_WEIGHTS = {
-    "hist": 0.30,
-    "ml_prob": 0.25,
-    "ml_acc": 0.10,
-    "pattern_agreement": 0.20,
-    "volume": 0.05,
-    "sri": 0.10  # Signal Reliability Index contribution
+    "ml": 0.25,
+    "patterns": 0.25,
+    "level_proximity": 0.25,
+    "volume": 0.15,
+    "sri": 0.10
 }
 
+# create dirs
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # -------------------------
@@ -63,10 +65,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
 
 # -------------------------
@@ -80,7 +79,7 @@ client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 app = Flask(__name__)
 
 # -------------------------
-# STATE LOAD/SAVE
+# STATE LOAD/SAVE (safe)
 # -------------------------
 def load_json_safe(path, default):
     try:
@@ -104,19 +103,19 @@ state = load_json_safe(STATE_FILE, {"signals": {}, "models": {}, "signal_history
 ema_stats = load_json_safe(EMA_STATS_FILE, {})
 
 # -------------------------
-# UTILITIES
+# TELEGRAM SAFE ESCAPE & SENDING
 # -------------------------
 def escape_markdown_v2(text: str) -> str:
-    # Escape characters for MarkdownV2 as per Telegram requirements
     if not isinstance(text, str):
         text = str(text)
+    # escape Telegram MarkdownV2 special characters
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
 
 def send_telegram_message(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logging.warning("Telegram not configured. Skipping send.")
-        return
+        logging.warning("Telegram not configured. Skip send.")
+        return None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -128,22 +127,20 @@ def send_telegram_message(text):
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code != 200:
             logging.error("Telegram send failed: %s %s", resp.status_code, resp.text)
+            return resp.text
+        return resp.json()
     except Exception as e:
         logging.exception("Telegram exception: %s", e)
-
-def safe_sleep(sec):
-    try:
-        time.sleep(sec)
-    except KeyboardInterrupt:
-        raise
+        return None
 
 # -------------------------
-# MARKET DATA
+# MARKET DATA HELPERS
 # -------------------------
 def get_all_usdt_symbols():
     try:
         exchange_info = client.get_exchange_info()
-        symbols = [s['symbol'] for s in exchange_info['symbols'] if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
+        symbols = [s['symbol'] for s in exchange_info['symbols']
+                   if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
         return symbols
     except Exception as e:
         logging.exception("Error fetching exchange info: %s", e)
@@ -174,18 +171,18 @@ def get_klines_df(symbol, interval, limit=500, retry=3):
             return df
         except Exception as e:
             logging.warning("get_klines error %s (attempt %d/%d): %s", symbol, attempt+1, retry, e)
-            safe_sleep(0.5 + attempt)
+            time.sleep(0.5 + attempt)
     return None
 
 # -------------------------
-# INDICATORS & STRATEGIES
+# INDICATORS & SMART LEVELS
 # -------------------------
 def apply_indicators(df):
     df = df.copy()
     if df is None or len(df) == 0:
         return df
     try:
-        # ATRs
+        # ATR, RSI, MACD, EMAs
         if len(df) >= 10:
             df['ATR_10'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=10)
         else:
@@ -195,93 +192,32 @@ def apply_indicators(df):
         else:
             df['ATR_50'] = np.nan
 
-        # RSI
-        if len(df) >= 14:
-            df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-        else:
-            df['RSI'] = np.nan
-
-        # MACD hist
+        df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
         macd = ta.trend.MACD(df['close'])
         df['MACD_hist'] = macd.macd_diff()
-
-        # Donchian
-        df['Donchian_High'] = df['high'].rolling(window=20).max()
-        df['Donchian_Low'] = df['low'].rolling(window=20).min()
-
-        # EMAs
         df['ema_8'] = ta.trend.EMAIndicator(df['close'], window=8).ema_indicator()
         df['ema_21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
         df['ema_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
         df['ema_200'] = ta.trend.EMAIndicator(df['close'], window=200).ema_indicator()
 
-        # Bollinger Bands
+        # Bollinger
         if len(df) >= 20:
             bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
             df['bb_h'] = bb.bollinger_hband()
             df['bb_l'] = bb.bollinger_lband()
         else:
-            df['bb_h'] = np.nan
-            df['bb_l'] = np.nan
+            df['bb_h'] = np.nan; df['bb_l'] = np.nan
 
-        # Volume MA
         df['vol_ma_20'] = df['volume'].rolling(window=20).mean()
 
-        # ADX
-        if len(df) >= 14:
-            adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
-            df['ADX'] = adx.adx()
-            df['ADX_pos'] = adx.adx_pos()
-            df['ADX_neg'] = adx.adx_neg()
-        else:
-            df['ADX'] = np.nan
-            df['ADX_pos'] = np.nan
-            df['ADX_neg'] = np.nan
+        # VWAP-like (rolling typical price * vol / vol sum)
+        tp = (df['high'] + df['low'] + df['close']) / 3.0
+        rolling_vol = df['volume'].rolling(window=50).sum()
+        rolling_vwap = (tp * df['volume']).rolling(window=50).sum() / (rolling_vol + 1e-9)
+        df['vwap50'] = rolling_vwap
 
-        # StochRSI (if available in ta version)
-        try:
-            if len(df) >= 14:
-                stochrsi = ta.momentum.StochRSIIndicator(df['close'], window=14, smooth1=3, smooth2=3)
-                df['stochrsi_k'] = stochrsi.stochrsi_k()
-                df['stochrsi_d'] = stochrsi.stochrsi_d()
-            else:
-                df['stochrsi_k'] = np.nan
-                df['stochrsi_d'] = np.nan
-        except Exception:
-            # fallback to Stochastic oscillator on price (less ideal)
-            try:
-                so = ta.momentum.StochasticOscillator(df['high'], df['low'], df['close'], window=14, smooth_window=3)
-                df['stochrsi_k'] = so.stoch()
-                df['stochrsi_d'] = so.stoch_signal()
-            except Exception:
-                df['stochrsi_k'] = np.nan
-                df['stochrsi_d'] = np.nan
-
-        # OBV
-        try:
-            obv = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume'])
-            df['OBV'] = obv.on_balance_volume()
-        except Exception:
-            df['OBV'] = np.nan
-
-        # CCI
-        try:
-            if len(df) >= 20:
-                cci = ta.trend.CCIIndicator(df['high'], df['low'], df['close'], window=20)
-                df['CCI'] = cci.cci()
-            else:
-                df['CCI'] = np.nan
-        except Exception:
-            df['CCI'] = np.nan
-
-        # volatility regime: rolling std of returns
-        df['ret1'] = df['close'].pct_change(1)
-        df['ret20_std'] = df['ret1'].rolling(window=20).std()
-
-        # Heikin-Ashi candles
+        # Heiken Ashi
         ha_close = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-        ha_open = df['open'].copy()
-        # produce HA open iteratively for accuracy
         ha_open_vals = []
         prev_ha_open = (df['open'].iloc[0] + df['close'].iloc[0]) / 2
         prev_ha_close = ha_close.iloc[0]
@@ -295,247 +231,147 @@ def apply_indicators(df):
         df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
         df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
 
-        # Pivot points previous bar (classic)
-        if len(df) >= 2:
-            ph = df['high'].iloc[-2]
-            pl = df['low'].iloc[-2]
-            pc = df['close'].iloc[-2]
+        # Quick pivot (previous bar)
+        if len(df) >= 3:
+            ph = df['high'].iloc[-2]; pl = df['low'].iloc[-2]; pc = df['close'].iloc[-2]
             P = (ph + pl + pc) / 3.0
-            R1 = 2 * P - pl
-            S1 = 2 * P - ph
-            df['pivot_R1'] = R1
-            df['pivot_S1'] = S1
+            R1 = 2 * P - pl; S1 = 2 * P - ph
+            df['pivot_R1'] = R1; df['pivot_S1'] = S1
         else:
-            df['pivot_R1'] = np.nan
-            df['pivot_S1'] = np.nan
+            df['pivot_R1'] = np.nan; df['pivot_S1'] = np.nan
+
+        # returns & volatility
+        df['ret1'] = df['close'].pct_change(1)
+        df['ret20_std'] = df['ret1'].rolling(window=20).std()
 
     except Exception as e:
         logging.exception("apply_indicators error: %s", e)
     return df
 
-def generate_signal_from_row(row):
-    try:
-        long_signal = (
-            row.get('ATR_10', np.nan) < row.get('ATR_50', np.nan) and
-            row['close'] > row.get('Donchian_High', np.nan) and
-            (row.get('MACD_hist', 0) > 0 or row.get('RSI', 0) > 55)
-        )
-        short_signal = (
-            row.get('ATR_10', np.nan) < row.get('ATR_50', np.nan) and
-            row['close'] < row.get('Donchian_Low', np.nan) and
-            (row.get('MACD_hist', 0) < 0 or row.get('RSI', 0) < 45)
-        )
-        if long_signal:
-            return "LONG"
-        if short_signal:
-            return "SHORT"
-    except Exception as e:
-        logging.exception("generate_signal_from_row error: %s", e)
+# Smart levels: local swing highs/lows clustering => support/resistance zones
+def compute_swing_levels(df, lookback=200, n_peaks=6):
+    """
+    Find recent local highs/lows and cluster them to produce levels.
+    Returns dict: {'resistances':[...],'supports':[...]}
+    """
+    res = {'resistances': [], 'supports': []}
+    if df is None or len(df) < 20:
+        return res
+    series_high = df['high'].iloc[-lookback:] if len(df) >= lookback else df['high']
+    series_low = df['low'].iloc[-lookback:] if len(df) >= lookback else df['low']
+    # find local peaks via simple rolling comparison
+    highs = []
+    lows = []
+    window = 5
+    for i in range(window, len(series_high)-window):
+        h = series_high.iloc[i]
+        if h == series_high.iloc[i-window:i+window+1].max():
+            highs.append((series_high.index[i], float(h)))
+        l = series_low.iloc[i]
+        if l == series_low.iloc[i-window:i+window+1].min():
+            lows.append((series_low.index[i], float(l)))
+    # take top n_peaks by recency
+    highs = sorted(highs, key=lambda x: x[0], reverse=True)[:n_peaks]
+    lows = sorted(lows, key=lambda x: x[0], reverse=True)[:n_peaks]
+    # cluster nearby levels (within 1% of value)
+    def cluster(vals, tol=0.01):
+        clusters = []
+        for t, v in vals:
+            placed = False
+            for c in clusters:
+                if abs(c['level'] - v) / (c['level'] + 1e-9) < tol:
+                    # weighted average
+                    c['level'] = (c['level']*c['count'] + v) / (c['count'] + 1)
+                    c['count'] += 1
+                    c['times'].append(t)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({'level': v, 'count': 1, 'times': [t]})
+        # sort by level desc for resistances, asc for supports will be handled by caller
+        return clusters
+    res['resistances'] = sorted([c['level'] for c in cluster(highs)], reverse=True)
+    res['supports'] = sorted([c['level'] for c in cluster(lows)])
+    return res
+
+# detect order-block-ish candle: big directional candle with gap/imbalance
+def detect_order_block(df, lookback=ORDER_BLOCK_LOOKBACK, mult=2.0):
+    """
+    Find recent large directional candle (high ATR multiple) as candidate order-block / imbalance zone.
+    Returns dict with zone (high, low, idx) or None.
+    """
+    if df is None or len(df) < lookback + 2:
+        return None
+    window = lookback
+    sub = df.iloc[-window:]
+    atr = sub['ATR_10'].dropna()
+    if atr.empty:
+        return None
+    mean_atr = atr.mean()
+    # find candle with body > mult * mean_atr
+    for i in range(len(sub)-2, -1, -1):  # search backwards, prefer recent
+        body = abs(sub['close'].iloc[i] - sub['open'].iloc[i])
+        if body > mult * mean_atr:
+            # candidate: zone = full candle (high-low)
+            return {'idx': sub.index[i], 'high': float(sub['high'].iloc[i]), 'low': float(sub['low'].iloc[i]), 'body': float(body)}
     return None
 
+# detect imbalance: quick gap convex candle (close far from mid + big volume)
+def detect_imbalance(df, lookback=20, vol_mult=2.0):
+    if df is None or len(df) < lookback + 1:
+        return None
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    vol_avg = df['volume'].iloc[-lookback:].mean()
+    body = latest['close'] - latest['open']
+    body_pct = abs(body) / (latest['close'] + 1e-9)
+    vol_spike = latest['volume'] > vol_avg * vol_mult
+    # imbalance up: big green body, big vol, close near high
+    if body > 0 and vol_spike and (latest['close'] > latest['high'] - (latest['high'] - latest['low']) * 0.2):
+        return {'type': 'imb_up', 'strength': body_pct}
+    if body < 0 and vol_spike and (latest['close'] < latest['low'] + (latest['high'] - latest['low']) * 0.2):
+        return {'type': 'imb_down', 'strength': body_pct}
+    return None
+
+# -------------------------
+# PATTERN DETECTORS (existing ones + new)
+# -------------------------
 def detect_ema_crossover(df, short='ema_8', long='ema_21'):
     if df is None or len(df) < 3:
         return None
-    a = df[short].iloc[-2]
-    b = df[long].iloc[-2]
-    a1 = df[short].iloc[-1]
-    b1 = df[long].iloc[-1]
+    a = df[short].iloc[-2]; b = df[long].iloc[-2]; a1 = df[short].iloc[-1]; b1 = df[long].iloc[-1]
     if pd.isna(a) or pd.isna(b) or pd.isna(a1) or pd.isna(b1):
         return None
-    if a <= b and a1 > b1:
-        return "bull_cross"
-    if a >= b and a1 < b1:
-        return "bear_cross"
+    if a <= b and a1 > b1: return "bull_cross"
+    if a >= b and a1 < b1: return "bear_cross"
     return None
 
-# --- New detectors (10 features) ---
 def detect_bollinger_breakout(df):
-    if df is None or len(df) < 20:
-        return None
-    h = df['bb_h'].iloc[-1]
-    l = df['bb_l'].iloc[-1]
-    c = df['close'].iloc[-1]
-    if pd.isna(h) or pd.isna(l):
-        return None
-    if c > h:
-        return 'bb_up'
-    if c < l:
-        return 'bb_down'
-    return None
-
-def detect_rsi_flip(df):
-    if df is None or len(df) < 15:
-        return None
-    prev = df['RSI'].iloc[-2]
-    cur = df['RSI'].iloc[-1]
-    if pd.isna(prev) or pd.isna(cur):
-        return None
-    if prev < 30 and cur >= 30:
-        return 'rsi_up'
-    if prev > 70 and cur <= 70:
-        return 'rsi_down'
+    if df is None or len(df) < 20: return None
+    h = df['bb_h'].iloc[-1]; l = df['bb_l'].iloc[-1]; c = df['close'].iloc[-1]
+    if pd.isna(h) or pd.isna(l): return None
+    if c > h: return 'bb_up'
+    if c < l: return 'bb_down'
     return None
 
 def detect_macd_signal(df):
-    if df is None or len(df) < 3:
-        return None
-    prev = df['MACD_hist'].iloc[-2]
-    cur = df['MACD_hist'].iloc[-1]
-    if pd.isna(prev) or pd.isna(cur):
-        return None
-    if prev <= 0 and cur > 0:
-        return 'macd_up'
-    if prev >= 0 and cur < 0:
-        return 'macd_down'
+    if df is None or len(df) < 3: return None
+    prev = df['MACD_hist'].iloc[-2]; cur = df['MACD_hist'].iloc[-1]
+    if pd.isna(prev) or pd.isna(cur): return None
+    if prev <= 0 and cur > 0: return 'macd_up'
+    if prev >= 0 and cur < 0: return 'macd_down'
     return None
 
-def detect_ma50_200_cross(df):
-    if df is None or len(df) < 201:
-        return None
-    a = df['ema_50'].iloc[-2]
-    b = df['ema_200'].iloc[-2]
-    a1 = df['ema_50'].iloc[-1]
-    b1 = df['ema_200'].iloc[-1]
-    if pd.isna(a) or pd.isna(b) or pd.isna(a1) or pd.isna(b1):
-        return None
-    if a <= b and a1 > b1:
-        return 'ma50_up'
-    if a >= b and a1 < b1:
-        return 'ma50_down'
-    return None
-
-def detect_adx(df):
-    if df is None or len(df) < 14:
-        return None
-    adx = df['ADX'].iloc[-1]
-    adx_pos = df['ADX_pos'].iloc[-1] if 'ADX_pos' in df.columns else np.nan
-    adx_neg = df['ADX_neg'].iloc[-1] if 'ADX_neg' in df.columns else np.nan
-    if pd.isna(adx):
-        return None
-    if adx >= 25:
-        if not pd.isna(adx_pos) and adx_pos > adx_neg:
-            return 'adx_strong_up'
-        if not pd.isna(adx_neg) and adx_neg > adx_pos:
-            return 'adx_strong_down'
-        return 'adx_strong'
-    return None
-
-def detect_stochrsi(df):
-    if df is None or len(df) < 14:
-        return None
-    k = df.get('stochrsi_k', pd.Series([np.nan])).iloc[-1]
-    d = df.get('stochrsi_d', pd.Series([np.nan])).iloc[-1]
-    if pd.isna(k) or pd.isna(d):
-        return None
-    if (df['stochrsi_k'].iloc[-2] <= df['stochrsi_d'].iloc[-2]) and (k > d):
-        return 'stoch_up'
-    if (df['stochrsi_k'].iloc[-2] >= df['stochrsi_d'].iloc[-2]) and (k < d):
-        return 'stoch_down'
-    return None
-
-def detect_obv_divergence(df):
-    # simple divergence: price up + OBV down => divergence_down; price down + OBV up => divergence_up
-    if df is None or len(df) < 10:
-        return None
-    prev_price = df['close'].iloc[-2]
-    cur_price = df['close'].iloc[-1]
-    prev_obv = df['OBV'].iloc[-2] if 'OBV' in df.columns else np.nan
-    cur_obv = df['OBV'].iloc[-1] if 'OBV' in df.columns else np.nan
-    if pd.isna(prev_obv) or pd.isna(cur_obv):
-        return None
-    if cur_price > prev_price and cur_obv < prev_obv:
-        return 'obv_div_down'
-    if cur_price < prev_price and cur_obv > prev_obv:
-        return 'obv_div_up'
-    return None
-
-def detect_cci(df):
-    if df is None or len(df) < 20:
-        return None
-    cci = df['CCI'].iloc[-1] if 'CCI' in df.columns else np.nan
-    if pd.isna(cci):
-        return None
-    if cci > 100:
-        return 'cci_overbought'
-    if cci < -100:
-        return 'cci_oversold'
-    return None
-
-def detect_atr_breakout(df, mult=1.5):
-    if df is None or len(df) < 10:
-        return None
-    atr = df['ATR_10'].iloc[-1] if 'ATR_10' in df.columns else np.nan
-    if pd.isna(atr):
-        return None
-    last_close = df['close'].iloc[-1]
-    prev_close = df['close'].iloc[-2]
-    if last_close > prev_close + mult * atr:
-        return 'atr_break_up'
-    if last_close < prev_close - mult * atr:
-        return 'atr_break_down'
-    return None
-
-def detect_heikin_ashi_trend(df, length=3):
-    if df is None or len(df) < length + 1:
-        return None
-    ha_close = df['ha_close']
-    # check last `length` HA candles all green/red
-    last = ha_close.iloc[-length:]
-    prev = ha_close.iloc[-length-1:-1]
-    if last.isnull().any():
-        return None
-    # green if ha_close > ha_open
-    greens = (df['ha_close'].iloc[-length:] > df['ha_open'].iloc[-length:]).all()
-    reds = (df['ha_close'].iloc[-length:] < df['ha_open'].iloc[-length:]).all()
-    if greens:
-        return 'ha_up'
-    if reds:
-        return 'ha_down'
-    return None
-
-def detect_pivot_probe(df):
-    # price crosses previous pivot R1 or S1
-    if df is None or len(df) < 2:
-        return None
-    r1 = df.get('pivot_R1', pd.Series([np.nan])).iloc[-1]
-    s1 = df.get('pivot_S1', pd.Series([np.nan])).iloc[-1]
-    c = df['close'].iloc[-1]
-    if pd.isna(r1) or pd.isna(s1):
-        return None
-    if c > r1:
-        return 'pivot_break_r1'
-    if c < s1:
-        return 'pivot_break_s1'
+def detect_rsi_flip(df):
+    if df is None or len(df) < 15: return None
+    prev = df['RSI'].iloc[-2]; cur = df['RSI'].iloc[-1]
+    if pd.isna(prev) or pd.isna(cur): return None
+    if prev < 30 and cur >= 30: return 'rsi_up'
+    if prev > 70 and cur <= 70: return 'rsi_down'
     return None
 
 # -------------------------
-# BACKTEST / HISTORICAL PATTERN ANALYSIS (unchanged)
-# -------------------------
-def backtest_pattern(df, lookahead=BACKTEST_LOOKAHEAD):
-    df = df.copy()
-    df = apply_indicators(df)
-    results = []
-    for i in range(0, len(df) - lookahead):
-        row = df.iloc[i]
-        sig = generate_signal_from_row(row)
-        if sig:
-            future_return = (df['close'].iloc[i+lookahead] / df['close'].iloc[i]) - 1
-            results.append({'index': df.index[i], 'signal': sig, 'future_return': future_return})
-    if not results:
-        return None
-    res_df = pd.DataFrame(results)
-    stats = res_df.groupby('signal')['future_return'].agg(['mean','count', lambda x: (x>0).mean()]).rename(columns={'<lambda_0>':'win_rate'})
-    out = {}
-    for sig in stats.index:
-        out[sig] = {
-            'mean_return': float(stats.loc[sig,'mean']),
-            'count': int(stats.loc[sig,'count']),
-            'win_rate': float(stats.loc[sig,'win_rate'])
-        }
-    return out
-
-# -------------------------
-# MACHINE LEARNING PER SYMBOL (unchanged)
+# ML helpers (unchanged idea from earlier)
 # -------------------------
 def features_for_ml(df):
     df = df.copy()
@@ -550,16 +386,16 @@ def features_for_ml(df):
 def train_or_load_model(symbol, df, lookahead=5):
     model_path = os.path.join(MODEL_DIR, f"{symbol}_rf.joblib")
     df = apply_indicators(df)
-    df = features_for_ml(df)
-    if len(df) < 300:
-        logging.info("%s not enough rows for ML (need >= 300).", symbol)
+    df_feat = features_for_ml(df)
+    if len(df_feat) < 300:
+        logging.info("%s not enough rows for ML (need >=300).", symbol)
         return None, None
-    df['future_ret'] = df['close'].shift(-lookahead) / df['close'] - 1
-    df = df.dropna()
-    df['target'] = (df['future_ret'] > 0).astype(int)
+    df_feat['future_ret'] = df_feat['close'].shift(-lookahead) / df_feat['close'] - 1
+    df_feat = df_feat.dropna()
+    df_feat['target'] = (df_feat['future_ret'] > 0).astype(int)
     features = ['ATR_10','ATR_50','RSI','MACD_hist','ret1','ret5','vol_change','ema8_21_diff','ema21_50_diff']
-    X = df[features]
-    y = df['target']
+    X = df_feat[features]; y = df_feat['target']
+    # load
     if os.path.exists(model_path) and os.path.getsize(model_path) > 0:
         try:
             model = joblib.load(model_path)
@@ -574,6 +410,7 @@ def train_or_load_model(symbol, df, lookahead=5):
                 logging.info("Removed corrupted model file %s", model_path)
             except Exception:
                 pass
+    # train
     try:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
         model = RandomForestClassifier(n_estimators=150, n_jobs=1, random_state=42)
@@ -589,71 +426,9 @@ def train_or_load_model(symbol, df, lookahead=5):
         return None, None
 
 # -------------------------
-# EMA HISTORICAL STATS (unchanged)
+# SRI (Signal Reliability Index)
 # -------------------------
-def compute_ema_historical_stats(df, short_col='ema_8', long_col='ema_21', lookahead=10):
-    df = df.copy()
-    df = apply_indicators(df)
-    res = {'golden': {'count': 0, 'win_rate': None, 'avg_return': None, 'returns': []},
-           'death': {'count': 0, 'win_rate': None, 'avg_return': None, 'returns': []}}
-    for i in range(1, len(df)-lookahead):
-        prev_short = df[short_col].iloc[i-1]
-        prev_long = df[long_col].iloc[i-1]
-        cur_short = df[short_col].iloc[i]
-        cur_long = df[long_col].iloc[i]
-        if prev_short <= prev_long and cur_short > cur_long:
-            fut = (df['close'].iloc[i+lookahead] / df['close'].iloc[i]) - 1
-            res['golden']['returns'].append(fut)
-        if prev_short >= prev_long and cur_short < cur_long:
-            fut = (df['close'].iloc[i+lookahead] / df['close'].iloc[i]) - 1
-            res['death']['returns'].append(fut)
-    for k in ['golden', 'death']:
-        r = res[k]['returns']
-        if r:
-            arr = np.array(r)
-            res[k]['count'] = len(r)
-            res[k]['win_rate'] = float((arr > 0).mean())
-            res[k]['avg_return'] = float(arr.mean())
-        else:
-            res[k]['count'] = 0
-            res[k]['win_rate'] = None
-            res[k]['avg_return'] = None
-    return res
-
-def ensure_ema_stats_for_symbol(symbol, interval='5m', force_recompute=False):
-    key = f"{symbol}_{interval}"
-    if not force_recompute and key in ema_stats:
-        return ema_stats[key]
-    df = get_klines_df(symbol, interval, limit=EMA_SCAN_LIMIT)
-    if df is None or len(df) < 50:
-        return None
-    stats = compute_ema_historical_stats(df, short_col='ema_8', long_col='ema_21', lookahead=BACKTEST_LOOKAHEAD)
-    ema_stats[key] = {
-        'computed_at': str(datetime.utcnow()),
-        'lookahead': BACKTEST_LOOKAHEAD,
-        'stats': stats
-    }
-    save_json_safe(EMA_STATS_FILE, ema_stats)
-    return ema_stats[key]
-
-# -------------------------
-# UTILS: direction & SRI
-# -------------------------
-def direction_from_signal(sig):
-    if not sig:
-        return None
-    s = sig.lower()
-    if 'long' in s or 'bull' in s or 'up' in s:
-        return 'LONG'
-    if 'short' in s or 'bear' in s or 'down' in s:
-        return 'SHORT'
-    return None
-
 def compute_sri(symbol, interval):
-    """
-    Signal Reliability Index: combine ema_stats (golden/death winrates) and model accuracy stored in state
-    returns 0..1
-    """
     key = f"{symbol}_{interval}"
     stats_entry = ema_stats.get(key)
     parts = []
@@ -663,9 +438,7 @@ def compute_sri(symbol, interval):
         if g and g.get('win_rate') is not None:
             parts.append(g['win_rate'])
         if d and d.get('win_rate') is not None:
-            # death winrate is good for SHORT; convert to 'anti-long' score by using (1 - death_winrate) for long reliability
             parts.append(1.0 - d['win_rate'])
-    # model acc from state.models if present
     m = state.get('models', {}).get(key)
     if m:
         parts.append(float(m.get('acc', 0)))
@@ -674,74 +447,151 @@ def compute_sri(symbol, interval):
     return float(np.mean(parts))
 
 # -------------------------
-# NEW: confidence (updated with SRI & pattern votes)
+# SMART-MONEY SCORE & FINAL DECISION
 # -------------------------
-def compute_confidence(hist_stats, ml_prob, ml_acc, volume_spike, patterns, sri):
+def direction_from_signal(sig):
+    if not sig: return None
+    s = str(sig).lower()
+    if any(x in s for x in ['long','bull','up','pump']): return 'LONG'
+    if any(x in s for x in ['short','bear','down','dump','pre_top']): return 'SHORT'
+    return None
+
+def compute_smart_score(symbol, interval, ml_prob, patterns, level_proximity, vol_spike, sri):
+    """
+    Combine ML + pattern votes + proximity to smart levels + vol + sri into 0..1 score
+    """
     score = 0.0
-    # history
-    if hist_stats and 'win_rate' in hist_stats and hist_stats['win_rate'] is not None:
-        score += min(1.0, hist_stats['win_rate']) * CONF_WEIGHTS['hist']
-    # ml prob
+    # ML
     if ml_prob is not None:
-        score += ml_prob * CONF_WEIGHTS['ml_prob']
-    # ml acc
-    if ml_acc:
-        score += min(1.0, ml_acc) * CONF_WEIGHTS['ml_acc']
+        score += ml_prob * CONF_WEIGHTS['ml']
+    # patterns agreement: count directions
+    dirs = []
+    for v in (patterns or {}).values():
+        d = direction_from_signal(v)
+        if d: dirs.append(d)
+    if dirs:
+        counts = {'LONG': dirs.count('LONG'), 'SHORT': dirs.count('SHORT')}
+        maj = max(counts['LONG'], counts['SHORT'])
+        ratio = maj / len(dirs)
+        score += ratio * CONF_WEIGHTS['patterns']
+    # level proximity
+    if level_proximity is not None:
+        score += (1.0 - level_proximity) * CONF_WEIGHTS['level_proximity']  # closer => bigger add
+    # volume
+    if vol_spike:
+        score += CONF_WEIGHTS['volume']
     # sri
     if sri is not None:
         score += sri * CONF_WEIGHTS['sri']
-    # volume
-    if volume_spike:
-        score += CONF_WEIGHTS['volume']
-    # pattern agreement
-    dirs = []
-    for k, v in (patterns or {}).items():
-        d = direction_from_signal(v)
-        if d:
-            dirs.append(d)
-    pattern_score = 0.0
-    if dirs:
-        counts = {'LONG': dirs.count('LONG'), 'SHORT': dirs.count('SHORT')}
-        maj_count = max(counts['LONG'], counts['SHORT'])
-        pattern_ratio = maj_count / len(dirs)
-        pattern_score = pattern_ratio * CONF_WEIGHTS['pattern_agreement']
-        score += pattern_score
-    # penalty if ML direction contradicts majority of patterns
-    if ml_prob is not None and dirs:
-        ml_dir = 'LONG' if ml_prob >= 0.5 else 'SHORT'
-        counts = {'LONG': dirs.count('LONG'), 'SHORT': dirs.count('SHORT')}
-        maj = 'LONG' if counts['LONG'] >= counts['SHORT'] else 'SHORT'
-        if ml_dir != maj:
-            score -= 0.05
     score = max(0.0, min(1.0, score))
     return score
 
 def strength_label(conf):
-    if conf >= 0.65:
-        return "STRONG"
-    if conf >= 0.45:
-        return "MEDIUM"
-    if conf >= 0.2:
-        return "WEAK"
+    if conf >= 0.75: return "STRONG"
+    if conf >= 0.55: return "MEDIUM"
+    if conf >= 0.35: return "WEAK"
     return "WATCH"
 
 # -------------------------
-# SCAN WORKER FOR A SYMBOL (enhanced patterns)
+# PRE-TOP (anti-pump) detector
 # -------------------------
-def analyze_symbol(symbol, interval='1h'):
+def detect_pre_top(df):
+    if df is None or len(df) < 20: return None
+    latest = df.iloc[-1]
+    prev5 = df['close'].iloc[-6]  # 5 bars ago
+    price_change = (latest['close'] - prev5) / (prev5 + 1e-9)
+    vol_spike = latest['volume'] > df['volume'].iloc[-20:].mean() * VOLUME_SPIKE_MULTIPLIER
+    rsi_high = latest.get('RSI', 0) > 70
+    bearish_signs = df['ema_8'].iloc[-1] < df['ema_21'].iloc[-1] or df['MACD_hist'].iloc[-1] < 0
+    if price_change > 0.06 and vol_spike and rsi_high and bearish_signs:
+        return {'type': 'PRE_TOP_SHORT', 'confidence': min(0.95, 0.55 + price_change)}
+    return None
+
+# -------------------------
+# LEVEL PROXIMITY: check whether price is near support/resistance/orderblock/vwap
+# -------------------------
+def level_proximity_score(price, levels):
+    # levels: list of numeric levels (higher score when closer)
+    if not levels: return None
+    dists = [abs(price - l) / (l + 1e-9) for l in levels]
+    min_dist = min(dists)
+    return float(min_dist)  # lower is better (0 = on level). We'll invert later.
+
+def find_nearby_level_info(df, symbol_interval_levels):
+    """
+    For df (latest bar), compute proximity to support/resistance/vwap/orderblock/imbalance zones.
+    Returns dict with proximity values (0..1 normalized approx)
+    """
+    if df is None or len(df) == 0:
+        return {}
+    price = df['close'].iloc[-1]
+    levels = symbol_interval_levels  # dict with lists: supports/resistances, vwap, order_block zone
+    prox = {}
+    # supports/resistances
+    sr_levels = []
+    sr_levels.extend(levels.get('supports', []))
+    sr_levels.extend(levels.get('resistances', []))
+    p = level_proximity_score(price, sr_levels)
+    prox['sr_prox'] = p
+    # vwap
+    vwap = levels.get('vwap50')
+    if vwap is not None and not math.isnan(vwap):
+        prox['vwap_prox'] = abs(price - vwap) / (vwap + 1e-9)
+    else:
+        prox['vwap_prox'] = None
+    # order block zone: distance to zone edges, normalized by price
+    ob = levels.get('order_block')
+    if ob:
+        high = ob.get('high'); low = ob.get('low')
+        if low <= price <= high:
+            prox['orderblock_prox'] = 0.0
+        else:
+            dist = min(abs(price - low), abs(price - high)) / (price + 1e-9)
+            prox['orderblock_prox'] = dist
+    else:
+        prox['orderblock_prox'] = None
+    # imbalance presence
+    prox['has_imbalance'] = bool(levels.get('imbalance'))
+    return prox
+
+# -------------------------
+# ANALYZE SYMBOL (main)
+# -------------------------
+def analyze_symbol(symbol, interval='5m'):
     try:
         df = get_klines_df(symbol, interval, limit=EMA_SCAN_LIMIT)
-        if df is None or len(df) < 60:
+        if df is None or len(df) < 50:
             return None
         df = apply_indicators(df)
-        latest = df.iloc[-1]
-        base_signal = generate_signal_from_row(latest)
-        hist = backtest_pattern(df, lookahead=BACKTEST_LOOKAHEAD)
-        hist_stats = None
-        if hist and base_signal in hist:
-            hist_stats = hist[base_signal]
+        # compute levels (swing levels, vwap50, orderblock, imbalance)
+        levels = compute_swing_levels(df, lookback=200)
+        levels['vwap50'] = df['vwap50'].iloc[-1] if 'vwap50' in df.columns else None
+        ob = detect_order_block(df, lookback=ORDER_BLOCK_LOOKBACK)
+        levels['order_block'] = ob
+        imb = detect_imbalance(df)
+        levels['imbalance'] = imb
 
-        # model
+        # pattern detectors
+        ema_cross = detect_ema_crossover(df)
+        bb = detect_bollinger_breakout(df)
+        macd = detect_macd_signal(df)
+        rsi_flip = detect_rsi_flip(df)
+
+        patterns = {
+            'ema_cross': ema_cross,
+            'bb': bb,
+            'macd': macd,
+            'rsi': rsi_flip
+        }
+
+        # backtest hist
+        hist = None
+        try:
+            hist = backtest_pattern(df, lookahead=BACKTEST_LOOKAHEAD)
+        except Exception:
+            hist = None
+
+        # ML
         model, acc = train_or_load_model(symbol, df, lookahead=BACKTEST_LOOKAHEAD)
         ml_prob = None
         if model is not None:
@@ -749,139 +599,158 @@ def analyze_symbol(symbol, interval='1h'):
             features = ['ATR_10','ATR_50','RSI','MACD_hist','ret1','ret5','vol_change','ema8_21_diff','ema21_50_diff']
             X_row = pd.DataFrame([feat_row[features].values], columns=features)
             ml_prob = float(model.predict_proba(X_row)[0][1])
-            # store model acc to state for SRI computation
+            # store model accuracy for SRI
             key = f"{symbol}_{interval}"
             state.setdefault('models', {})[key] = {"acc": float(acc), "trained_at": str(datetime.utcnow())}
             save_json_safe(STATE_FILE, state)
+        else:
+            acc = None
 
-        vol_spike = False
-        if latest['volume'] > (latest['vol_ma_20'] * VOLUME_MULTIPLIER_THRESHOLD):
-            vol_spike = True
+        # volume spike
+        latest = df.iloc[-1]
+        vol_spike = bool(latest['volume'] > (df['volume'].iloc[-20:].mean() * VOLUME_SPIKE_MULTIPLIER))
 
-        # new detectors
-        ema_cross = detect_ema_crossover(df, short='ema_8', long='ema_21')
-        bb = detect_bollinger_breakout(df)
-        rsi = detect_rsi_flip(df)
-        macd = detect_macd_signal(df)
-        ma50 = detect_ma50_200_cross(df)
-        adx = detect_adx(df)
-        stoch = detect_stochrsi(df)
-        obv_div = detect_obv_divergence(df)
-        cci = detect_cci(df)
-        atr_b = detect_atr_breakout(df)
-        ha_trend = detect_heikin_ashi_trend(df)
-        pivot_probe = detect_pivot_probe(df)
+        # pre-top / pump/dump
+        pre_top = detect_pre_top(df)
+        pumpdump = None
+        prev = df.iloc[-2]; move = (latest['close'] - prev['close']) / (prev['close'] + 1e-9)
+        if move > PUMP_MOVE_THRESHOLD and vol_spike:
+            pumpdump = {'type': 'PUMP_ALERT', 'move': move}
+        elif move < DUMP_MOVE_THRESHOLD and vol_spike:
+            pumpdump = {'type': 'DUMP_ALERT', 'move': move}
 
-        patterns = {
-            'ema_cross': ema_cross,
-            'bb': bb,
-            'rsi': rsi,
-            'macd': macd,
-            'ma50': ma50,
-            'adx': adx,
-            'stoch': stoch,
-            'obv_div': obv_div,
-            'cci': cci,
-            'atr': atr_b,
-            'ha': ha_trend,
-            'pivot': pivot_probe
-        }
+        # level proximity info
+        prox = find_nearby_level_info(df, levels)
+        # compute a normalized "level proximity" in 0..1 where 1 means very close (we invert dist)
+        level_prox = None
+        if prox.get('sr_prox') is not None:
+            level_prox = max(0.0, 1.0 - prox['sr_prox'] / LEVEL_PROXIMITY_PCT)  # >0 when within threshold
+            level_prox = float(min(1.0, max(0.0, level_prox)))  # clamp
+        # if order block inside zone -> strong proximity
+        if prox.get('orderblock_prox') == 0.0:
+            level_prox = max(level_prox or 0.0, 0.9)
 
         # compute SRI
         sri = compute_sri(symbol, interval)
 
-        # compute confidence
-        conf = compute_confidence(hist_stats, ml_prob, acc, vol_spike, patterns, sri)
+        # compute smart score
+        smart_score = compute_smart_score(symbol, interval, ml_prob, patterns, (1 - level_prox) if level_prox is not None else None, vol_spike, sri)
 
-        # determine final signal
+        # determine final signal direction: prefer base_signal (generate_signal_from_row) but also allow pattern majority
+        base_sig = generate_signal_from_row(latest)  # from earlier logic (donchian/atr/macd/rsi)
+        pattern_dirs = []
+        for v in patterns.values():
+            d = direction_from_signal(v)
+            if d: pattern_dirs.append(d)
+        ml_dir = 'LONG' if (ml_prob or 0) >= 0.5 else 'SHORT'
+        # trend filter: prefer not to send LONG in strong downtrend (ema50 < ema200)
+        trend = 'UP' if latest['ema_50'] > latest['ema_200'] else 'DOWN'
         final_signal = None
-        if base_signal:
-            if hist_stats and hist_stats['count'] >= MIN_TRADES_FOR_STATS and hist_stats['win_rate'] < HIST_WINRATE_THRESHOLD:
-                final_signal = "ANTI_"+("SHORT" if base_signal=="LONG" else "LONG")
-            else:
-                final_signal = base_signal
-        else:
-            # majority among patterns
-            dirs = []
-            for v in patterns.values():
-                d = direction_from_signal(v)
-                if d:
-                    dirs.append(d)
-            if dirs:
-                if dirs.count('LONG') > dirs.count('SHORT'):
-                    final_signal = "LONG" if conf >= 0.2 else None
-                elif dirs.count('SHORT') > dirs.count('LONG'):
-                    final_signal = "SHORT" if conf >= 0.2 else None
-                else:
-                    final_signal = None
+        # priority: pre_top (short) and pumpdump (pump/dump alerts)
+        meta_alert = None
+        if pumpdump:
+            meta_alert = pumpdump
+        if pre_top:
+            meta_alert = pre_top
 
-        # build pattern summary for output
+        if meta_alert:
+            # meta alerts are always reported (but with their own confidence)
+            final_signal = 'SHORT' if meta_alert.get('type','').startswith('PRE_TOP') or meta_alert.get('type','')=='DUMP_ALERT' else 'LONG'
+            conf = meta_alert.get('confidence', 0.6) if isinstance(meta_alert, dict) else 0.6
+            label = strength_label(conf)
+            text = f"🚨 *{meta_alert.get('type')}*\nSymbol: `{symbol}`\nInterval: `{interval}`\nSignal: *{final_signal}* ({label})\nPrice: `{latest['close']}`\nConfidence: `{conf:.2f}`\nTime: `{df.index[-1]}`"
+            if prox.get('orderblock_prox') == 0.0:
+                text += "\n📦 Orderblock zone"
+            if levels.get('supports') or levels.get('resistances'):
+                text += f"\n🔘 Levels nearby: supports={len(levels.get('supports',[]))} resistances={len(levels.get('resistances',[]))}"
+            send_telegram_message(text)
+            # store state quickly
+            state.setdefault('signals', {})[f"{symbol}_{interval}"] = final_signal
+            save_json_safe(STATE_FILE, state)
+            return {'symbol': symbol, 'type': meta_alert.get('type'), 'final_signal': final_signal, 'confidence': conf}
+
+        # Otherwise use smart_score and pattern/ML consensus
+        # require at least minimal smart_score to alert
+        if smart_score < MIN_CONFIDENCE_FOR_ALERT:
+            return None
+
+        # Decide direction: combine base_sig, pattern majority, ml_dir
+        directions = []
+        if base_sig: directions.append(base_sig)
+        directions.extend(pattern_dirs)
+        directions.append(ml_dir)
+        # majority
+        if directions:
+            final = max(set(directions), key=directions.count)
+            # block LONGs in downtrend unless very strong smart_score
+            if final == 'LONG' and trend == 'DOWN' and smart_score < 0.7:
+                return None
+            final_signal = final
+        else:
+            final_signal = ml_dir
+
+        label = strength_label(smart_score)
         patt_list = [v for v in patterns.values() if v]
+        text = (f"⚡ *Smart-Level Alert*\nSymbol: `{symbol}`\nInterval: `{interval}`\nSignal: *{final_signal}* ({label})\n"
+                f"Price: `{latest['close']}`\nSmartScore: `{smart_score:.2f}`\nSRI: `{sri:.2f}`\nTime: `{df.index[-1]}`")
+        if ml_prob is not None:
+            text += f"\n🤖 ML ProbUp: `{ml_prob:.2f}` | ML Acc: `{acc or 0:.2f}`"
+        if vol_spike:
+            text += "\n📈 Volume spike"
+        if patt_list:
+            text += f"\n🧩 Patterns: {', '.join(patt_list)}"
+        # show nearby levels summary
+        if levels.get('resistances'):
+            top_res = levels['resistances'][:3]
+            text += f"\n🔺 Resistances (top3): {', '.join([str(round(x,6)) for x in top_res])}"
+        if levels.get('supports'):
+            top_sup = levels['supports'][:3]
+            text += f"\n🔻 Supports (top3): {', '.join([str(round(x,6)) for x in top_sup])}"
+        if prox.get('orderblock_prox') == 0.0:
+            text += "\n📦 Inside OrderBlock zone"
+        if prox.get('has_imbalance'):
+            text += "\n⚖️ Imbalance detected (recent large candle)"
+        send_telegram_message(text)
+
+        # persist
+        key = f"{symbol}_{interval}"
+        state.setdefault('signals', {})[key] = final_signal
+        history = state.setdefault('signal_history', {}).setdefault(symbol, [])
+        history.append({'time': str(df.index[-1]), 'interval': interval, 'signal': final_signal, 'score': smart_score})
+        if len(history) > 300: state['signal_history'][symbol] = history[-300:]
+        save_json_safe(STATE_FILE, state)
 
         return {
-            'symbol': symbol,
-            'interval': interval,
-            'base_signal': base_signal,
-            'final_signal': final_signal,
-            'hist_stats': hist_stats,
-            'ml_prob': ml_prob,
-            'ml_acc': acc,
-            'vol_spike': vol_spike,
-            'patterns': patterns,
-            'pattern_list': patt_list,
-            'confidence': conf,
-            'sri': sri,
-            'last_price': float(latest['close']),
-            'timestamp': str(df.index[-1])
+            'symbol': symbol, 'final_signal': final_signal, 'smart_score': smart_score, 'patterns': patterns, 'levels': levels
         }
+
     except Exception as e:
         logging.exception("analyze_symbol error %s: %s", symbol, e)
     return None
 
 # -------------------------
-# EMA SCAN & MONITOR (uses enhanced analyze_symbol outputs)
+# EMA SCAN ALL (parallel)
 # -------------------------
 def ema_scan_all(interval='5m'):
-    logging.info("Starting EMA scan for all symbols (interval=%s)...", interval)
+    logging.info("Starting full smart-level scan (interval=%s)...", interval)
     symbols = get_all_usdt_symbols()
     results = []
-    max_workers = PARALLEL_WORKERS
-    with ThreadPoolExecutor(max_workers=max_workers) as exe:
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
         futures = {exe.submit(analyze_symbol, s, interval): s for s in symbols}
         for fut in as_completed(futures):
             s = futures[fut]
             try:
                 res = fut.result()
-                if res and res.get('confidence', 0) >= 0.2:
+                if res:
                     results.append(res)
             except Exception as e:
                 logging.exception("Future error for %s: %s", s, e)
-    logging.info("EMA scan finished, hits=%d", len(results))
-    if results:
-        results_sorted = sorted(results, key=lambda x: x['confidence'], reverse=True)[:80]
-        for r in results_sorted:
-            key = f"{r['symbol']}_{interval}"
-            stats_entry = ema_stats.get(key)
-            if not stats_entry:
-                stats_entry = ensure_ema_stats_for_symbol(r['symbol'], interval=interval, force_recompute=False)
-            label = strength_label(r['confidence'])
-            text = f"*EMA Alert* 🔔\nSymbol: `{r['symbol']}`\nInterval: `{r['interval']}`\nEvent: *{r['final_signal'] or 'WATCH'}* ({label})\nPrice: `{r['last_price']}`\nConfidence: `{r['confidence']:.2f}`\nSRI: `{r['sri']:.2f}`\nTime: `{r['timestamp']}`"
-            if r['ml_prob'] is not None:
-                text += f"\n🤖 ML ProbUp: `{r['ml_prob']:.2f}` | ML Acc: `{r['ml_acc']:.2f}`"
-            if r['vol_spike']:
-                text += "\n📈 Volume spike detected"
-            if r.get('pattern_list'):
-                text += f"\n🧩 Patterns: {', '.join(r['pattern_list'])}"
-            if stats_entry and 'stats' in stats_entry:
-                g = stats_entry['stats'].get('golden')
-                d = stats_entry['stats'].get('death')
-                if g and g['count'] > 0:
-                    text += f"\n📊 Golden Cross history: count={g['count']} winrate={g['win_rate']*100:.1f}% avg_ret={g['avg_return']*100:.2f}%"
-                if d and d['count'] > 0:
-                    text += f"\n📊 Death Cross history: count={d['count']} winrate={d['win_rate']*100:.1f}% avg_ret={d['avg_return']*100:.2f}%"
-            send_telegram_message(text)
-            safe_sleep(0.12)
+    logging.info("Scan finished. hits=%d", len(results))
+    return results
 
+# -------------------------
+# Monitor top symbols (detailed)
+# -------------------------
 def monitor_top_symbols():
     logging.info("Start detailed monitor for top symbols")
     symbols = get_top_symbols_by_volume(limit=60)
@@ -896,41 +765,44 @@ def monitor_top_symbols():
             try:
                 res = fut.result()
                 if res:
-                    conf = res.get('confidence', 0)
-                    ml_prob = res.get('ml_prob')
-                    should_alert = False
-                    if res.get('final_signal') and (conf >= 0.45 or (ml_prob and ml_prob >= ML_PROB_THRESHOLD and res.get('ml_acc',0) >= 0.55)):
-                        should_alert = True
-                    key = f"{res['symbol']}_{res['interval']}"
-                    prev = state.get('signals', {}).get(key)
-                    if should_alert and prev != res['final_signal']:
-                        hist = res.get('hist_stats')
-                        hist_text = ""
-                        if hist:
-                            hist_text = f"\n📊 History: WinRate {hist['win_rate']*100:.1f}% | Avg {hist['mean_return']*100:.2f}% | Trades {hist['count']}"
-                        ml_text = ""
-                        if res.get('ml_prob') is not None:
-                            ml_text = f"\n🤖 ML ProbUp: {res['ml_prob']:.2f} | ML Acc: {res['ml_acc']:.2f}"
-                        vol_text = "\n📈 Volume spike" if res.get('vol_spike') else ""
-                        patt = res.get('pattern_list', [])
-                        patt_text = f"\n🧩 Patterns: {', '.join(patt)}" if patt else ""
-                        label = strength_label(res.get('confidence',0))
-                        msg = f"⚡ *Signal*\nSymbol: `{res['symbol']}`\nInterval: `{res['interval']}`\nSignal: *{res['final_signal']}* ({label})\nPrice: `{res['last_price']}`\nConfidence: `{res['confidence']:.2f}`{hist_text}{ml_text}{vol_text}{patt_text}\nSRI: `{res.get('sri',0):.2f}`\nTime: `{res['timestamp']}`"
-                        send_telegram_message(msg)
-                        state.setdefault('signals', {})[key] = res['final_signal']
-                        state.setdefault('last_seen', {})[key] = {'time': res['timestamp'], 'price': res['last_price']}
-                        # keep limited signal history for symbol (for future analytics)
-                        hist_key = res['symbol']
-                        history = state.setdefault('signal_history', {}).setdefault(hist_key, [])
-                        history.append({'time': res['timestamp'], 'interval': res['interval'], 'signal': res['final_signal'], 'confidence': res['confidence']})
-                        # cap history length
-                        if len(history) > 200:
-                            state['signal_history'][hist_key] = history[-200:]
-                        save_json_safe(STATE_FILE, state)
                     results.append(res)
             except Exception as e:
                 logging.exception("monitor future error: %s", e)
     logging.info("Detailed monitor done, processed=%d", len(results))
+    return results
+
+# -------------------------
+# BACKGROUND WARMUP OF MODELS & EMA STATS
+# -------------------------
+def compute_and_save_ema_stats(symbols, intervals=['5m','1h']):
+    for s in symbols:
+        for intr in intervals:
+            try:
+                df = get_klines_df(s, intr, limit=EMA_SCAN_LIMIT)
+                if df is None: continue
+                stats = compute_ema_historical_stats(df, short_col='ema_8', long_col='ema_21', lookahead=BACKTEST_LOOKAHEAD)
+                key = f"{s}_{intr}"
+                ema_stats[key] = {'computed_at': str(datetime.utcnow()), 'stats': stats}
+                save_json_safe(EMA_STATS_FILE, ema_stats)
+                time.sleep(0.2)
+            except Exception as e:
+                logging.exception("ema stats compute error %s %s", s, intr)
+def warmup_models_and_stats():
+    logging.info("Warmup models and EMA stats")
+    symbols = get_top_symbols_by_volume(limit=30)
+    for s in symbols:
+        try:
+            df = get_klines_df(s, '1h', limit=800)
+            if df is None: continue
+            train_or_load_model(s, df, lookahead=BACKTEST_LOOKAHEAD)
+            time.sleep(0.2)
+        except Exception as e:
+            logging.exception("warmup error for %s: %s", s, e)
+    compute_and_save_ema_stats(symbols, intervals=['5m','1h'])
+
+import threading
+t = threading.Thread(target=warmup_models_and_stats, daemon=True)
+t.start()
 
 # -------------------------
 # SCHEDULER
@@ -950,57 +822,26 @@ def home():
 @app.route('/scan_now')
 def scan_now():
     try:
-        ema_scan_all(interval='5m')
-        monitor_top_symbols()
-        return jsonify({"status": "scanned"})
+        r1 = ema_scan_all(interval='5m')
+        r2 = monitor_top_symbols()
+        return jsonify({"scanned": len(r1) + len(r2)})
     except Exception as e:
         logging.exception("scan_now error: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/status')
 def status():
-    out = {
-        "state": state,
-        "ema_stats_summary_count": len(ema_stats),
-        "time": str(datetime.utcnow())
-    }
+    out = {"state": state, "ema_stats_count": len(ema_stats), "time": str(datetime.utcnow())}
     return jsonify(out)
-
-# -------------------------
-# BOOTSTRAP
-# -------------------------
-def warmup_models_and_stats():
-    logging.info("Warmup models and EMA stats for top symbols")
-    symbols = get_top_symbols_by_volume(limit=30)
-    for s in symbols:
-        try:
-            df = get_klines_df(s, '1h', limit=800)
-            if df is None:
-                continue
-            model, acc = train_or_load_model(s, df, lookahead=BACKTEST_LOOKAHEAD)
-            # save model acc in state for sri calc
-            if model is not None:
-                key = f"{s}_1h"
-                state.setdefault('models', {})[key] = {"acc": acc, "trained_at": str(datetime.utcnow())}
-                save_json_safe(STATE_FILE, state)
-            ensure_ema_stats_for_symbol(s, interval='5m', force_recompute=False)
-            ensure_ema_stats_for_symbol(s, interval='1h', force_recompute=False)
-            safe_sleep(0.5 + random.random()*0.5)
-        except Exception as e:
-            logging.exception("warmup error for %s: %s", s, e)
-
-import threading
-t = threading.Thread(target=warmup_models_and_stats, daemon=True)
-t.start()
 
 # -------------------------
 # MAIN
 # -------------------------
 if __name__ == "__main__":
-    logging.info("Starting AI Futures/Signals Bot (enhanced)")
+    logging.info("Starting Smart-Money Analyzer Bot")
     try:
         ema_scan_all(interval='5m')
     except Exception as e:
-        logging.exception("Initial ema_scan failed: %s", e)
+        logging.exception("Initial scan failed: %s", e)
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
