@@ -4,7 +4,7 @@ import aiohttp
 import numpy as np
 from flask import Flask, request
 from aiogram import Bot, Dispatcher, types
-import rss-parser
+import xml.etree.ElementTree as ET
 
 # --- Environment Variables ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -20,9 +20,20 @@ app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-dp.startup.register(lambda _: bot)  # реєстрація бота в dispatcher
+# --- Helper: Async RSS Fetch ---
+async def fetch_rss_items(url, limit=5):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            text = await resp.text()
+    root = ET.fromstring(text)
+    items = []
+    for item in root.findall(".//item")[:limit]:
+        title = item.find("title").text if item.find("title") is not None else ""
+        description = item.find("description").text if item.find("description") is not None else ""
+        items.append(title + " " + description)
+    return items
 
-# --- Live Market Bot with Social & Agents ---
+# --- Live Market Bot ---
 class LiveMarketBot:
     def __init__(self, symbols=["BTCUSDT","ETHUSDT","BNBUSDT"], depth=20,
                  rss_urls=None, twitter_rss_urls=None):
@@ -53,20 +64,13 @@ class LiveMarketBot:
 
     async def fetch_social_signal(self):
         sentiment_score = 0
-        # Telegram RSS
-        for url in self.rss_urls:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
-                text = entry.title + " " + getattr(entry, 'summary', '')
+        urls = self.rss_urls + self.twitter_rss_urls
+        for url in urls:
+            texts = await fetch_rss_items(url)
+            for text in texts:
                 sentiment_score += self.analyze_sentiment(text)
-        # Twitter RSS
-        for url in self.twitter_rss_urls:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
-                text = entry.title + " " + getattr(entry, 'summary', '')
-                sentiment_score += self.analyze_sentiment(text)
-        total_sources = len(self.rss_urls) + len(self.twitter_rss_urls)
-        self.social_signal = max(min(sentiment_score / total_sources, 1), -1)
+        total_sources = len(urls)
+        self.social_signal = max(min(sentiment_score / max(total_sources,1), 1), -1)
 
     def analyze_sentiment(self, text):
         fomo_keywords = ["pump", "moon", "bullish", "rise"]
@@ -162,7 +166,8 @@ async def highlow_handler(message: types.Message):
 # --- Flask Webhook ---
 @app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
 async def webhook():
-    update = types.Update.de_json(await request.get_json())
+    data = await request.get_json()
+    update = types.Update(**data)
     await dp.process_update(update)
     return "OK"
 
