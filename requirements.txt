@@ -28,5 +28,5 @@ python-binance
 joblib
 gunicorn
 ta
-aiogram
+aiogram==2.25.1
 feedparser==6.0.10
