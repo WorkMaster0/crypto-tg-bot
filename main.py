@@ -4,7 +4,7 @@ import aiohttp
 import numpy as np
 from flask import Flask, request
 from aiogram import Bot, Dispatcher, types
-import feedparser
+import rss-parser
 
 # --- Environment Variables ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
