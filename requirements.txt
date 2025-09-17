@@ -30,3 +30,4 @@ gunicorn
 ta
 aiogram
 lightgbm
+mplfinance
