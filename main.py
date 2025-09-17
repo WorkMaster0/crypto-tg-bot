@@ -3,12 +3,9 @@ import asyncio
 import aiohttp
 import numpy as np
 from flask import Flask, request
-from aiogram import Dispatcher, types
-from aiogram.client.bot import Bot
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.client.defaults import DefaultBotProperties
-import xml.etree.ElementTree as ET
+from aiogram import Bot, Dispatcher, types
 import json
+import xml.etree.ElementTree as ET
 
 # --- Environment Variables ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -21,11 +18,7 @@ WEBHOOK_FULL_URL = WEBHOOK_URL + WEBHOOK_PATH
 app = Flask(__name__)
 
 # --- Telegram Bot ---
-bot = Bot(
-    token=TELEGRAM_TOKEN,
-    session=AiohttpSession(),
-    default=DefaultBotProperties(parse_mode="HTML")
-)
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode=types.ParseMode.HTML)
 dp = Dispatcher()
 
 # --- Safe JSON ---
