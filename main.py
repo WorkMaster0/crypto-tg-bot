@@ -12,7 +12,6 @@ from binance.client import Client
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-CHAT_ID = None  # будемо встановлювати після /start
 
 RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "dex-tg-bot.onrender.com")
 WEBHOOK_URL = f"https://{RENDER_HOSTNAME}/{TELEGRAM_TOKEN}"
@@ -108,8 +107,8 @@ def format_signal(sig, tag="Market"):
 
 # === Scheduler jobs ===
 def scan_symbols():
-    global CHAT_ID
-    if CHAT_ID is None:
+    chat_id = app.config.get('CHAT_ID')
+    if not chat_id:
         logging.warning("CHAT_ID not set. Skipping sending signals.")
         return
 
@@ -120,7 +119,7 @@ def scan_symbols():
         sig = detect_signal(df, sym, "15m")
         if sig and sig["confidence"] >= 0.5:
             msg = format_signal(sig, "Market")
-            send_telegram_message(CHAT_ID, msg)
+            send_telegram_message(chat_id, msg)
             logging.info(f"Signal sent: {sig}")
 
 scheduler.add_job(scan_symbols, "interval", minutes=5)
@@ -128,7 +127,6 @@ scheduler.add_job(scan_symbols, "interval", minutes=5)
 # === Webhook ===
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    global CHAT_ID
     update = request.get_json()
     logging.info(f"Incoming update: {update}")
     if "message" in update:
@@ -137,7 +135,7 @@ def telegram_webhook():
 
         text = update["message"].get("text", "")
         if text.lower() == "/start":
-            CHAT_ID = chat_id
+            app.config['CHAT_ID'] = chat_id  # <-- thread-safe
             send_telegram_message(chat_id, "✅ Bot is running!\nSignals will be delivered here.")
     return "ok", 200
 
