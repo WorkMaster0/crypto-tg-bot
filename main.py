@@ -10,11 +10,12 @@ from binance.client import Client
 
 # === CONFIG ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+CHAT_ID = None  # будемо встановлювати після /start
 
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'dex-tg-bot.onrender.com')}/{TELEGRAM_TOKEN}"
+RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "dex-tg-bot.onrender.com")
+WEBHOOK_URL = f"https://{RENDER_HOSTNAME}/{TELEGRAM_TOKEN}"
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # === INIT ===
@@ -35,11 +36,13 @@ def set_webhook():
 
 def send_telegram_message(chat_id, text):
     url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": text}
     try:
         resp = requests.post(url, json=payload)
         if resp.status_code != 200:
             logging.error(f"Telegram error: {resp.text}")
+        else:
+            logging.info(f"Message sent to chat_id: {chat_id}")
     except Exception as e:
         logging.error(f"Send message error: {e}")
 
@@ -94,52 +97,22 @@ def detect_signal(df, symbol, interval="15m"):
 
 def format_signal(sig, tag="Market"):
     return (
-        f"⚡ *{tag} Signal*\n"
-        f"Symbol: `{sig['symbol']}`\n"
-        f"Interval: `{sig['interval']}`\n"
-        f"Signal: *{sig['signal']}*\n"
-        f"Price: `{sig['price']}`\n"
-        f"Confidence: `{sig['confidence']}`\n"
-        f"Time: `{datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}`"
-    )
-
-# === Copy Trading Simulation ===
-def generate_copy_trading_signal():
-    top_traders = [
-        {"name": "WhaleHunter", "winrate": 0.95},
-        {"name": "ScalpKing", "winrate": 0.94},
-        {"name": "AlphaWolf", "winrate": 0.96},
-    ]
-    trader = np.random.choice(top_traders)
-    if trader["winrate"] < 0.93:
-        return None
-
-    symbols = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT"]
-    symbol = np.random.choice(symbols)
-    side = np.random.choice(["LONG","SHORT"])
-    price = fetch_klines(symbol, "15m", 5)["close"].iloc[-1]
-
-    return {
-        "symbol": symbol,
-        "interval": "15m",
-        "signal": side,
-        "price": price,
-        "confidence": round(trader["winrate"], 2),
-        "trader": trader["name"]
-    }
-
-def format_copy_signal(sig):
-    return (
-        f"👥 *Copy Trading Alert*\n"
-        f"Trader: `{sig['trader']}` (Winrate: {int(sig['confidence']*100)}%)\n"
-        f"Symbol: `{sig['symbol']}`\n"
-        f"Action: *{sig['signal']}*\n"
-        f"Price: `{sig['price']}`\n"
-        f"Time: `{datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}`"
+        f"⚡ {tag} Signal\n"
+        f"Symbol: {sig['symbol']}\n"
+        f"Interval: {sig['interval']}\n"
+        f"Signal: {sig['signal']}\n"
+        f"Price: {sig['price']}\n"
+        f"Confidence: {sig['confidence']}\n"
+        f"Time: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
 # === Scheduler jobs ===
 def scan_symbols():
+    global CHAT_ID
+    if CHAT_ID is None:
+        logging.warning("CHAT_ID not set. Skipping sending signals.")
+        return
+
     logging.info("Scanning symbols...")
     top_symbols = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT"]
     for sym in top_symbols:
@@ -150,25 +123,21 @@ def scan_symbols():
             send_telegram_message(CHAT_ID, msg)
             logging.info(f"Signal sent: {sig}")
 
-def scan_copy_trading():
-    sig = generate_copy_trading_signal()
-    if sig:
-        msg = format_copy_signal(sig)
-        send_telegram_message(CHAT_ID, msg)
-        logging.info(f"Copy trading signal sent: {sig}")
-
 scheduler.add_job(scan_symbols, "interval", minutes=5)
-scheduler.add_job(scan_copy_trading, "interval", minutes=7)
 
 # === Webhook ===
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
+    global CHAT_ID
     update = request.get_json()
     logging.info(f"Incoming update: {update}")
     if "message" in update:
         chat_id = update["message"]["chat"]["id"]
+        logging.info(f"Detected chat_id: {chat_id}")
+
         text = update["message"].get("text", "")
         if text.lower() == "/start":
+            CHAT_ID = chat_id
             send_telegram_message(chat_id, "✅ Bot is running!\nSignals will be delivered here.")
     return "ok", 200
 
