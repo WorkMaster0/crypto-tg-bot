@@ -1,4 +1,4 @@
-# main_pro.py — Професійний універсальний pre-top бот з покращеними сигналами
+# main_pro_fixed.py — Професійний універсальний pre-top бот з покращеними сигналами
 
 import os
 import time
@@ -41,7 +41,6 @@ LOG_FILE = "bot.log"
 
 CONF_THRESHOLD_MEDIUM = 0.45
 CONF_THRESHOLD_STRONG = 0.65
-MIN_FEATURES_TO_SIGNAL = 3
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -65,7 +64,7 @@ app = Flask(__name__)
 def load_json_safe(path, default):
     try:
         if os.path.exists(path):
-            with open(path,"r") as f:
+            with open(path, "r") as f:
                 return json.load(f)
     except Exception as e:
         logger.exception("load_json_safe error %s: %s", path, e)
@@ -74,9 +73,9 @@ def load_json_safe(path, default):
 def save_json_safe(path, data):
     try:
         tmp = path + ".tmp"
-        with open(tmp,"w") as f:
-            json.dump(data,f,indent=2,default=str)
-        os.replace(tmp,path)
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        os.replace(tmp, path)
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
@@ -85,26 +84,28 @@ state = load_json_safe(STATE_FILE, {"signals": {}, "last_scan": None, "signal_hi
 # ---------------- TELEGRAM ----------------
 MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
 
-def escape_md_v2(text:str)->str:
+def escape_md_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
 
-def send_telegram(text:str):
-    if not TELEGRAM_TOKEN or not CHAT_ID: return
+def send_telegram(text: str):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
     try:
         payload = {
             "chat_id": CHAT_ID,
             "text": escape_md_v2(text),
-            "parse_mode":"MarkdownV2",
+            "parse_mode": "MarkdownV2",
             "disable_web_page_preview": True
         }
         r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
-        if r.status_code!=200:
+        if r.status_code != 200:
             logger.error("Telegram send failed: %s %s", r.status_code, r.text)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
-def set_telegram_webhook(webhook_url:str):
-    if not TELEGRAM_TOKEN or not webhook_url: return
+def set_telegram_webhook(webhook_url: str):
+    if not TELEGRAM_TOKEN or not webhook_url:
+        return
     try:
         resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", json={"url": webhook_url}, timeout=10)
         logger.info("setWebhook resp: %s", resp.text if resp else "None")
@@ -113,20 +114,22 @@ def set_telegram_webhook(webhook_url:str):
 
 # ---------------- MARKET DATA ----------------
 def get_all_usdt_symbols():
-    if not client: return []
+    if not client:
+        return []
     try:
         ex = client.get_exchange_info()
-        return [s["symbol"] for s in ex["symbols"] if s["quoteAsset"]=="USDT" and s["status"]=="TRADING"]
+        return [s["symbol"] for s in ex["symbols"] if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
         return []
 
 def get_top_symbols(limit=TOP_LIMIT):
-    if not client: return []
+    if not client:
+        return []
     try:
         tickers = client.get_ticker()
         usdt = [t for t in tickers if t["symbol"].endswith("USDT")]
-        sorted_t = sorted(usdt,key=lambda x: float(x.get("quoteVolume",0)),reverse=True)
+        sorted_t = sorted(usdt, key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
         return [t["symbol"] for t in sorted_t[:limit]]
     except Exception as e:
         logger.exception("get_top_symbols error: %s", e)
@@ -135,111 +138,138 @@ def get_top_symbols(limit=TOP_LIMIT):
 def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
     for attempt in range(3):
         try:
-            if not client: raise RuntimeError("Binance client unavailable")
+            if not client:
+                raise RuntimeError("Binance client unavailable")
             kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            df = pd.DataFrame(kl, columns=["open_time","open","high","low","close","volume","close_time","qav","num_trades","tb_base","tb_quote","ignore"])
-            df = df[["open_time","open","high","low","close","volume"]].astype(float)
-            df["open_time"] = pd.to_datetime(df["open_time"],unit="ms",utc=True)
+            df = pd.DataFrame(kl, columns=["open_time", "open", "high", "low", "close", "volume",
+                                           "close_time", "qav", "num_trades", "tb_base", "tb_quote", "ignore"])
+            df = df[["open_time", "open", "high", "low", "close", "volume"]].astype(float)
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df.set_index("open_time", inplace=True)
             return df
         except Exception as e:
-            logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt+1, e)
+            logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt + 1, e)
             time.sleep(0.5)
     return None
 
 # ---------------- FEATURE ENGINEERING ----------------
-def apply_all_features(df:pd.DataFrame)->pd.DataFrame:
+def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     try:
         # Returns
         df["ret1"] = df["close"].pct_change(1)
         df["ret5"] = df["close"].pct_change(5)
         # EMAs/SMA
-        df["ema_8"] = ta.trend.EMAIndicator(df["close"],8).ema_indicator()
-        df["ema_20"] = ta.trend.EMAIndicator(df["close"],20).ema_indicator()
-        df["ema_50"] = ta.trend.EMAIndicator(df["close"],50).ema_indicator()
+        df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
+        df["ema_20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
+        df["ema_50"] = ta.trend.EMAIndicator(df["close"], 50).ema_indicator()
         df["sma_50"] = df["close"].rolling(50).mean()
         # ATR
-        df["ATR_14"] = ta.volatility.AverageTrueRange(df["high"],df["low"],df["close"],14).average_true_range()
+        df["ATR_14"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range()
         # RSI/StochRSI
-        df["RSI_14"] = ta.momentum.RSIIndicator(df["close"],14).rsi()
-        stoch = ta.momentum.StochRSIIndicator(df["close"],14,3,3)
+        df["RSI_14"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
+        stoch = ta.momentum.StochRSIIndicator(df["close"], 14, 3, 3)
         df["stoch_k"] = stoch.stochrsi_k()
         df["stoch_d"] = stoch.stochrsi_d()
         # MACD
         macd = ta.trend.MACD(df["close"])
-        df["MACD"] = macd.macd(); df["MACD_signal"]=macd.macd_signal(); df["MACD_hist"]=macd.macd_diff()
+        df["MACD"] = macd.macd()
+        df["MACD_signal"] = macd.macd_signal()
+        df["MACD_hist"] = macd.macd_diff()
         # ADX
-        adx = ta.trend.ADXIndicator(df["high"],df["low"],df["close"],14)
-        df["ADX"]=adx.adx(); df["ADX_pos"]=adx.adx_pos(); df["ADX_neg"]=adx.adx_neg()
+        adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], 14)
+        df["ADX"] = adx.adx()
+        df["ADX_pos"] = adx.adx_pos()
+        df["ADX_neg"] = adx.adx_neg()
         # Bollinger
-        bb = ta.volatility.BollingerBands(df["close"],20,2)
-        df["bb_h"]=bb.bollinger_hband(); df["bb_l"]=bb.bollinger_lband(); df["bb_width"]=(df["bb_h"]-df["bb_l"])/df["bb_l"].replace(0,np.nan)
+        bb = ta.volatility.BollingerBands(df["close"], 20, 2)
+        df["bb_h"] = bb.bollinger_hband()
+        df["bb_l"] = bb.bollinger_lband()
+        df["bb_width"] = (df["bb_h"] - df["bb_l"]) / df["bb_l"].replace(0, np.nan)
         # VWAP
-        pv = df["close"]*df["volume"]
-        df["vwap_50"] = (pv.rolling(50).sum()/df["volume"].rolling(50).sum()).replace([np.inf,-np.inf],np.nan)
+        pv = df["close"] * df["volume"]
+        df["vwap_50"] = (pv.rolling(50).sum() / df["volume"].rolling(50).sum()).replace([np.inf, -np.inf], np.nan)
         # OBV
-        df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["close"],df["volume"]).on_balance_volume()
+        df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()
         # CCI
-        df["CCI"] = ta.trend.CCIIndicator(df["high"],df["low"],df["close"],20).cci()
+        df["CCI"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], 20).cci()
         # Heikin-Ashi
-        ha_close=(df["open"]+df["high"]+df["low"]+df["close"])/4
-        ha_open_vals=[(df["open"].iloc[0]+df["close"].iloc[0])/2]
-        for i in range(1,len(df)):
-            ha_open_vals.append((ha_open_vals[-1]+ha_close.iloc[i-1])/2)
-        df["ha_close"]=ha_close; df["ha_open"]=ha_open_vals
-        df["ha_body"]=df["ha_close"]-df["ha_open"]; df["ha_dir"]=np.sign(df["ha_body"])
-        # Support/Resistance (20 candles)
-        df["support"]=df["low"].rolling(20).min(); df["resistance"]=df["high"].rolling(20).max()
+        ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+        ha_open_vals = [(df["open"].iloc[0] + df["close"].iloc[0]) / 2]
+        for i in range(1, len(df)):
+            ha_open_vals.append((ha_open_vals[-1] + ha_close.iloc[i - 1]) / 2)
+        df["ha_close"] = ha_close
+        df["ha_open"] = ha_open_vals
+        df["ha_body"] = df["ha_close"] - df["ha_open"]
+        df["ha_dir"] = np.sign(df["ha_body"])
+        # Support/Resistance
+        df["support"] = df["low"].rolling(20).min()
+        df["resistance"] = df["high"].rolling(20).max()
     except Exception as e:
         logger.exception("apply_all_features error: %s", e)
     return df
 
 # ---------------- SIGNAL DETECTION ----------------
-def detect_signal(df:pd.DataFrame):
-    last=df.iloc[-1]
-    votes=[]
-    # EMA
-    if last["ema_8"]>last["ema_20"]: votes.append("ema_bull")
-    else: votes.append("ema_bear")
-    # MACD
-    if last["MACD_hist"]>0: votes.append("macd_up")
-    else: votes.append("macd_down")
-    # RSI
-    if last["RSI_14"]>70: votes.append("rsi_overbought")
-    elif last["RSI_14"]<30: votes.append("rsi_oversold")
-    # StochRSI
-    if last["stoch_k"]>80: votes.append("stoch_overbought")
-    elif last["stoch_k"]<20: votes.append("stoch_oversold")
-    # ADX trend
-    if last["ADX"]>25:
-        if last["ADX_pos"]>last["ADX_neg"]: votes.append("adx_up")
-        else: votes.append("adx_down")
-    # HA exhaustion
-    if df["ha_dir"].iloc[-5:-1].gt(0).all() and last["ha_dir"]<0: votes.append("ha_exhaustion")
-    if df["ha_dir"].iloc[-5:-1].lt(0).all() and last["ha_dir"]>0: votes.append("ha_exhaustion_buy")
-    # Price vs support/resistance pre-top
-    pretop=False
-    if len(df)>=10:
-        recent,last10=df["close"].iloc[-1],df["close"].iloc[-10]
-        if (recent-last10)/last10>0.1: pretop=True
-    # Determine action
-    action="WATCH"
-    if last["close"]>=last["resistance"]*0.995: action="SHORT"
-    elif last["close"]<=last["support"]*1.005: action="LONG"
-    # Confidence calculation
-    confidence = min(1.0,0.1 + 0.05*len(votes) + (0.08 if pretop else 0))
-    return action,votes,pretop,last,confidence
+def detect_signal(df: pd.DataFrame):
+    last = df.iloc[-1]
+    votes = []
+
+    if last["ema_8"] > last["ema_20"]:
+        votes.append("ema_bull")
+    else:
+        votes.append("ema_bear")
+
+    if last["MACD_hist"] > 0:
+        votes.append("macd_up")
+    else:
+        votes.append("macd_down")
+
+    if last["RSI_14"] > 70:
+        votes.append("rsi_overbought")
+    elif last["RSI_14"] < 30:
+        votes.append("rsi_oversold")
+
+    if last["stoch_k"] > 80:
+        votes.append("stoch_overbought")
+    elif last["stoch_k"] < 20:
+        votes.append("stoch_oversold")
+
+    if last["ADX"] > 25:
+        if last["ADX_pos"] > last["ADX_neg"]:
+            votes.append("adx_up")
+        else:
+            votes.append("adx_down")
+
+    if df["ha_dir"].iloc[-5:-1].gt(0).all() and last["ha_dir"] < 0:
+        votes.append("ha_exhaustion")
+    if df["ha_dir"].iloc[-5:-1].lt(0).all() and last["ha_dir"] > 0:
+        votes.append("ha_exhaustion_buy")
+
+    pretop = False
+    if len(df) >= 10:
+        recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
+        if (recent - last10) / last10 > 0.1:
+            pretop = True
+
+    action = "WATCH"
+    if last["close"] >= last["resistance"] * 0.995:
+        action = "SHORT"
+    elif last["close"] <= last["support"] * 1.005:
+        action = "LONG"
+
+    confidence = min(1.0, 0.1 + 0.05 * len(votes) + (0.08 if pretop else 0))
+    return action, votes, pretop, last, confidence
 
 # ---------------- ANALYZE SYMBOL ----------------
-def analyze_and_alert(symbol:str):
-    df=fetch_klines(symbol)
-    if df is None or len(df)<30: return
-    df=apply_all_features(df)
-    action,votes,pretop,last,confidence=detect_signal(df)
-    # Avoid repeat notifications
-    prev_signal = state["signals"].get(symbol,"")
-    if action!="WATCH" and confidence>CONF_THRESHOLD_MEDIUM and action!=prev_signal:
+def analyze_and_alert(symbol: str):
+    df = fetch_klines(symbol)
+    if df is None or len(df) < 30:
+        return
+    df = apply_all_features(df)
+    action, votes, pretop, last, confidence = detect_signal(df)
+
+    prev_signal = state["signals"].get(symbol, "")
+    if action != "WATCH" and confidence > CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
             f"⚡ <b>TRADE SIGNAL</b>\n"
             f"Symbol: {symbol}\n"
@@ -253,50 +283,32 @@ def analyze_and_alert(symbol:str):
             f"Time: {last.name}\n"
         )
         send_telegram(msg)
-        state["signals"][symbol]=action
-        save_json_safe(STATE_FILE,state)
+        state["signals"][symbol] = action
+        save_json_safe(STATE_FILE, state)
 
 # ---------------- MASTER SCAN ----------------
 def scan_top_symbols():
     symbols = get_top_symbols()
-    if not symbols: symbols=get_all_usdt_symbols()[:TOP_LIMIT]
+    if not symbols:
+        symbols = get_all_usdt_symbols()[:TOP_LIMIT]
+
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        exe.map(analyze_and_alert,symbols)
-    state["last_scan"]=str(datetime.now(timezone.utc))
-    save_json_safe(STATE_FILE,state)
+        exe.map(analyze_and_alert, symbols)
+
+    state["last_scan"] = str(datetime.now(timezone.utc))
+    save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
 
-# -------------------------
-# SCHEDULER
-# -------------------------
+# ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-def scheduled_scan_job():
-    try:
-        symbols = get_top_symbols_by_volume(limit=TOP_LIMIT)
-        if not symbols:
-            symbols = get_all_usdt_symbols_from_binance()[:TOP_LIMIT]
-        # ThreadPoolExecutor для паралельного аналізу
-        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-            futures = {exe.submit(analyze_and_maybe_alert, s, "15m", True): s for s in symbols}
-            for fut in as_completed(futures):
-                try:
-                    fut.result()
-                except Exception as e:
-                    logger.exception("scan future error: %s", e)
-    except Exception as e:
-        logger.exception("scheduled_scan_job error: %s", e)
-
-scheduler.add_job(scheduled_scan_job, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES), id="scan_job")
+scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES), id="scan_job")
 scheduler.start()
 
-# -------------------------
-# FLASK ROUTES
-# -------------------------
+# ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
     return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "state_signals_count": len(state.get("signals", {}))})
 
-# Telegram webhook — гнучкий маршрут, не дає 404
 @app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
 def telegram_webhook(token):
     if token != TELEGRAM_TOKEN:
@@ -309,15 +321,13 @@ def telegram_webhook(token):
             chat_id = msg["chat"]["id"]
             text = msg.get("text", "")
             if text.startswith("/scan"):
-                Thread(target=scheduled_scan_job, daemon=True).start()
+                Thread(target=scan_top_symbols, daemon=True).start()
                 send_telegram("Manual scan started.")
             elif text.startswith("/status"):
-                send_telegram(f"Status: signals={len(state.get('signals',{}))}, last_scan={state.get('last_scan')}")
+                send_telegram(f"Status: signals={len(state.get('signals', {}))}, last_scan={state.get('last_scan')}")
     return jsonify({"ok": True})
 
-# -------------------------
-# AUTO REGISTER WEBHOOK
-# -------------------------
+# ---------------- AUTO REGISTER WEBHOOK ----------------
 def auto_register_webhook():
     if WEBHOOK_URL and TELEGRAM_TOKEN:
         logger.info("Registering Telegram webhook: %s", WEBHOOK_URL)
@@ -325,20 +335,16 @@ def auto_register_webhook():
 
 Thread(target=auto_register_webhook, daemon=True).start()
 
-# -------------------------
-# WARMUP
-# -------------------------
+# ---------------- WARMUP ----------------
 def warmup_and_first_scan():
     try:
-        scheduled_scan_job()
+        scan_top_symbols()
     except Exception as e:
         logger.exception("warmup_and_first_scan error: %s", e)
 
 Thread(target=warmup_and_first_scan, daemon=True).start()
 
-# -------------------------
-# MAIN
-# -------------------------
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
     app.run(host="0.0.0.0", port=PORT)
