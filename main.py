@@ -177,25 +177,31 @@ WEBHOOK_PATH = f"/telegram_webhook/{TELEGRAM_TOKEN}"
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.get_event_loop().create_task(application.process_update(update))
+    # завжди використовуємо глобальний loop
+    loop.create_task(application.process_update(update))
     return "OK"
 
-# ---------- Set webhook ----------
+
 def set_webhook():
     url = f"https://dex-tg-bot.onrender.com{WEBHOOK_PATH}"
     bot.set_webhook(url)
     logging.info(f"Webhook встановлено: {url}")
 
-# ---------- Run ----------
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    loop = asyncio.get_event_loop()
 
-    # Ініціалізація Application
+    # створюємо і зберігаємо глобальний event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # ініціалізація бота
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
 
+    # встановлюємо webhook
     set_webhook()
 
+    # запускаємо Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
