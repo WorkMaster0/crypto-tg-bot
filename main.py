@@ -1,3 +1,5 @@
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import os
 import logging
 import tempfile
@@ -12,9 +14,10 @@ from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ---------- Налаштування ----------
-BINANCE_API_KEY = "ВАШ_BINANCE_API_KEY"
-BINANCE_API_SECRET = "ВАШ_BINANCE_API_SECRET"
-TELEGRAM_TOKEN = "ВАШ_TELEGRAM_TOKEN"
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID", "6053907025")
 
 client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 bot = Bot(token=TELEGRAM_TOKEN)
