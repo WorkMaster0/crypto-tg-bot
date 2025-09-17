@@ -2,22 +2,25 @@ import os
 import logging
 import tempfile
 import asyncio
-from flask import Flask, request
+import random
+import hashlib
+import matplotlib
+matplotlib.use('Agg')  # серверний режим без GUI
+import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import mplfinance as mpf
+from flask import Flask, request
 from binance.client import Client
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---------- Налаштування ----------
+# ---------- Environment ----------
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "6053907025")
 
-# Перевірка, чи ключі задані
 if not BINANCE_API_KEY or not BINANCE_API_SECRET or not TELEGRAM_TOKEN:
     raise ValueError("❌ Не задані API ключі або Telegram токен у Environment Variables!")
 
@@ -27,13 +30,16 @@ bot = Bot(token=TELEGRAM_TOKEN)
 # ---------- Flask ----------
 app = Flask(__name__)
 
-# ---------- Отримання символів ----------
+# ---------- Telegram Bot ----------
+application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+# ---------- Символи ----------
 def get_symbols():
     info = client.get_ticker()
     symbols = [s['symbol'] for s in info if 'USDT' in s['symbol']]
     return symbols
 
-# ---------- Отримання свічок ----------
+# ---------- Klines ----------
 def get_klines(symbol="BTCUSDT", interval="1h", limit=200):
     klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
     df = pd.DataFrame(klines, columns=['open_time','open','high','low','close','volume','close_time',
@@ -43,7 +49,7 @@ def get_klines(symbol="BTCUSDT", interval="1h", limit=200):
     df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
     return df
 
-# ---------- SMC аналіз ----------
+# ---------- SMC ----------
 def analyze_smc(df):
     df = df.copy()
     df['prev_high'] = df['high'].shift(1)
@@ -58,7 +64,7 @@ def analyze_smc(df):
     df['TP'] = np.where(df['Signal']=='BUY', df['close']*1.01, np.where(df['Signal']=='SELL', df['close']*0.99, np.nan))
     return df
 
-# ---------- Побудова графіка ----------
+# ---------- Chart ----------
 def plot_chart(df, symbol="BTCUSDT"):
     df_plot = df[['open_time','open','high','low','close','volume']].copy().set_index('open_time')
     apds = []
@@ -75,7 +81,13 @@ def plot_chart(df, symbol="BTCUSDT"):
              addplot=apds if apds else None, volume=True, savefig=tmp_file.name)
     return tmp_file.name
 
-# ---------- Telegram команди ----------
+# ---------- Send photo ----------
+async def send_photo_tmp(chat_id, path, caption):
+    with open(path, 'rb') as f:
+        await bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
+    os.remove(path)
+
+# ---------- Telegram Commands ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привіт! Я Smart Money бот.\n"
@@ -85,7 +97,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/ultrasecret - секретна команда"
     )
 
-# ---- SMC ----
 async def smc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 Генерую сигнали...")
     try:
@@ -100,11 +111,10 @@ async def smc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             time_str = row['open_time'].strftime('%Y-%m-%d %H:%M')
             caption = (f"📊 SMC для *{symbol} {interval}*:\n"
                        f"{time_str} | {row['Signal']} | Entry: {row['close']:.2f} | SL: {row['SL']:.2f} | TP: {row['TP']:.2f}")
-            asyncio.create_task(send_photo_tmp(update, chart_file, caption))
+            asyncio.create_task(send_photo_tmp(update.effective_chat.id, chart_file, caption))
     except Exception as e:
         await update.message.reply_text(f"❌ Помилка: {e}")
 
-# ---- LIQUIDITY MAP ----
 async def liqmap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📡 Генерую карту ліквідності...")
     try:
@@ -120,12 +130,12 @@ async def liqmap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plt.scatter(df['open_time'], lows, color='blue', label="Liquidity Below")
             plt.legend()
             tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            plt.savefig(tmp_file.name); plt.close()
-            asyncio.create_task(send_photo_tmp(update, tmp_file.name, f"🌊 Liquidity Map {symbol} {interval}"))
+            plt.savefig(tmp_file.name)
+            plt.close()
+            asyncio.create_task(send_photo_tmp(update.effective_chat.id, tmp_file.name, f"🌊 Liquidity Map {symbol} {interval}"))
     except Exception as e:
         await update.message.reply_text(f"❌ Помилка: {e}")
 
-# ---- ORDERFLOW ----
 async def orderflow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 Генерую Order Flow...")
     try:
@@ -139,13 +149,13 @@ async def orderflow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plt.figure(figsize=(12,6))
             plt.bar(df['open_time'], df['delta'], color=np.where(df['delta']>0,'green','red'))
             tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            plt.savefig(tmp_file.name); plt.close()
+            plt.savefig(tmp_file.name)
+            plt.close()
             trend = "🟢 Покупці домінують" if df['delta'].iloc[-1]>0 else "🔴 Продавці домінують"
-            asyncio.create_task(send_photo_tmp(update, tmp_file.name, f"📊 Order Flow {symbol} {interval}\n{trend}"))
+            asyncio.create_task(send_photo_tmp(update.effective_chat.id, tmp_file.name, f"📊 Order Flow {symbol} {interval}\n{trend}"))
     except Exception as e:
         await update.message.reply_text(f"❌ Помилка: {e}")
 
-# ---- ULTRASECRET ----
 async def ultrasecret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕵️ Виконую секретну операцію...")
     try:
@@ -159,34 +169,27 @@ async def ultrasecret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Помилка секретної операції: {e}")
 
-# ---------- Асинхронна допоміжна функція для фото ----------
-async def send_photo_tmp(update, path, caption):
-    with open(path, 'rb') as f:
-        await bot.send_photo(chat_id=update.effective_chat.id, photo=f, caption=caption)
-    os.remove(path)
-
-# ---------- Telegram Application ----------
-application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+# ---------- Register Commands ----------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("smc", smc_command))
 application.add_handler(CommandHandler("liqmap", liqmap_command))
 application.add_handler(CommandHandler("orderflow", orderflow_command))
 application.add_handler(CommandHandler("ultrasecret", ultrasecret))
 
-# ---------- Flask вебхук ----------
+# ---------- Flask Webhook ----------
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    application.update_queue.put_nowait(update)
+    asyncio.get_event_loop().create_task(application.process_update(update))
     return "OK"
 
-@app.before_first_request
+@app.before_serving
 def set_webhook():
     url = f"https://dex-tg-bot.onrender.com/{TELEGRAM_TOKEN}"
     bot.set_webhook(url)
     logging.info(f"Webhook встановлено: {url}")
 
-# ---------- Запуск Flask ----------
+# ---------- Run Flask ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
