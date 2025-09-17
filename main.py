@@ -180,7 +180,10 @@ WEBHOOK_PATH = f"/telegram_webhook/{TELEGRAM_TOKEN}"
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run_coroutine_threadsafe(application.process_update(update), asyncio.get_event_loop())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.process_update(update))
+    loop.close()
     return "OK"
 
 # ---------- Set Webhook ----------
