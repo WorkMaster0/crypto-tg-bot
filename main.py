@@ -183,13 +183,14 @@ def webhook():
     asyncio.get_event_loop().create_task(application.process_update(update))
     return "OK"
 
-@app.before_serving
+# ---------- Встановлення вебхука вручну ----------
 def set_webhook():
     url = f"https://dex-tg-bot.onrender.com/{TELEGRAM_TOKEN}"
     bot.set_webhook(url)
     logging.info(f"Webhook встановлено: {url}")
 
-# ---------- Run Flask ----------
+# ---------- Запуск Flask ----------
 if __name__ == "__main__":
+    set_webhook()  # встановлюємо вебхук одразу
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
