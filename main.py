@@ -7,7 +7,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from threading import Thread
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import numpy as np
@@ -269,11 +269,12 @@ def analyze_and_alert(symbol: str):
     action, votes, pretop, last, confidence = detect_signal(df)
 
     prev_signal = state["signals"].get(symbol, "")
-    
-    # Відправка pre-top навіть без сильного сигналу
+
+    # Pre-top повідомлення
     if pretop:
         send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
 
+    # Основний сигнал
     if action != "WATCH" and confidence > CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
             f"⚡ <b>TRADE SIGNAL</b>\n"
@@ -291,7 +292,34 @@ def analyze_and_alert(symbol: str):
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
+# ---------------- MASTER SCAN ----------------
+def scan_top_symbols():
+    symbols = get_all_usdt_symbols()
+    if not symbols:
+        logger.warning("No symbols found for scanning.")
+        return
+
+    logger.info("Starting scan for symbols: %s", symbols)
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
+        list(exe.map(analyze_and_alert, symbols))
+
+    state["last_scan"] = str(datetime.now(timezone.utc))
+    save_json_safe(STATE_FILE, state)
+    logger.info("Scan finished at %s", state["last_scan"])
+
+# ---------------- SCHEDULER ----------------
+scheduler = BackgroundScheduler()
+scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES),
+                  id="scan_job", next_run_time=datetime.now())
+scheduler.start()
+logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
+
 # ---------------- FLASK ROUTES ----------------
+@app.route("/")
+def home():
+    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "state_signals_count": len(state.get("signals", {}))})
+
 @app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
 def telegram_webhook(token):
     if token != TELEGRAM_TOKEN:
@@ -300,37 +328,20 @@ def telegram_webhook(token):
         update = request.get_json(force=True)
         if "message" in update:
             msg = update["message"]
-            chat_id = msg["chat"]["id"]
             text = msg.get("text", "").lower()
-            
+
             if text.startswith("/scan"):
                 Thread(target=scan_top_symbols, daemon=True).start()
                 send_telegram("Manual scan started.")
-            
             elif text.startswith("/status"):
-                send_telegram(
-                    f"Status:\nSignals: {len(state.get('signals', {}))}\nLast scan: {state.get('last_scan')}"
-                )
-            
+                send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}")
             elif text.startswith("/top"):
-                # Відправка pre-top токенів із state
                 pretop_tokens = [s for s in state.get("signals", {})]
                 if pretop_tokens:
-                    send_telegram(f"Pre-top tokens:\n" + "\n".join(pretop_tokens))
+                    send_telegram("Pre-top tokens:\n" + "\n".join(pretop_tokens))
                 else:
                     send_telegram("No pre-top tokens detected yet.")
     return jsonify({"ok": True})
-
-# ---------------- SCHEDULER ----------------
-scheduler = BackgroundScheduler()
-scheduler.add_job(
-    scan_top_symbols,
-    "interval",
-    minutes=max(1, SCAN_INTERVAL_MINUTES),
-    id="scan_job",
-    next_run_time=datetime.now()
-)
-scheduler.start()
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
 def auto_register_webhook():
