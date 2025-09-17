@@ -1,214 +1,271 @@
-import os
-import asyncio
-import aiohttp
+import mplfinance as mpf
+import pandas as pd
 import numpy as np
-from flask import Flask, request
-from aiogram import Bot, Dispatcher, types
-import json
-import xml.etree.ElementTree as ET
+import matplotlib.pyplot as plt
+from binance.client import Client
+from telegram import Bot, BotCommand, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import asyncio
+from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore")
 
-# --- Environment Variables ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-WEBHOOK_URL = "https://dex-tg-bot.onrender.com/"
-WEBHOOK_PATH = f"/webhook/{TELEGRAM_TOKEN}"
-WEBHOOK_FULL_URL = WEBHOOK_URL + WEBHOOK_PATH
+# ---------- Налаштування ----------
+BINANCE_API_KEY = "YOUR_BINANCE_API_KEY"
+BINANCE_API_SECRET = "YOUR_BINANCE_API_SECRET"
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
 
-# --- Flask App ---
-app = Flask(__name__)
+client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+bot = Bot(token=TELEGRAM_TOKEN)
 
-# --- Telegram Bot ---
-bot = Bot(token=TELEGRAM_TOKEN, parse_mode=types.ParseMode.HTML)
-dp = Dispatcher()
+# ---------- Отримання свічок ----------
+def get_klines(symbol="BTCUSDT", interval="1h", limit=200):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(klines, columns=['open_time','open','high','low','close','volume','close_time',
+                                       'quote_asset_volume','number_of_trades','taker_buy_base_asset_volume',
+                                       'taker_buy_quote_asset_volume','ignore'])
+    df['open'] = df['open'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    df['close'] = df['close'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+    return df
 
-# --- Safe JSON ---
-def safe_json(obj):
-    if isinstance(obj, bool):
-        return str(obj)
-    elif isinstance(obj, dict):
-        return {k: safe_json(v) for k,v in obj.items()}
-    elif isinstance(obj, list):
-        return [safe_json(x) for x in obj]
-    return obj
+# ---------- SMC аналіз ----------
+def analyze_smc(df):
+    df = df.copy()
+    df['prev_high'] = df['high'].shift(1)
+    df['prev_low'] = df['low'].shift(1)
+    
+    df['BOS_up'] = df['high'] > df['prev_high']
+    df['BOS_down'] = df['low'] < df['prev_low']
+    
+    df['ChoCH_up'] = df['BOS_down'] & df['BOS_up'].shift(1)
+    df['ChoCH_down'] = df['BOS_up'] & df['BOS_down'].shift(1)
+    
+    df['OB'] = np.where(df['BOS_up'], df['low'].shift(1),
+                        np.where(df['BOS_down'], df['high'].shift(1), np.nan))
+    
+    df['FVG'] = np.where(df['BOS_up'], df['low'] + (df['high'] - df['close'])/2,
+                         np.where(df['BOS_down'], df['high'] - (df['close'] - df['low'])/2, np.nan))
+    
+    df['Signal'] = np.where(df['BOS_up'] & (~df['OB'].isna()), 'BUY',
+                         np.where(df['BOS_down'] & (~df['OB'].isna()), 'SELL', None)).astype(object)
+    
+    df['SL'] = np.where(df['Signal']=='BUY', df['OB']*0.995, 
+                        np.where(df['Signal']=='SELL', df['OB']*1.005, np.nan))
+    df['TP'] = np.where(df['Signal']=='BUY', df['close']*1.01, 
+                        np.where(df['Signal']=='SELL', df['close']*0.99, np.nan))
+    
+    return df
 
-# --- Async RSS Fetch ---
-async def fetch_rss_items(url, limit=5):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            text = await resp.text()
-    root = ET.fromstring(text)
-    items = []
-    for item in root.findall(".//item")[:limit]:
-        title = item.find("title").text if item.find("title") is not None else ""
-        description = item.find("description").text if item.find("description") is not None else ""
-        items.append(title + " " + description)
-    return items
+# ---------- Побудова графіка ----------
+def plot_chart(df, symbol="BTCUSDT"):
+    df_plot = df[['open_time','open','high','low','close','volume']].copy()
+    df_plot.set_index('open_time', inplace=True)
+    
+    apds = []
+    if 'OB' in df.columns:
+        apds.append(mpf.make_addplot(df['OB'], type='scatter', markersize=80, marker='s', color='blue'))
+    if 'FVG' in df.columns:
+        apds.append(mpf.make_addplot(df['FVG'], type='scatter', markersize=80, marker='^', color='red'))
+    if 'SL' in df.columns:
+        apds.append(mpf.make_addplot(df['SL'], type='scatter', markersize=50, marker='x', color='red'))
+    if 'TP' in df.columns:
+        apds.append(mpf.make_addplot(df['TP'], type='scatter', markersize=80, marker='*', color='green'))
 
-# --- Live Market Bot ---
-class LiveMarketBot:
-    def __init__(self, symbols=["BTCUSDT","ETHUSDT","BNBUSDT"], depth=20,
-                 rss_urls=None, twitter_rss_urls=None):
-        self.symbols = symbols
-        self.depth = depth
-        self.order_books = {s:{} for s in symbols}
-        self.prev_imbalances = {s:0 for s in symbols}
-        self.social_signal = 0
-        self.rss_urls = rss_urls or ["https://t.me/s/public_crypto_channel?format=rss"]
-        self.twitter_rss_urls = twitter_rss_urls or [
-            "https://nitter.net/search/rss?q=%23BTC",
-            "https://nitter.net/search/rss?q=%23ETH"
-        ]
+    filename = f"{symbol}_smc.png"
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style='yahoo',
+        title=f"{symbol} - Smart Money Concept Analysis",
+        addplot=apds if apds else None,
+        volume=True,
+        savefig=filename
+    )
+    return filename
 
-    async def fetch_order_book(self, symbol):
-        url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit={self.depth}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                self.order_books[symbol] = await resp.json()
+# ---------- Асинхронна відправка в Telegram ----------
+async def send_telegram_image(filename, chat_id=CHAT_ID, caption="SMC Analysis"):
+    with open(filename, 'rb') as f:
+        await bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
 
-    async def fetch_public_trades(self, symbol):
-        url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit=50"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                trades = await resp.json()
-        whale_volume = sum([float(t['qty']) for t in trades if float(t['qty']) > 5])
-        return whale_volume
+# ---------- Команди ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Привіт! Я бот Smart Money.\n\n"
+                                    "Команди:\n"
+                                    "/smc SYMBOL TIMEFRAME – сигнал Smart Money\n"
+                                    "/liqmap SYMBOL TIMEFRAME – карта ліквідності\n"
+                                    "/orderflow SYMBOL TIMEFRAME – ордер флоу\n"
+                                    "/pretop_detect – сканує всі токени та знаходить потенційні pre-top\n"
+                                    "/ultrasecret – ультра секретна команда")
 
-    async def fetch_social_signal(self):
-        sentiment_score = 0
-        urls = self.rss_urls + self.twitter_rss_urls
-        for url in urls:
-            texts = await fetch_rss_items(url)
-            for text in texts:
-                sentiment_score += self.analyze_sentiment(text)
-        total_sources = len(urls)
-        self.social_signal = max(min(sentiment_score / max(total_sources,1), 1), -1)
+# ---------- SMC ----------
+async def smc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔎 Генерую сигнал...")
+    try:
+        symbol = context.args[0].upper() if len(context.args) >= 1 else "BTCUSDT"
+        interval = context.args[1] if len(context.args) >= 2 else "1h"
+        df = analyze_smc(get_klines(symbol, interval))
+        chart_file = plot_chart(df, symbol)
+        latest_signal = df.dropna(subset=['Signal']).tail(1)
+        if latest_signal.empty:
+            await update.message.reply_text(f"⚠️ Немає сигналу для {symbol} {interval}")
+            return
+        row = latest_signal.iloc[0]
+        time_str = row['open_time'].strftime('%Y-%m-%d %H:%M')
+        caption = (f"📊 Smart Money Signal для *{symbol} {interval}*:\n\n"
+                   f"{time_str} | {row['Signal']} | "
+                   f"Entry: {row['close']:.2f} | SL: {row['SL']:.2f} | TP: {row['TP']:.2f}")
+        await send_telegram_image(chart_file, caption=caption)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Помилка: {e}")
 
-    def analyze_sentiment(self, text):
-        fomo_keywords = ["pump", "moon", "bullish", "rise"]
-        fud_keywords = ["dump", "bearish", "crash", "drop"]
-        text_lower = text.lower()
-        score = 0
-        for word in fomo_keywords:
-            if word in text_lower:
-                score += 1
-        for word in fud_keywords:
-            if word in text_lower:
-                score -= 1
-        return score
+# ---------- LIQUIDITY MAP ----------
+async def liqmap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📡 Аналізую ліквідність...")
+    try:
+        symbol = context.args[0].upper() if len(context.args) >= 1 else "BTCUSDT"
+        interval = context.args[1] if len(context.args) >= 2 else "1h"
+        df = get_klines(symbol, interval)
 
-    def calculate_imbalance(self, symbol, whale_volume=0):
-        ob = self.order_books[symbol]
-        if not ob: return 0
-        bids = np.array([float(b[0])*float(b[1]) for b in ob['bids']])
-        asks = np.array([float(a[0])*float(a[1]) for a in ob['asks']])
-        imbalance = bids.sum() - asks.sum()
-        imbalance += whale_volume * 0.5
-        imbalance += self.social_signal * 5000
-        return imbalance
+        highs = df['high'].rolling(window=5).max()
+        lows = df['low'].rolling(window=5).min()
 
-    def generate_signal(self, symbol, imbalance):
-        change = imbalance - self.prev_imbalances[symbol]
-        self.prev_imbalances[symbol] = imbalance
-        threshold = max(1000, abs(imbalance) * 0.05)
-        ob = self.order_books[symbol]
-        if imbalance > threshold and change > 0:
-            entry = float(ob['bids'][0][0])
-            return {
-                'symbol': symbol,
-                'action': 'BUY',
-                'entry': entry,
-                'take_profit': entry * 1.006,
-                'stop_loss': entry * 0.995,
-                'imbalance': imbalance,
-                'social_signal': self.social_signal
-            }
-        elif imbalance < -threshold and change < 0:
-            entry = float(ob['asks'][0][0])
-            return {
-                'symbol': symbol,
-                'action': 'SELL',
-                'entry': entry,
-                'take_profit': entry * 0.994,
-                'stop_loss': entry * 1.005,
-                'imbalance': imbalance,
-                'social_signal': self.social_signal
-            }
-        return None
+        plt.figure(figsize=(15,7))
+        plt.plot(df['open_time'], df['close'], color='black', label="Close")
+        plt.scatter(df['open_time'], highs, color='red', label="Liquidity Above (Stop Hunt ↑)")
+        plt.scatter(df['open_time'], lows, color='blue', label="Liquidity Below (Stop Hunt ↓)")
+        plt.title(f"{symbol} - Liquidity Pools")
+        plt.xlabel("Time")
+        plt.ylabel("Price")
+        plt.legend()
+        filename = f"{symbol}_liqmap.png"
+        plt.savefig(filename)
+        plt.close()
 
-    async def fetch_monthly_highlow(self, symbol):
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1d&limit=30"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                klines = await resp.json()
-        if not klines:
-            return None, None
-        high = max([float(k[2]) for k in klines])
-        low = min([float(k[3]) for k in klines])
-        return high, low
+        await send_telegram_image(filename, caption=f"🌊 Liquidity Map для *{symbol} {interval}*")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Помилка: {e}")
 
-# --- Telegram Commands ---
-@dp.message(commands=["start"])
-async def start_handler(message: types.Message):
-    await message.reply("Живий ринок запущений! Очікуйте сигнали та аналіз топ токенів.")
+# ---------- ORDERFLOW ----------
+async def orderflow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📊 Аналізую Order Flow...")
+    try:
+        symbol = context.args[0].upper() if len(context.args) >= 1 else "BTCUSDT"
+        interval = context.args[1] if len(context.args) >= 2 else "1h"
+        df = get_klines(symbol, interval)
 
-@dp.message(commands=["status"])
-async def status_handler(message: types.Message):
-    await message.reply("Бот працює. Сигнали генеруються на основі imbalance, whales і соцхвиль.")
+        df['buy_vol'] = np.where(df['close'] > df['open'], df['volume'], df['volume']*0.3)
+        df['sell_vol'] = np.where(df['close'] < df['open'], df['volume'], df['volume']*0.3)
+        df['delta'] = df['buy_vol'] - df['sell_vol']
 
-@dp.message(commands=["help"])
-async def help_handler(message: types.Message):
-    await message.reply("/start - запуск\n/status - стан\n/highlow - топ хай/лоу токени за місяць\n/help - допомога")
+        plt.figure(figsize=(15,7))
+        plt.bar(df['open_time'], df['delta'], color=np.where(df['delta']>0,'green','red'))
+        plt.title(f"{symbol} - Order Flow Delta")
+        plt.xlabel("Time")
+        plt.ylabel("Delta Volume")
+        filename = f"{symbol}_orderflow.png"
+        plt.savefig(filename)
+        plt.close()
 
-@dp.message(commands=["highlow"])
-async def highlow_handler(message: types.Message):
-    highs = []
-    lows = []
-    for symbol in bot_core.symbols:
-        high, low = await bot_core.fetch_monthly_highlow(symbol)
-        if high and low:
-            highs.append({'symbol': symbol, 'highPrice': high})
-            lows.append({'symbol': symbol, 'lowPrice': low})
-    highs_sorted = sorted(highs, key=lambda x: x['highPrice'], reverse=True)[:5]
-    lows_sorted = sorted(lows, key=lambda x: x['lowPrice'])[:5]
-    text = "🚀 Top Highs (last 30 days):\n" + "\n".join([f"{x['symbol']}: {x['highPrice']}" for x in highs_sorted])
-    text += "\n\n📉 Top Lows (last 30 days):\n" + "\n".join([f"{x['symbol']}: {x['lowPrice']}" for x in lows_sorted])
-    await message.reply(text)
+        last_delta = df['delta'].iloc[-1]
+        trend = "🟢 Покупці домінують" if last_delta > 0 else "🔴 Продавці домінують"
 
-# --- Flask Webhook ---
-@app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
-async def webhook():
-    data = await request.get_json()
-    update = types.Update(**data)
-    await dp.process_update(update)
-    return "OK"
+        await send_telegram_image(filename, caption=f"📊 Order Flow для *{symbol} {interval}*\n\n{trend}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Помилка: {e}")
 
-# --- Background Market Task ---
-async def live_market_task():
-    global bot_core
-    bot_core = LiveMarketBot()
-    while True:
-        try:
-            await bot_core.fetch_social_signal()
-            for symbol in bot_core.symbols:
-                await bot_core.fetch_order_book(symbol)
-                whale_volume = await bot_core.fetch_public_trades(symbol)
-                imbalance = bot_core.calculate_imbalance(symbol, whale_volume)
-                signal = bot_core.generate_signal(symbol, imbalance)
-                if signal:
-                    text = (
-                        f"🔥 {signal['symbol']} Signal: {signal['action']}\n"
-                        f"Entry: {signal['entry']}\nTP: {signal['take_profit']}\nSL: {signal['stop_loss']}\n"
-                        f"Imbalance: {signal['imbalance']:.2f}\nSocial Pulse: {signal['social_signal']:.2f}"
-                    )
-                    await bot.send_message(TELEGRAM_CHAT_ID, text)
-        except Exception as e:
-            print("Market loop error:", e)
-        await asyncio.sleep(3)
+# ---------- ULTRASECRET ----------
+async def ultrasecret(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🕵️ Виконую надсекретну операцію... зачекай...")
+    try:
+        import random, hashlib
+        symbol = context.args[0].upper() if len(context.args) >= 1 else "BTCUSDT"
+        interval = context.args[1] if len(context.args) >= 2 else "1h"
+        df = get_klines(symbol, interval, limit=150)
+        secret_metric = df["close"].pct_change().rolling(10).std().iloc[-1] * random.uniform(0.8, 1.2)
+        stamp = hashlib.md5(str(secret_metric).encode()).hexdigest()[:8]
+        msg = (
+            f"🔒 Ультра-секретний аналіз для {symbol} {interval}\n\n"
+            f"Секретна метрика: {secret_metric:.5f}\n"
+            f"Ідентифікатор: {stamp}\n\n"
+            f"(🧩 Розгадати значення можеш лише сам...)"
+        )
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Помилка секретної операції: {e}")
 
-# --- Main ---
+# ---------- PRE-TOP DETECT ----------
+async def pretop_detect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Сканую всі USDT пари на потенційні pre-top сигнали...")
+    try:
+        symbols = [s['symbol'] for s in client.get_ticker() if s['symbol'].endswith('USDT')]
+        interval = context.args[0] if len(context.args) >= 1 else "1h"
+        results = []
+
+        for sym in symbols:
+            try:
+                df = analyze_smc(get_klines(sym, interval))
+                last = df.tail(5)
+                last_signal = last.dropna(subset=['Signal'])
+                if not last_signal.empty:
+                    row = last_signal.iloc[-1]
+                    pretop_score = 0
+                    if row['Signal']=='SELL' and row['close'] > row['OB']:
+                        pretop_score += 1
+                    if row['Signal']=='BUY' and row['close'] < row['OB']:
+                        pretop_score += 1
+                    if not np.isnan(row['FVG']):
+                        pretop_score += 1
+                    if pretop_score >= 2:
+                        results.append({'symbol': sym, 'signal': row['Signal'], 'entry': row['close'], 'SL': row['SL'], 'TP': row['TP'], 'score': pretop_score})
+            except:
+                continue
+
+        if not results:
+            await update.message.reply_text("⚠️ Немає потенційних pre-top сигналів.")
+            return
+
+        top_results = sorted(results, key=lambda x: x['score'], reverse=True)[:5]
+
+        for r in top_results:
+            df = analyze_smc(get_klines(r['symbol'], interval))
+            chart_file = plot_chart(df, r['symbol'])
+            caption = (f"⚡ Pre-Top Detect для *{r['symbol']} {interval}*:\n"
+                       f"Signal: {r['signal']} | Entry: {r['entry']:.2f} | SL: {r['SL']:.2f} | TP: {r['TP']:.2f}\n"
+                       f"Score: {r['score']}")
+            await send_telegram_image(chart_file, caption=caption)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Помилка: {e}")
+
+# ---------- Запуск вебхука ----------
 if __name__ == "__main__":
-    asyncio.run(bot.set_webhook(WEBHOOK_FULL_URL))
-    loop = asyncio.get_event_loop()
-    loop.create_task(live_market_task())
-    # Flask запускається через gunicorn:
-    # gunicorn main:app --bind 0.0.0.0:$PORT --workers 2
+    import os
+    WEBHOOK_URL = "https://quantum-trading-bot-wg5k.onrender.com/"
+    PORT = int(os.environ.get("PORT", 10000))
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("smc", smc_command))
+    app.add_handler(CommandHandler("liqmap", liqmap_command))
+    app.add_handler(CommandHandler("orderflow", orderflow_command))
+    app.add_handler(CommandHandler("ultrasecret", ultrasecret))
+    app.add_handler(CommandHandler("pretop_detect", pretop_detect))
+
+    async def set_commands():
+        await app.bot.set_my_commands([
+            BotCommand("start", "Запустити бота"),
+            BotCommand("smc", "Smart Money сигнал"),
+            BotCommand("liqmap", "Карта ліквідності"),
+            BotCommand("orderflow", "Ордер флоу"),
+            BotCommand("ultrasecret", "Ультра секретна команда"),
+            BotCommand("pretop_detect", "Сканує всі токени на pre-top сигнали")
+        ])
+
+    asyncio.get_event_loop().run_until_complete(set_commands())
+    app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
