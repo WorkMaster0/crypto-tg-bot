@@ -15,9 +15,6 @@ from binance.client import Client
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---------- Logging ----------
-logging.basicConfig(level=logging.INFO)
-
 # ---------- Environment ----------
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
@@ -36,11 +33,10 @@ app = Flask(__name__)
 # ---------- Telegram Bot ----------
 application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# ---------- Binance Functions ----------
+# ---------- Helper functions ----------
 def get_symbols():
     info = client.get_ticker()
-    symbols = [s['symbol'] for s in info if 'USDT' in s['symbol']]
-    return symbols
+    return [s['symbol'] for s in info if 'USDT' in s['symbol']]
 
 def get_klines(symbol="BTCUSDT", interval="1h", limit=200):
     klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
@@ -60,7 +56,7 @@ def analyze_smc(df):
     df['OB'] = np.where(df['BOS_up'], df['low'].shift(1),
                         np.where(df['BOS_down'], df['high'].shift(1), np.nan))
     df['Signal'] = np.where(df['BOS_up'] & (~df['OB'].isna()), 'BUY',
-                            np.where(df['BOS_down'] & (~df['OB'].isna()), 'SELL', None))
+                         np.where(df['BOS_down'] & (~df['OB'].isna()), 'SELL', None))
     df['SL'] = np.where(df['Signal']=='BUY', df['OB']*0.995, np.where(df['Signal']=='SELL', df['OB']*1.005, np.nan))
     df['TP'] = np.where(df['Signal']=='BUY', df['close']*1.01, np.where(df['Signal']=='SELL', df['close']*0.99, np.nan))
     return df
@@ -74,6 +70,7 @@ def plot_chart(df, symbol="BTCUSDT"):
         apds.append(mpf.make_addplot(df['SL'], type='scatter', markersize=50, marker='x', color='red'))
     if 'TP' in df.columns:
         apds.append(mpf.make_addplot(df['TP'], type='scatter', markersize=80, marker='*', color='green'))
+
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     mpf.plot(df_plot, type='candle', style='yahoo',
              title=f"{symbol} - Smart Money Concept",
@@ -180,13 +177,10 @@ WEBHOOK_PATH = f"/telegram_webhook/{TELEGRAM_TOKEN}"
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.process_update(update))
-    loop.close()
+    asyncio.get_event_loop().create_task(application.process_update(update))
     return "OK"
 
-# ---------- Set Webhook ----------
+# ---------- Set webhook ----------
 def set_webhook():
     url = f"https://dex-tg-bot.onrender.com{WEBHOOK_PATH}"
     bot.set_webhook(url)
@@ -194,6 +188,7 @@ def set_webhook():
 
 # ---------- Run Flask ----------
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     set_webhook()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
