@@ -19,6 +19,10 @@ BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "6053907025")
 
+# Перевірка, чи ключі задані
+if not BINANCE_API_KEY or not BINANCE_API_SECRET or not TELEGRAM_TOKEN:
+    raise ValueError("❌ Не задані API ключі або Telegram токен у Environment Variables!")
+
 client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 bot = Bot(token=TELEGRAM_TOKEN)
 
