@@ -8,6 +8,7 @@ from aiogram.client.bot import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.defaults import DefaultBotProperties
 import xml.etree.ElementTree as ET
+import json
 
 # --- Environment Variables ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -26,6 +27,16 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode="HTML")
 )
 dp = Dispatcher()
+
+# --- Safe JSON ---
+def safe_json(obj):
+    if isinstance(obj, bool):
+        return str(obj)
+    elif isinstance(obj, dict):
+        return {k: safe_json(v) for k,v in obj.items()}
+    elif isinstance(obj, list):
+        return [safe_json(x) for x in obj]
+    return obj
 
 # --- Async RSS Fetch ---
 async def fetch_rss_items(url, limit=5):
