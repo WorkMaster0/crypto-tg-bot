@@ -186,9 +186,16 @@ def set_webhook():
     bot.set_webhook(url)
     logging.info(f"Webhook встановлено: {url}")
 
-# ---------- Run Flask ----------
+# ---------- Run ----------
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    loop = asyncio.get_event_loop()
+
+    # Ініціалізація Application
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+
     set_webhook()
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
