@@ -288,21 +288,38 @@ def analyze_and_alert(symbol: str):
 
 # ---------------- MASTER SCAN ----------------
 def scan_top_symbols():
+    """Сканує топ-символи і відправляє сигнали в Telegram."""
     symbols = get_top_symbols()
     if not symbols:
         symbols = get_all_usdt_symbols()[:TOP_LIMIT]
 
-    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        exe.map(analyze_and_alert, symbols)
+    if not symbols:
+        logger.warning("No symbols found for scanning.")
+        return
 
+    logger.info("Starting scan for symbols: %s", symbols)
+
+    # Використовуємо ThreadPoolExecutor та чекаємо завершення всіх задач
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
+        # list() змушує виконання чекати завершення всіх потоків
+        list(exe.map(analyze_and_alert, symbols))
+
+    # Оновлюємо стан після завершення всіх аналізів
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES), id="scan_job")
+scheduler.add_job(
+    scan_top_symbols,                    # наша оновлена функція
+    "interval",
+    minutes=max(1, SCAN_INTERVAL_MINUTES),
+    id="scan_job",
+    next_run_time=datetime.now()         # щоб перший запуск був одразу
+)
 scheduler.start()
+logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
