@@ -177,11 +177,18 @@ application.add_handler(CommandHandler("orderflow", orderflow_command))
 application.add_handler(CommandHandler("ultrasecret", ultrasecret))
 
 # ---------- Flask Webhook ----------
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+WEBHOOK_PATH = f"/telegram_webhook/{TELEGRAM_TOKEN}"
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
     asyncio.get_event_loop().create_task(application.process_update(update))
     return "OK"
+
+def set_webhook():
+    url = f"https://dex-tg-bot.onrender.com{WEBHOOK_PATH}"
+    bot.set_webhook(url)
+    logging.info(f"Webhook встановлено: {url}")
 
 # ---------- Встановлення вебхука вручну ----------
 def set_webhook():
