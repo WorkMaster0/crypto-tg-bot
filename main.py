@@ -266,29 +266,79 @@ def scan_top_symbols():
     save_json_safe(STATE_FILE,state)
     logger.info("Scan finished at %s", state["last_scan"])
 
-# ---------------- SCHEDULER ----------------
+# -------------------------
+# SCHEDULER
+# -------------------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols,"interval",minutes=max(1,SCAN_INTERVAL_MINUTES))
+def scheduled_scan_job():
+    try:
+        symbols = get_top_symbols_by_volume(limit=TOP_LIMIT)
+        if not symbols:
+            symbols = get_all_usdt_symbols_from_binance()[:TOP_LIMIT]
+        # ThreadPoolExecutor для паралельного аналізу
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
+            futures = {exe.submit(analyze_and_maybe_alert, s, "15m", True): s for s in symbols}
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.exception("scan future error: %s", e)
+    except Exception as e:
+        logger.exception("scheduled_scan_job error: %s", e)
+
+scheduler.add_job(scheduled_scan_job, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES), id="scan_job")
 scheduler.start()
 
-# ---------------- FLASK ROUTES ----------------
+# -------------------------
+# FLASK ROUTES
+# -------------------------
 @app.route("/")
-def home(): return jsonify({"status":"ok","time":str(datetime.now(timezone.utc))})
-@app.route("/scan_now")
-def scan_now(): Thread(target=scan_top_symbols).start(); return jsonify({"status":"scanning"})
-@app.route("/status")
-def status(): return jsonify(state)
+def home():
+    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "state_signals_count": len(state.get("signals", {}))})
 
-# ---------------- WEBHOOK REGISTRATION ----------------
+# Telegram webhook — гнучкий маршрут, не дає 404
+@app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
+def telegram_webhook(token):
+    if token != TELEGRAM_TOKEN:
+        return jsonify({"ok": False, "reason": "invalid token"}), 403
+    if request.method == "POST":
+        update = request.get_json(force=True)
+        logger.debug("Telegram update: %s", update)
+        if "message" in update:
+            msg = update["message"]
+            chat_id = msg["chat"]["id"]
+            text = msg.get("text", "")
+            if text.startswith("/scan"):
+                Thread(target=scheduled_scan_job, daemon=True).start()
+                send_telegram("Manual scan started.")
+            elif text.startswith("/status"):
+                send_telegram(f"Status: signals={len(state.get('signals',{}))}, last_scan={state.get('last_scan')}")
+    return jsonify({"ok": True})
+
+# -------------------------
+# AUTO REGISTER WEBHOOK
+# -------------------------
 def auto_register_webhook():
-    if WEBHOOK_URL and TELEGRAM_TOKEN: set_telegram_webhook(WEBHOOK_URL)
-Thread(target=auto_register_webhook,daemon=True).start()
+    if WEBHOOK_URL and TELEGRAM_TOKEN:
+        logger.info("Registering Telegram webhook: %s", WEBHOOK_URL)
+        set_telegram_webhook(WEBHOOK_URL)
 
-# ---------------- BOOTSTRAP ----------------
-Thread(target=scan_top_symbols,daemon=True).start()
+Thread(target=auto_register_webhook, daemon=True).start()
 
-# ---------------- MAIN ----------------
-if __name__=="__main__":
-    logger.info("Starting Professional Pre-Top Bot...")
-    if WEBHOOK_URL: set_telegram_webhook(WEBHOOK_URL)
+# -------------------------
+# WARMUP
+# -------------------------
+def warmup_and_first_scan():
+    try:
+        scheduled_scan_job()
+    except Exception as e:
+        logger.exception("warmup_and_first_scan error: %s", e)
+
+Thread(target=warmup_and_first_scan, daemon=True).start()
+
+# -------------------------
+# MAIN
+# -------------------------
+if __name__ == "__main__":
+    logger.info("Starting pre-top detector bot")
     app.run(host="0.0.0.0", port=PORT)
