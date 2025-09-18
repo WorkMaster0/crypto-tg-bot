@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from threading import Thread, Lock
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 import io
 
@@ -78,18 +78,26 @@ def load_json_safe(path, default):
     return default
 
 def save_json_safe(path, data):
+    """Безпечне записування state: snapshot під lock, зберігаємо в tmp, потім os.replace."""
     try:
         with state_lock:
             snapshot = json.loads(json.dumps(data, default=str, ensure_ascii=False))
         dir_path = os.path.dirname(os.path.abspath(path))
         os.makedirs(dir_path, exist_ok=True)
         tmp = os.path.join(dir_path, os.path.basename(path) + ".tmp")
+
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2, ensure_ascii=False)
+
+        if not os.path.exists(tmp):
+            logger.error("Temp file %s was not created!", tmp)
+            return
+
         os.replace(tmp, path)
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
+# init state
 state = load_json_safe(STATE_FILE, {
     "signals": {},
     "last_scan": None,
@@ -253,8 +261,6 @@ def detect_signal(df: pd.DataFrame):
         votes.append("doji")
         candle_bonus = 1.1
 
-    confidence *= candle_bonus
-
     if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
         votes.append("fake_breakout_short")
         confidence += 0.15
@@ -361,6 +367,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
 
 # ---------------- BACKTEST SIGNALS ----------------
 def backtest_signals(symbol, df=None):
+    """Розрахунок реального winrate по історії сигналів"""
     try:
         if df is None:
             df = fetch_klines(symbol, limit=EMA_SCAN_LIMIT*2)
@@ -393,6 +400,7 @@ def backtest_signals(symbol, df=None):
 
 # ---------------- ML / Ranking топ-5 ----------------
 def rank_top_symbols():
+    """Розраховує топ-5 токенів за ймовірністю profit на основі confidence + історії"""
     ranked = []
     with state_lock:
         for sym, sig in state.get("signals", {}).items():
@@ -404,7 +412,7 @@ def rank_top_symbols():
     return [s for s,_ in ranked[:5]]
 
 # ---------------- SCAN TASK ----------------
-def scan_market():
+def scan_market(send_signals=True):
     logger.info("Starting market scan...")
     symbols = get_all_usdt_symbols()[:TOP_LIMIT]
     results = []
@@ -429,18 +437,13 @@ def scan_market():
             state["signals"][symbol] = {"action": action, "votes": votes, "pretop": pretop, "confidence": conf, "last_update": datetime.now(timezone.utc).isoformat()}
         save_json_safe(STATE_FILE, state)
 
-    logger.info("Market scan complete. Signals: %d", len(results))
+        # --- новий блок: автоматична відправка сигналів ---
+        if send_signals and action in ["LONG","SHORT"] and conf>=CONF_THRESHOLD_MEDIUM:
+            text = f"Signal {symbol}: {action} | Confidence: {conf:.2f}\nVotes: {votes}"
+            chart = plot_signal_candles(df, symbol, action, votes, pretop)
+            send_telegram(text, photo=chart)
 
-    # Автовідправка топ-5 сигналів
-    top5 = rank_top_symbols()
-    for sym in top5:
-        sig = state["signals"].get(sym)
-        if sig:
-            df = fetch_klines(sym)
-            if df is not None:
-                df = apply_all_features(df)
-                buf = plot_signal_candles(df, sym, sig["action"], sig.get("votes", []), sig.get("pretop", False))
-                send_telegram(f"{sym} — {sig['action']} — {sig['confidence']:.2f}", photo=buf)
+    logger.info("Market scan complete. Signals: %d", len(results))
 
 # ---------------- TELEGRAM WEBHOOK ----------------
 @app.route("/telegram_webhook/<token>", methods=["POST"])
@@ -456,28 +459,30 @@ def telegram_webhook(token):
         if message:
             chat_id = message["chat"]["id"]
             text = message.get("text", "")
-            if text.startswith("/"):
-                cmd = text[1:].split()[0].lower()
-                if cmd == "start":
-                    send_telegram("Привіт! Бот запущено і буде надсилати топ-5 сигналів.", chat_id=chat_id)
-                elif cmd == "signals":
-                    top = rank_top_symbols()
-                    if not top:
-                        send_telegram("Поки немає сигналів.", chat_id=chat_id)
+
+            # --- команди ---
+            if text.startswith("/start"):
+                send_telegram("Бот запущено!", chat_id=chat_id)
+            elif text.startswith("/top5"):
+                top = rank_top_symbols()
+                msg = "Топ 5 токенів за ML + winrate:\n" + "\n".join(top)
+                send_telegram(msg, chat_id=chat_id)
+            elif text.startswith("/mlplot"):
+                parts = text.split()
+                if len(parts)>=2:
+                    symbol = parts[1].upper()
+                    df = fetch_klines(symbol, limit=EMA_SCAN_LIMIT*2)
+                    if df is not None:
+                        df = apply_all_features(df)
+                        # графік всіх точок входу/виходу
+                        chart_buf = plot_signal_candles(df, symbol, "ML PLOT", [], pretop=False)
+                        send_telegram(f"ML plot for {symbol}", photo=chart_buf, chat_id=chat_id)
                     else:
-                        for sym in top:
-                            sig = state["signals"].get(sym, {})
-                            action = sig.get("action", "?")
-                            conf = sig.get("confidence", 0)
-                            df = fetch_klines(sym)
-                            if df is not None:
-                                df = apply_all_features(df)
-                                buf = plot_signal_candles(df, sym, action, sig.get("votes", []), sig.get("pretop", False))
-                                send_telegram(f"{sym} — {action} — {conf:.2f}", photo=buf, chat_id=chat_id)
+                        send_telegram(f"Не вдалося отримати дані по {symbol}", chat_id=chat_id)
                 else:
-                    send_telegram(f"Невідома команда: {text}", chat_id=chat_id)
+                    send_telegram("Вкажіть токен: /mlplot SYMBOL", chat_id=chat_id)
             else:
-                send_telegram(f"Отримано повідомлення: {text}", chat_id=chat_id)
+                send_telegram(f"Отримано: {text}", chat_id=chat_id)
 
         return jsonify({"ok": True})
     except Exception as e:
