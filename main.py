@@ -81,7 +81,7 @@ def save_json_safe(path, data):
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
-state = load_json_safe(STATE_FILE, {"signals": {}, "last_scan": None, "signal_history": {}})
+state = load_json_safe(STATE_FILE, {"signals": {}, "last_scan": None, "signal_history": {}, "win_stats": {}})
 
 # ---------------- TELEGRAM ----------------
 MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
@@ -260,39 +260,17 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- СТАРИЙ PLOT SIGNAL ----------------
-def plot_signal(df, symbol, action, votes, pretop):
-    plt.style.use('ggplot')
-    fig, ax = plt.subplots(figsize=(10,6))
-    ax.plot(df.index, df["close"], label="Close", color="blue")
-    ax.plot(df.index, df["ema_8"], label="EMA8", color="green")
-    ax.plot(df.index, df["ema_20"], label="EMA20", color="orange")
-    ax.fill_between(df.index, df["support"], df["resistance"], color='grey', alpha=0.2)
-    if pretop:
-        ax.scatter(df.index[-1], df["close"].iloc[-1], color="red", s=80, marker="^", label="Pre-top")
-    ax.set_title(f"{symbol} — {action} — {','.join([v for v in votes])}")
-    ax.set_ylabel("Price")
-    ax.legend()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
 # ---------------- НОВИЙ plot_signal_candles ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df.copy()[['open','high','low','close','volume']]
     df_plot.index.name = "Date"
-
-    # Лінії support/resistance
-    hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
 
     addplots = []
 
     # Підсвітка Pre-top (останні 3 свічки)
     if pretop:
         addplots.append(
-            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1, type='scatter', markersize=120, marker='^', color='magenta')
+            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)], type='scatter', markersize=120, marker='^', color='magenta')
         )
 
     # Підсвітка патернів
@@ -302,13 +280,35 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         "bearish_engulfing": "red",
         "hammer_bull": "lime",
         "shooting_star": "orange",
-        "doji": "blue"
+        "doji": "blue",
+        "fake_breakout_short": "darkred",
+        "fake_breakout_long": "darkgreen"
     }
     for pat, color in patterns.items():
         if pat in votes:
             addplots.append(
                 mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=80, marker='o', color=color)
             )
+
+    # Вхід, стоп-лосс, тейк-профіти
+    if action == "LONG":
+        entry = last['close']
+        stop = last['support']
+        take = last['resistance']
+    elif action == "SHORT":
+        entry = last['close']
+        stop = last['resistance']
+        take = last['support']
+    else:
+        entry = stop = take = None
+
+    if entry:
+        addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=50, marker='v', color='blue'))  # вхід
+        addplots.append(mpf.make_addplot([stop]*len(df), type='scatter', markersize=50, marker='x', color='red'))   # стоп-лосс
+        addplots.append(mpf.make_addplot([take]*len(df), type='scatter', markersize=50, marker='^', color='green')) # тейк-профіт
+
+    # Лінії support/resistance
+    hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
@@ -321,10 +321,10 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         volume=True,
         addplot=addplots,
         hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-        title=f"{symbol} — {action} — {','.join([v for v in votes])}",
+        title=f"{symbol} — {action}",
         ylabel='Price',
         ylabel_lower='Volume',
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white')
     )
     buf.seek(0)
     return buf
@@ -341,6 +341,17 @@ def analyze_and_alert(symbol: str):
     logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
                 symbol, action, confidence, [v for v in votes], pretop)
 
+    # Статистика виграшів
+    win_stats = state.get("win_stats", {})
+    if symbol not in win_stats:
+        win_stats[symbol] = {"total":0, "wins":0}
+    win_stats[symbol]["total"] += 1
+    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM:
+        if pretop or "strong_trend" in votes:
+            win_stats[symbol]["wins"] += 1
+    state["win_stats"] = win_stats
+    save_json_safe(STATE_FILE, state)
+
     if pretop:
         send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
 
@@ -353,9 +364,7 @@ def analyze_and_alert(symbol: str):
             f"Support: {last['support']:.6f}\n"
             f"Resistance: {last['resistance']:.6f}\n"
             f"Confidence: {confidence:.2f}\n"
-            f"Patterns: {','.join(votes)}\n"
             f"Pre-top: {pretop}\n"
-            f"Time: {last.name}\n"
         )
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
@@ -404,11 +413,13 @@ def telegram_webhook(token):
             elif text.startswith("/status"):
                 send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}")
             elif text.startswith("/top"):
-                pretop_tokens = [s for s in state.get("signals", {})]
-                if pretop_tokens:
-                    send_telegram("Pre-top tokens:\n" + "\n".join(pretop_tokens))
+                win_stats = state.get("win_stats", {})
+                if win_stats:
+                    top5 = sorted(win_stats.items(), key=lambda x: (x[1]['wins']/x[1]['total'] if x[1]['total']>0 else 0), reverse=True)[:5]
+                    lines = [f"{s[0]} — {((s[1]['wins']/s[1]['total'])*100 if s[1]['total']>0 else 0):.1f}%" for s in top5]
+                    send_telegram("Top-5 tokens by win rate:\n" + "\n".join(lines))
                 else:
-                    send_telegram("No pre-top tokens detected yet.")
+                    send_telegram("No win stats available yet.")
     return jsonify({"ok": True})
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
