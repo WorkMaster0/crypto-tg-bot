@@ -67,6 +67,8 @@ def load_json_safe(path, default):
         if os.path.exists(path):
             with open(path, "r") as f:
                 return json.load(f)
+    except json.JSONDecodeError:
+        logger.warning("Corrupted JSON file %s, resetting...", path)
     except Exception as e:
         logger.exception("load_json_safe error %s: %s", path, e)
     return default
@@ -77,8 +79,8 @@ def save_json_safe(path, data):
         if dir_name and not os.path.exists(dir_name):
             os.makedirs(dir_name)
         tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         os.replace(tmp, path)
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
@@ -260,7 +262,6 @@ def detect_signal(df: pd.DataFrame):
     return action, votes, pretop, last, confidence
 
 # ---------------- PLOT SIGNAL CANDLES ----------------
-# Функція plot_signal_candles з усіма старими функціями
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df[['open','high','low','close','volume']].copy()
     df_plot.index.name = "Date"
@@ -304,8 +305,9 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         for tl in take_levels:
             addplots.append(mpf.make_addplot([tl]*len(df), type='scatter', markersize=30, marker='^', color='green'))
 
-    h_support = df['support'].dropna().iloc[-5:] if len(df['support'].dropna())>=5 else df['support'].dropna()
-    h_resistance = df['resistance'].dropna().iloc[-5:] if len(df['resistance'].dropna())>=5 else df['resistance'].dropna()
+    # тільки основні рівні
+    h_support = df['support'].dropna().iloc[-3:] if len(df['support'].dropna())>=3 else df['support'].dropna()
+    h_resistance = df['resistance'].dropna().iloc[-3:] if len(df['resistance'].dropna())>=3 else df['resistance'].dropna()
     hlines = list(h_support.unique()) + list(h_resistance.unique())
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
@@ -313,7 +315,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
 
     buf = io.BytesIO()
     mpf.plot(df_plot, type='candle', style=s, volume=True, addplot=addplots,
-             hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+             hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed', linewidths=0.7),
              title=f"{symbol} — {action}", ylabel='Price', ylabel_lower='Volume',
              savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white'),
              tight_layout=True)
@@ -391,29 +393,43 @@ def smart_scan_job():
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(smart_scan_job, "interval", minutes=SCAN_INTERVAL_MINUTES, id="scan_job", next_run_time=datetime.now())
+scheduler.add_job(smart_scan_job, "interval", minutes=SCAN_INTERVAL_MINUTES, id="scan")
 scheduler.start()
-logger.info("Scheduler started with smart dynamic interval")
 
 # ---------------- FLASK ROUTES ----------------
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status":"ok","time":str(datetime.now(timezone.utc))})
+    return jsonify({"status":"ok","last_scan":state.get("last_scan")})
 
-# ---------------- AUTO REGISTER WEBHOOK ----------------
-if WEBHOOK_URL:
-    Thread(target=lambda: set_telegram_webhook(WEBHOOK_URL), daemon=True).start()
-
-# ---------------- WARMUP ----------------
-def warmup_and_first_scan():
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
     try:
-        smart_scan_job()
+        update = request.json
+        if "message" in update and "text" in update["message"]:
+            chat_id = update["message"]["chat"]["id"]
+            text = update["message"]["text"]
+            if text=="/history":
+                if state["signal_history"]:
+                    pdf = FPDF()
+                    pdf.add_page()
+                    pdf.set_font("Arial", size=12)
+                    pdf.cell(200,10,"Signal History",ln=True,align="C")
+                    for sym, signals in state["signal_history"].items():
+                        pdf.cell(200,10,sym,ln=True)
+                        for sig in signals[-5:]:
+                            pdf.cell(200,10,f"{sig['time']} {sig['action']} price={sig['price']:.6f} conf={sig['confidence']:.2f}",ln=True)
+                    buf = io.BytesIO(pdf.output(dest="S").encode("latin-1"))
+                    buf.seek(0)
+                    send_telegram("📊 Signal history PDF", photo=buf, chat_id=chat_id)
+            else:
+                send_telegram(f"Received: {text}", chat_id=chat_id)
+        return jsonify({"ok":True})
     except Exception as e:
-        logger.exception("warmup_and_first_scan error: %s", e)
-
-Thread(target=warmup_and_first_scan, daemon=True).start()
+        logger.exception("telegram_webhook error: %s", e)
+        return jsonify({"ok":False}), 500
 
 # ---------------- MAIN ----------------
 if __name__=="__main__":
-    logger.info("Starting pre-top detector bot")
+    set_telegram_webhook(WEBHOOK_URL)
+    logger.info("Starting Flask app on port %d", PORT)
     app.run(host="0.0.0.0", port=PORT)
