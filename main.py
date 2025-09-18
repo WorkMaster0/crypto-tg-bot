@@ -73,7 +73,9 @@ def load_json_safe(path, default):
 
 def save_json_safe(path, data):
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        dir_name = os.path.dirname(path)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -260,7 +262,7 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- НОВИЙ plot_signal_candles ----------------
+# ---------------- UPDATED plot_signal_candles ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df.copy()[['open','high','low','close','volume']]
     df_plot.index.name = "Date"
@@ -291,21 +293,22 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
             )
 
     # Вхід, стоп-лосс, тейк-профіти
-    if action == "LONG":
-        entry = last['close']
-        stop = last['support']
-        take = last['resistance']
-    elif action == "SHORT":
-        entry = last['close']
-        stop = last['resistance']
-        take = last['support']
-    else:
-        entry = stop = take = None
+    entry = last['close'] if action in ["LONG","SHORT"] else None
+    stop = last['support'] if action=="LONG" else last['resistance'] if action=="SHORT" else None
+    take_levels = []
+    if entry and stop:
+        if action=="LONG":
+            move = last['resistance'] - entry
+            take_levels = [entry + move*0.25, entry + move*0.5, entry + move*0.75]
+        elif action=="SHORT":
+            move = entry - last['support']
+            take_levels = [entry - move*0.25, entry - move*0.5, entry - move*0.75]
 
     if entry:
-        addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=50, marker='v', color='blue'))  # вхід
-        addplots.append(mpf.make_addplot([stop]*len(df), type='scatter', markersize=50, marker='x', color='red'))   # стоп-лосс
-        addplots.append(mpf.make_addplot([take]*len(df), type='scatter', markersize=50, marker='^', color='green')) # тейк-профіт
+        addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=40, marker='v', color='blue'))  # вхід
+        addplots.append(mpf.make_addplot([stop]*len(df), type='scatter', markersize=40, marker='x', color='red'))   # стоп-лосс
+        for tl in take_levels:
+            addplots.append(mpf.make_addplot([tl]*len(df), type='scatter', markersize=30, marker='^', color='green')) # тейки
 
     # Лінії support/resistance
     hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
@@ -324,7 +327,8 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         title=f"{symbol} — {action}",
         ylabel='Price',
         ylabel_lower='Volume',
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white')
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white'),
+        tight_layout=True
     )
     buf.seek(0)
     return buf
