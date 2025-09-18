@@ -1,4 +1,4 @@
-# main.py — Повний покращений Pre-top бот з графіками, Telegram та профілями користувачів
+# main.py — Pre-top бот з графіками, Telegram, профілями користувачів та історією сигналів
 import os
 import time
 import json
@@ -83,13 +83,12 @@ def save_json_safe(path, data):
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
-# Додано профілі користувачів
 state = load_json_safe(STATE_FILE, {
-    "signals": {}, 
-    "last_scan": None, 
-    "signal_history": {}, 
-    "win_stats": {}, 
-    "user_profiles": {}  # Індивідуальні налаштування
+    "signals": {},
+    "last_scan": None,
+    "signal_history": {},
+    "win_stats": {},
+    "user_profiles": {}
 })
 
 # ---------------- TELEGRAM ----------------
@@ -153,14 +152,14 @@ def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
             if not client:
                 raise RuntimeError("Binance client unavailable")
             kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            df = pd.DataFrame(kl, columns=["open_time", "open", "high", "low", "close", "volume",
-                                           "close_time", "qav", "num_trades", "tb_base", "tb_quote", "ignore"])
-            df = df[["open_time", "open", "high", "low", "close", "volume"]].astype(float)
+            df = pd.DataFrame(kl, columns=["open_time","open","high","low","close","volume",
+                                           "close_time","qav","num_trades","tb_base","tb_quote","ignore"])
+            df = df[["open_time","open","high","low","close","volume"]].astype(float)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df.set_index("open_time", inplace=True)
             return df
         except Exception as e:
-            logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt + 1, e)
+            logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt+1, e)
             time.sleep(0.5)
     return None
 
@@ -181,7 +180,6 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
         df["ADX_neg"] = adx.adx_neg()
         df["support"] = df["low"].rolling(20).min()
         df["resistance"] = df["high"].rolling(20).max()
-        # ATR для динамічного тейку/стопу
         df["ATR"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range()
     except Exception as e:
         logger.exception("apply_all_features error: %s", e)
@@ -246,22 +244,11 @@ def detect_signal(df: pd.DataFrame):
 
     confidence *= candle_bonus
 
-    # Fake breakout
-    if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
-        votes.append("fake_breakout_short")
-        confidence += 0.15
-    elif last["close"] < last["support"] * 1.005 and last["close"] > last["support"] * 0.99:
-        votes.append("fake_breakout_long")
-        confidence += 0.15
-
-    # Pre-top
     pretop = False
-    if len(df) >= 10:
-        recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
-        if (recent - last10) / last10 > 0.1:
-            pretop = True
-            confidence += 0.1
-            votes.append("pretop")
+    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10])/df["close"].iloc[-10] > 0.1:
+        pretop = True
+        confidence += 0.1
+        votes.append("pretop")
 
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
@@ -274,19 +261,19 @@ def detect_signal(df: pd.DataFrame):
 
 # ---------------- PLOT SIGNAL CANDLES ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
-    df_plot = df.copy()[['open','high','low','close','volume']]
+    df_plot = df[['open','high','low','close','volume']].copy()
     df_plot.index.name = "Date"
     addplots = []
-
     last = df.iloc[-1]
 
-    # Підсвітка Pre-top (останні 3 свічки)
+    # Pre-top
     if pretop:
         addplots.append(
-            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)], type='scatter', markersize=100, marker='^', color='magenta')
+            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)],
+                             type='scatter', markersize=100, marker='^', color='magenta')
         )
 
-    # Підсвітка патернів
+    # Патерни
     patterns = {
         "bullish_engulfing": "green",
         "bearish_engulfing": "red",
@@ -302,12 +289,12 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
                 mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=60, marker='o', color=color)
             )
 
-    # Динамічні тейки/стопи на основі ATR
+    # Динамічні тейки/стопи ATR
     entry = last['close'] if action in ["LONG","SHORT"] else None
     stop = last['support'] if action=="LONG" else last['resistance'] if action=="SHORT" else None
     take_levels = []
     if entry and stop:
-        atr = last.get("ATR", 0.0)
+        atr = last.get("ATR",0.0)
         if action=="LONG":
             take_levels = [entry + atr*0.5, entry + atr*1.0, entry + atr*1.5]
             stop = entry - atr*1.0
@@ -316,51 +303,46 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
             stop = entry + atr*1.0
 
     if entry:
-        addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=40, marker='v', color='blue'))  # вхід
-        addplots.append(mpf.make_addplot([stop]*len(df), type='scatter', markersize=40, marker='x', color='red'))   # стоп-лосс
+        addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=40, marker='v', color='blue'))
+        addplots.append(mpf.make_addplot([stop]*len(df), type='scatter', markersize=40, marker='x', color='red'))
         for tl in take_levels:
-            addplots.append(mpf.make_addplot([tl]*len(df), type='scatter', markersize=30, marker='^', color='green')) # тейки
+            addplots.append(mpf.make_addplot([tl]*len(df), type='scatter', markersize=30, marker='^', color='green'))
 
-    # Лінії support/resistance
-    hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
+    # Основні рівні support/resistance (останні 5 точок)
+    h_support = df['support'].dropna().iloc[-5:] if len(df['support'].dropna())>=5 else df['support'].dropna()
+    h_resistance = df['resistance'].dropna().iloc[-5:] if len(df['resistance'].dropna())>=5 else df['resistance'].dropna()
+    hlines = list(h_support.unique()) + list(h_resistance.unique())
+
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
 
     buf = io.BytesIO()
-    mpf.plot(
-        df_plot,
-        type='candle',
-        style=s,
-        volume=True,
-        addplot=addplots,
-        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-        title=f"{symbol} — {action}",
-        ylabel='Price',
-        ylabel_lower='Volume',
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white'),
-        tight_layout=True
-    )
+    mpf.plot(df_plot, type='candle', style=s, volume=True, addplot=addplots,
+             hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+             title=f"{symbol} — {action}", ylabel='Price', ylabel_lower='Volume',
+             savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white'),
+             tight_layout=True)
     buf.seek(0)
     return buf
 
 # ---------------- ANALYZE SYMBOL ----------------
 def analyze_and_alert(symbol: str, chat_id=None):
     df = fetch_klines(symbol)
-    if df is None or len(df) < 30:
+    if df is None or len(df)<30:
         return
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
-    prev_signal = state["signals"].get(symbol, "")
+    prev_signal = state["signals"].get(symbol,"")
 
     logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-                symbol, action, confidence, [v for v in votes], pretop)
+                symbol, action, confidence, votes, pretop)
 
-    # Статистика виграшів
-    win_stats = state.get("win_stats", {})
+    # Win stats
+    win_stats = state.get("win_stats",{})
     if symbol not in win_stats:
-        win_stats[symbol] = {"total":0, "wins":0}
+        win_stats[symbol] = {"total":0,"wins":0}
     win_stats[symbol]["total"] += 1
-    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM:
+    if action!="WATCH" and confidence>=CONF_THRESHOLD_MEDIUM:
         if pretop or "strong_trend" in votes:
             win_stats[symbol]["wins"] += 1
     state["win_stats"] = win_stats
@@ -380,16 +362,11 @@ def analyze_and_alert(symbol: str, chat_id=None):
     if pretop:
         send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}", chat_id=chat_id)
 
-    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
+    if action!="WATCH" and confidence>=CONF_THRESHOLD_MEDIUM and action!=prev_signal:
         msg = (
-            f"⚡ TRADE SIGNAL\n"
-            f"Symbol: {symbol}\n"
-            f"Action: {action}\n"
-            f"Price: {last['close']:.6f}\n"
-            f"Support: {last['support']:.6f}\n"
-            f"Resistance: {last['resistance']:.6f}\n"
-            f"Confidence: {confidence:.2f}\n"
-            f"Pre-top: {pretop}\n"
+            f"⚡ TRADE SIGNAL\nSymbol: {symbol}\nAction: {action}\nPrice: {last['close']:.6f}\n"
+            f"Support: {last['support']:.6f}\nResistance: {last['resistance']:.6f}\n"
+            f"Confidence: {confidence:.2f}\nPre-top: {pretop}\n"
         )
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf, chat_id=chat_id)
@@ -398,32 +375,26 @@ def analyze_and_alert(symbol: str, chat_id=None):
 
 # ---------------- SMART SCAN SCHEDULER ----------------
 def dynamic_scan_interval():
-    # Якщо великі свічки або високий об'єм → менший інтервал
-    # Простий приклад: якщо остання ATR велика → scan частіше
     symbols = get_all_usdt_symbols()
     if not symbols:
         return SCAN_INTERVAL_MINUTES
-    atrs = []
-    for s in symbols[:min(5, len(symbols))]:  # обмеження для швидкості
+    atrs=[]
+    for s in symbols[:min(5,len(symbols))]:
         df = fetch_klines(s, limit=30)
         if df is not None:
             df = apply_all_features(df)
             atrs.append(df["ATR"].iloc[-1])
     avg_atr = sum(atrs)/len(atrs) if atrs else 0
-    if avg_atr > 1.0:  # умова для частішого скану
-        return max(1, SCAN_INTERVAL_MINUTES//2)
-    return SCAN_INTERVAL_MINUTES
+    return max(1, SCAN_INTERVAL_MINUTES//2) if avg_atr>1 else SCAN_INTERVAL_MINUTES
 
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
     if not symbols:
         logger.warning("No symbols found for scanning.")
         return
-
     logger.info("Starting scan for %d symbols", len(symbols))
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
         list(exe.map(analyze_and_alert, symbols))
-
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
@@ -437,27 +408,27 @@ logger.info("Scheduler started with dynamic interval")
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "signals": len(state.get("signals", {}))})
+    return jsonify({"status":"ok","time":str(datetime.now(timezone.utc)),"signals":len(state.get("signals",{}))})
 
-@app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
+@app.route(f"/telegram_webhook/<token>", methods=["POST","GET"])
 def telegram_webhook(token):
-    if token != TELEGRAM_TOKEN:
-        return jsonify({"ok": False, "reason": "invalid token"}), 403
-    if request.method == "POST":
+    if token!=TELEGRAM_TOKEN:
+        return jsonify({"ok":False,"reason":"invalid token"}),403
+    if request.method=="POST":
         update = request.get_json(force=True)
         if "message" in update:
             msg = update["message"]
             chat_id = msg["chat"]["id"]
-            text = msg.get("text", "").lower()
+            text = msg.get("text","").lower()
             if text.startswith("/scan"):
                 Thread(target=scan_top_symbols, daemon=True).start()
                 send_telegram("Manual scan started.", chat_id=chat_id)
             elif text.startswith("/status"):
-                send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}", chat_id=chat_id)
+                send_telegram(f"Status:\nSignals={len(state.get('signals',{}))}\nLast scan={state.get('last_scan')}", chat_id=chat_id)
             elif text.startswith("/top"):
-                win_stats = state.get("win_stats", {})
+                win_stats = state.get("win_stats",{})
                 if win_stats:
-                    top5 = sorted(win_stats.items(), key=lambda x: (x[1]['wins']/x[1]['total'] if x[1]['total']>0 else 0), reverse=True)[:5]
+                    top5 = sorted(win_stats.items(), key=lambda x:(x[1]['wins']/x[1]['total'] if x[1]['total']>0 else 0), reverse=True)[:5]
                     lines = [f"{s[0]} — {((s[1]['wins']/s[1]['total'])*100 if s[1]['total']>0 else 0):.1f}%" for s in top5]
                     send_telegram("Top-5 tokens by win rate:\n" + "\n".join(lines), chat_id=chat_id)
                 else:
@@ -467,13 +438,13 @@ def telegram_webhook(token):
                 if len(parts)>=2:
                     param = parts[1]
                     value = float(parts[2]) if len(parts)>=3 else None
-                    profile = state["user_profiles"].get(str(chat_id), {"confidence":0.6, "tfs":"15m","take_count":3})
+                    profile = state["user_profiles"].get(str(chat_id), {"confidence":0.6,"tfs":"15m","take_count":3})
                     if param=="confidence" and value:
-                        profile["confidence"] = value
-                        state["user_profiles"][str(chat_id)] = profile
-                        save_json_safe(STATE_FILE, state)
+                        profile["confidence"]=value
+                        state["user_profiles"][str(chat_id)]=profile
+                        save_json_safe(STATE_FILE,state)
                         send_telegram(f"Profile updated: {profile}", chat_id=chat_id)
-    return jsonify({"ok": True})
+    return jsonify({"ok":True})
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
 def auto_register_webhook():
@@ -493,6 +464,6 @@ def warmup_and_first_scan():
 Thread(target=warmup_and_first_scan, daemon=True).start()
 
 # ---------------- MAIN ----------------
-if __name__ == "__main__":
+if __name__=="__main__":
     logger.info("Starting pre-top detector bot")
     app.run(host="0.0.0.0", port=PORT)
