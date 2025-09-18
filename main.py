@@ -1,4 +1,4 @@
-# main.py — Повний покращений Pre-top бот з графіками та Telegram (свічкові графіки)
+# main.py — Повний покращений Pre-top бот з графіками, Telegram та профілями користувачів
 import os
 import time
 import json
@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 import io
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import requests
@@ -16,6 +15,7 @@ from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 import ta
 import mplfinance as mpf
+from fpdf import FPDF  # Для PDF історії сигналів
 
 # ---------------- BINANCE CLIENT ----------------
 try:
@@ -83,7 +83,14 @@ def save_json_safe(path, data):
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
-state = load_json_safe(STATE_FILE, {"signals": {}, "last_scan": None, "signal_history": {}, "win_stats": {}})
+# Додано профілі користувачів
+state = load_json_safe(STATE_FILE, {
+    "signals": {}, 
+    "last_scan": None, 
+    "signal_history": {}, 
+    "win_stats": {}, 
+    "user_profiles": {}  # Індивідуальні налаштування
+})
 
 # ---------------- TELEGRAM ----------------
 MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
@@ -91,17 +98,18 @@ MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
 def escape_md_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
 
-def send_telegram(text: str, photo=None):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
+def send_telegram(text: str, photo=None, chat_id=None):
+    chat_id = chat_id or CHAT_ID
+    if not TELEGRAM_TOKEN or not chat_id:
         return
     try:
         if photo:
             files = {'photo': photo}
-            data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
+            data = {'chat_id': chat_id, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=10)
         else:
             payload = {
-                "chat_id": CHAT_ID,
+                "chat_id": chat_id,
                 "text": escape_md_v2(text),
                 "parse_mode": "MarkdownV2",
                 "disable_web_page_preview": True
@@ -173,6 +181,8 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
         df["ADX_neg"] = adx.adx_neg()
         df["support"] = df["low"].rolling(20).min()
         df["resistance"] = df["high"].rolling(20).max()
+        # ATR для динамічного тейку/стопу
+        df["ATR"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range()
     except Exception as e:
         logger.exception("apply_all_features error: %s", e)
     return df
@@ -262,21 +272,21 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- UPDATED plot_signal_candles ----------------
+# ---------------- PLOT SIGNAL CANDLES ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df.copy()[['open','high','low','close','volume']]
     df_plot.index.name = "Date"
-
     addplots = []
+
+    last = df.iloc[-1]
 
     # Підсвітка Pre-top (останні 3 свічки)
     if pretop:
         addplots.append(
-            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)], type='scatter', markersize=120, marker='^', color='magenta')
+            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)], type='scatter', markersize=100, marker='^', color='magenta')
         )
 
     # Підсвітка патернів
-    last = df.iloc[-1]
     patterns = {
         "bullish_engulfing": "green",
         "bearish_engulfing": "red",
@@ -289,20 +299,21 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
     for pat, color in patterns.items():
         if pat in votes:
             addplots.append(
-                mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=80, marker='o', color=color)
+                mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=60, marker='o', color=color)
             )
 
-    # Вхід, стоп-лосс, тейк-профіти
+    # Динамічні тейки/стопи на основі ATR
     entry = last['close'] if action in ["LONG","SHORT"] else None
     stop = last['support'] if action=="LONG" else last['resistance'] if action=="SHORT" else None
     take_levels = []
     if entry and stop:
+        atr = last.get("ATR", 0.0)
         if action=="LONG":
-            move = last['resistance'] - entry
-            take_levels = [entry + move*0.25, entry + move*0.5, entry + move*0.75]
+            take_levels = [entry + atr*0.5, entry + atr*1.0, entry + atr*1.5]
+            stop = entry - atr*1.0
         elif action=="SHORT":
-            move = entry - last['support']
-            take_levels = [entry - move*0.25, entry - move*0.5, entry - move*0.75]
+            take_levels = [entry - atr*0.5, entry - atr*1.0, entry - atr*1.5]
+            stop = entry + atr*1.0
 
     if entry:
         addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=40, marker='v', color='blue'))  # вхід
@@ -312,7 +323,6 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
 
     # Лінії support/resistance
     hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
-
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
 
@@ -334,7 +344,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
     return buf
 
 # ---------------- ANALYZE SYMBOL ----------------
-def analyze_and_alert(symbol: str):
+def analyze_and_alert(symbol: str, chat_id=None):
     df = fetch_klines(symbol)
     if df is None or len(df) < 30:
         return
@@ -354,10 +364,21 @@ def analyze_and_alert(symbol: str):
         if pretop or "strong_trend" in votes:
             win_stats[symbol]["wins"] += 1
     state["win_stats"] = win_stats
+
+    # Історія сигналів
+    if symbol not in state["signal_history"]:
+        state["signal_history"][symbol] = []
+    state["signal_history"][symbol].append({
+        "time": str(datetime.now(timezone.utc)),
+        "action": action,
+        "price": last['close'],
+        "confidence": confidence
+    })
+
     save_json_safe(STATE_FILE, state)
 
     if pretop:
-        send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
+        send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}", chat_id=chat_id)
 
     if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
@@ -371,11 +392,28 @@ def analyze_and_alert(symbol: str):
             f"Pre-top: {pretop}\n"
         )
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
-        send_telegram(msg, photo=photo_buf)
+        send_telegram(msg, photo=photo_buf, chat_id=chat_id)
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
-# ---------------- MASTER SCAN ----------------
+# ---------------- SMART SCAN SCHEDULER ----------------
+def dynamic_scan_interval():
+    # Якщо великі свічки або високий об'єм → менший інтервал
+    # Простий приклад: якщо остання ATR велика → scan частіше
+    symbols = get_all_usdt_symbols()
+    if not symbols:
+        return SCAN_INTERVAL_MINUTES
+    atrs = []
+    for s in symbols[:min(5, len(symbols))]:  # обмеження для швидкості
+        df = fetch_klines(s, limit=30)
+        if df is not None:
+            df = apply_all_features(df)
+            atrs.append(df["ATR"].iloc[-1])
+    avg_atr = sum(atrs)/len(atrs) if atrs else 0
+    if avg_atr > 1.0:  # умова для частішого скану
+        return max(1, SCAN_INTERVAL_MINUTES//2)
+    return SCAN_INTERVAL_MINUTES
+
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
     if not symbols:
@@ -392,10 +430,9 @@ def scan_top_symbols():
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES),
-                  id="scan_job", next_run_time=datetime.now())
+scheduler.add_job(scan_top_symbols, "interval", minutes=dynamic_scan_interval, id="scan_job", next_run_time=datetime.now())
 scheduler.start()
-logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
+logger.info("Scheduler started with dynamic interval")
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
@@ -410,20 +447,32 @@ def telegram_webhook(token):
         update = request.get_json(force=True)
         if "message" in update:
             msg = update["message"]
+            chat_id = msg["chat"]["id"]
             text = msg.get("text", "").lower()
             if text.startswith("/scan"):
                 Thread(target=scan_top_symbols, daemon=True).start()
-                send_telegram("Manual scan started.")
+                send_telegram("Manual scan started.", chat_id=chat_id)
             elif text.startswith("/status"):
-                send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}")
+                send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}", chat_id=chat_id)
             elif text.startswith("/top"):
                 win_stats = state.get("win_stats", {})
                 if win_stats:
                     top5 = sorted(win_stats.items(), key=lambda x: (x[1]['wins']/x[1]['total'] if x[1]['total']>0 else 0), reverse=True)[:5]
                     lines = [f"{s[0]} — {((s[1]['wins']/s[1]['total'])*100 if s[1]['total']>0 else 0):.1f}%" for s in top5]
-                    send_telegram("Top-5 tokens by win rate:\n" + "\n".join(lines))
+                    send_telegram("Top-5 tokens by win rate:\n" + "\n".join(lines), chat_id=chat_id)
                 else:
-                    send_telegram("No win stats available yet.")
+                    send_telegram("No win stats available yet.", chat_id=chat_id)
+            elif text.startswith("/profile"):
+                parts = text.split()
+                if len(parts)>=2:
+                    param = parts[1]
+                    value = float(parts[2]) if len(parts)>=3 else None
+                    profile = state["user_profiles"].get(str(chat_id), {"confidence":0.6, "tfs":"15m","take_count":3})
+                    if param=="confidence" and value:
+                        profile["confidence"] = value
+                        state["user_profiles"][str(chat_id)] = profile
+                        save_json_safe(STATE_FILE, state)
+                        send_telegram(f"Profile updated: {profile}", chat_id=chat_id)
     return jsonify({"ok": True})
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
