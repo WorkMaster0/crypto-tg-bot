@@ -1,4 +1,4 @@
-# main.py — Повний покращений Pre-top бот з графіками та Telegram
+# main.py — Повний покращений Pre-top бот з графіками та Telegram (свічкові графіки)
 import os
 import time
 import json
@@ -16,6 +16,7 @@ import requests
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 import ta
+import mplfinance as mpf
 
 # ---------------- BINANCE CLIENT ----------------
 try:
@@ -261,8 +262,8 @@ def detect_signal(df: pd.DataFrame):
     return action, votes, pretop, last, confidence
 
 # ---------------- PLOT SIGNAL ----------------
+# Стара функція залишена для порівняння
 def plot_signal(df, symbol, action, votes, pretop):
-    # Використовуємо стандартний стиль, гарантовано наявний
     plt.style.use('ggplot')
     fig, ax = plt.subplots(figsize=(10,6))
     ax.plot(df.index, df["close"], label="Close", color="blue")
@@ -277,6 +278,41 @@ def plot_signal(df, symbol, action, votes, pretop):
     buf = io.BytesIO()
     plt.savefig(buf, format="png")
     plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# ---------------- НОВИЙ plot_signal_candles ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop):
+    df_plot = df.copy()
+    df_plot.index.name = "Date"
+    df_plot = df_plot[['open','high','low','close','volume']]
+
+    support_levels = df["support"].dropna().unique()
+    resistance_levels = df["resistance"].dropna().unique()
+    hlines = list(support_levels) + list(resistance_levels)
+
+    addplots = []
+    if pretop:
+        addplots.append(
+            mpf.make_addplot([df['close'].iloc[-1]]*len(df), type='scatter', markersize=100, marker='^', color='magenta')
+        )
+
+    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
+    s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray')
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style=s,
+        volume=True,
+        addplot=addplots,
+        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+        title=f"{symbol} — {action} — {','.join([v for v in votes])}",
+        ylabel='Price',
+        ylabel_lower='Volume',
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+    )
     buf.seek(0)
     return buf
 
@@ -308,7 +344,8 @@ def analyze_and_alert(symbol: str):
             f"Pre-top: {pretop}\n"
             f"Time: {last.name}\n"
         )
-        photo_buf = plot_signal(df, symbol, action, votes, pretop)
+        # Використовуємо новий свічковий графік
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
