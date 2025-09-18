@@ -374,18 +374,22 @@ def analyze_and_alert(symbol: str, chat_id=None):
         save_json_safe(STATE_FILE, state)
 
 # ---------------- SMART SCAN SCHEDULER ----------------
-def dynamic_scan_interval():
-    symbols = get_all_usdt_symbols()
-    if not symbols:
-        return SCAN_INTERVAL_MINUTES
-    atrs=[]
-    for s in symbols[:min(5,len(symbols))]:
-        df = fetch_klines(s, limit=30)
-        if df is not None:
-            df = apply_all_features(df)
-            atrs.append(df["ATR"].iloc[-1])
-    avg_atr = sum(atrs)/len(atrs) if atrs else 0
-    return max(1, SCAN_INTERVAL_MINUTES//2) if avg_atr>1 else SCAN_INTERVAL_MINUTES
+def smart_scan_job():
+    try:
+        scan_top_symbols()  # робимо скан
+        # динамічний інтервал на основі ATR
+        interval = dynamic_scan_interval()
+        logger.info("Next scan in %d minutes", interval)
+        # Видаляємо стару job і створюємо нову з новим інтервалом
+        scheduler.reschedule_job("scan_job", trigger="interval", minutes=interval)
+    except Exception as e:
+        logger.exception("smart_scan_job error: %s", e)
+
+scheduler = BackgroundScheduler()
+# Стартуємо з початковим інтервалом
+scheduler.add_job(smart_scan_job, "interval", minutes=SCAN_INTERVAL_MINUTES, id="scan_job", next_run_time=datetime.now())
+scheduler.start()
+logger.info("Scheduler started with smart dynamic interval")
 
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
