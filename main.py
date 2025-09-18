@@ -127,8 +127,9 @@ def get_all_usdt_symbols():
         ex = client.get_exchange_info()
         symbols = [s["symbol"] for s in ex["symbols"]
                    if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
-        # Фільтр стейблкоінів
-        symbols = [s for s in symbols if not any(stable in s for stable in ["BUSD", "EUR", "USDC", "DAI"])]
+        # Фільтр: виключаємо тільки стейблкоіни як base asset
+        stable_assets = ["USDT", "BUSD", "USDC", "DAI"]
+        symbols = [s for s in symbols if not any(s.startswith(stable) for stable in stable_assets)]
         return symbols
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
@@ -155,33 +156,18 @@ def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     try:
-        df["ret1"] = df["close"].pct_change(1)
-        df["ret5"] = df["close"].pct_change(5)
+        # Всі індикатори та HA
         df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
         df["ema_20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
-        df["ema_50"] = ta.trend.EMAIndicator(df["close"], 50).ema_indicator()
-        df["sma_50"] = df["close"].rolling(50).mean()
-        df["ATR_14"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range()
+        df["MACD_hist"] = ta.trend.MACD(df["close"]).macd_diff()
         df["RSI_14"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
         stoch = ta.momentum.StochRSIIndicator(df["close"], 14, 3, 3)
         df["stoch_k"] = stoch.stochrsi_k()
         df["stoch_d"] = stoch.stochrsi_d()
-        macd = ta.trend.MACD(df["close"])
-        df["MACD"] = macd.macd()
-        df["MACD_signal"] = macd.macd_signal()
-        df["MACD_hist"] = macd.macd_diff()
         adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], 14)
         df["ADX"] = adx.adx()
         df["ADX_pos"] = adx.adx_pos()
         df["ADX_neg"] = adx.adx_neg()
-        bb = ta.volatility.BollingerBands(df["close"], 20, 2)
-        df["bb_h"] = bb.bollinger_hband()
-        df["bb_l"] = bb.bollinger_lband()
-        df["bb_width"] = (df["bb_h"] - df["bb_l"]) / df["bb_l"].replace(0, np.nan)
-        pv = df["close"] * df["volume"]
-        df["vwap_50"] = (pv.rolling(50).sum() / df["volume"].rolling(50).sum()).replace([np.inf, -np.inf], np.nan)
-        df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()
-        df["CCI"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], 20).cci()
         ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
         ha_open_vals = [(df["open"].iloc[0] + df["close"].iloc[0]) / 2]
         for i in range(1, len(df)):
@@ -201,34 +187,26 @@ def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
     votes = []
 
-    # EMA
     votes.append(("ema_bull" if last["ema_8"] > last["ema_20"] else "ema_bear", 0.1))
-    # MACD
     votes.append(("macd_up" if last["MACD_hist"] > 0 else "macd_down", 0.1))
-    # RSI
     if last["RSI_14"] > 70:
         votes.append(("rsi_overbought", -0.05))
     elif last["RSI_14"] < 30:
         votes.append(("rsi_oversold", 0.05))
-    # Stoch
     if last["stoch_k"] > 80:
         votes.append(("stoch_overbought", -0.05))
     elif last["stoch_k"] < 20:
         votes.append(("stoch_oversold", 0.05))
-    # ADX
     if last["ADX"] > 25:
         votes.append(("adx_up" if last["ADX_pos"] > last["ADX_neg"] else "adx_down", 0.08))
-    # HA exhaustion
     if df["ha_dir"].iloc[-5:-1].gt(0).all() and last["ha_dir"] < 0:
         votes.append(("ha_exhaustion", 0.05))
     if df["ha_dir"].iloc[-5:-1].lt(0).all() and last["ha_dir"] > 0:
         votes.append(("ha_exhaustion_buy", 0.05))
 
     pretop = False
-    if len(df) >= 10:
-        recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
-        if (recent - last10) / last10 > 0.1:
-            pretop = True
+    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.1:
+        pretop = True
 
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
@@ -250,8 +228,7 @@ def plot_signal(df, symbol, action, votes, pretop):
     ax.plot(df.index, df["close"], label="Close", color="blue")
     ax.plot(df.index, df["ema_8"], label="EMA8", color="green")
     ax.plot(df.index, df["ema_20"], label="EMA20", color="orange")
-    ax.fill_between(df.index, df["bb_l"], df["bb_h"], color='grey', alpha=0.1)
-    # Mark pretop
+    ax.fill_between(df.index, df["support"], df["resistance"], color='grey', alpha=0.1)
     if pretop:
         ax.scatter(df.index[-1], df["close"].iloc[-1], color="red", s=80, marker="^", label="Pre-top")
     ax.set_title(f"{symbol} — {action} — {','.join([v[0] for v in votes])}")
