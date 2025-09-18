@@ -128,7 +128,7 @@ def get_all_usdt_symbols():
         symbols = [s["symbol"] for s in ex["symbols"]
                    if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
         # Фільтр стейблкоінів
-        symbols = [s for s in symbols if not any(stable in s for stable in ["USDT", "BUSD", "USDC", "DAI"])]
+        symbols = [s for s in symbols if not any(stable in s for stable in ["BUSD", "EUR", "USDC", "DAI"])]
         return symbols
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
