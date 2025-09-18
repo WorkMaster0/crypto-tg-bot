@@ -33,3 +33,4 @@ lightgbm
 mplfinance
 websocket-client
 rel
+fpdf
