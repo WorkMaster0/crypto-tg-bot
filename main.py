@@ -1,4 +1,4 @@
-# main_pro_fixed.py — Професійний універсальний pre-top бот з покращеними сигналами
+# main_pro_fixed_full.py — Професійний універсальний pre-top бот з виправленнями
 
 import os
 import time
@@ -82,19 +82,15 @@ def save_json_safe(path, data):
 state = load_json_safe(STATE_FILE, {"signals": {}, "last_scan": None, "signal_history": {}})
 
 # ---------------- TELEGRAM ----------------
-MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
-
-def escape_md_v2(text: str) -> str:
-    return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
-
 def send_telegram(text: str):
+    """Надсилає повідомлення в Telegram (HTML режим)"""
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
         payload = {
             "chat_id": CHAT_ID,
-            "text": escape_md_v2(text),
-            "parse_mode": "MarkdownV2",
+            "text": str(text),
+            "parse_mode": "HTML",   # FIX: тепер HTML, а не MarkdownV2
             "disable_web_page_preview": True
         }
         r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
@@ -121,18 +117,6 @@ def get_all_usdt_symbols():
         return [s["symbol"] for s in ex["symbols"] if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
-        return []
-
-def get_top_symbols(limit=TOP_LIMIT):
-    if not client:
-        return []
-    try:
-        tickers = client.get_ticker()
-        usdt = [t for t in tickers if t["symbol"].endswith("USDT")]
-        sorted_t = sorted(usdt, key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        return [t["symbol"] for t in sorted_t[:limit]]
-    except Exception as e:
-        logger.exception("get_top_symbols error: %s", e)
         return []
 
 def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
@@ -252,9 +236,9 @@ def detect_signal(df: pd.DataFrame):
             pretop = True
 
     action = "WATCH"
-    if last["close"] >= last["resistance"] * 0.995:
+    if last["close"] >= last["resistance"] * 0.98:   # FIX: умови м’якші
         action = "SHORT"
-    elif last["close"] <= last["support"] * 1.005:
+    elif last["close"] <= last["support"] * 1.02:   # FIX: умови м’якші
         action = "LONG"
 
     confidence = min(1.0, 0.1 + 0.05 * len(votes) + (0.08 if pretop else 0))
@@ -272,14 +256,14 @@ def analyze_and_alert(symbol: str):
 
     # Pre-top повідомлення
     if pretop:
-        send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
+        send_telegram(f"⚡ Pre-top detected for <b>{symbol}</b>, price={last['close']:.6f}")
 
     # Основний сигнал
     if action != "WATCH" and confidence > CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
             f"⚡ <b>TRADE SIGNAL</b>\n"
-            f"Symbol: {symbol}\n"
-            f"Action: {action}\n"
+            f"Symbol: <b>{symbol}</b>\n"
+            f"Action: <b>{action}</b>\n"
             f"Price: {last['close']:.6f}\n"
             f"Support: {last['support']:.6f}\n"
             f"Resistance: {last['resistance']:.6f}\n"
@@ -310,15 +294,26 @@ def scan_top_symbols():
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES),
-                  id="scan_job", next_run_time=datetime.now())
+scheduler.add_job(
+    scan_top_symbols, "interval",
+    minutes=max(1, SCAN_INTERVAL_MINUTES),
+    id="scan_job",
+    next_run_time=datetime.now(),
+    max_instances=3,           # FIX
+    misfire_grace_time=300,    # FIX
+    coalesce=True              # FIX
+)
 scheduler.start()
 logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "state_signals_count": len(state.get("signals", {}))})
+    return jsonify({
+        "status": "ok",
+        "time": str(datetime.now(timezone.utc)),
+        "state_signals_count": len(state.get("signals", {}))
+    })
 
 @app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
 def telegram_webhook(token):
