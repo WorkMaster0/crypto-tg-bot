@@ -444,6 +444,28 @@ def scan_market():
 
     logger.info("Market scan complete. Signals: %d", len(results))
 
+#flask
+@app.route("/telegram_webhook/<token>", methods=["POST"])
+def telegram_webhook(token):
+    if token != TELEGRAM_TOKEN:
+        return "Unauthorized", 403
+    try:
+        data = request.get_json()
+        if not data:
+            return "No data", 400
+
+        # обробка повідомлень від користувачів
+        message = data.get("message")
+        if message:
+            chat_id = message["chat"]["id"]
+            text = message.get("text", "")
+            # приклад відповіді
+            send_telegram(f"Отримано: {text}", chat_id=chat_id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.exception("Webhook error: %s", e)
+        return "Error", 500
+
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
 scheduler.add_job(scan_market, 'interval', minutes=SCAN_INTERVAL_MINUTES)
