@@ -31,4 +31,5 @@ ta
 aiogram
 lightgbm
 mplfinance
-websocket
+websocket-client
+rel
