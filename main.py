@@ -414,8 +414,8 @@ def smart_scan_job():
         logger.exception("smart_scan_job error: %s", e)
 
 # ---------------- API ROUTES ----------------
-@app.route("/webhook", methods=["POST"])
-def webhook():
+@app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
     data = request.json
     if not data:
         return jsonify({"status":"error","reason":"empty"})
