@@ -260,7 +260,26 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- PLOT SIGNAL CANDLES ----------------
+# ---------------- СТАРИЙ PLOT SIGNAL (для порівняння) ----------------
+def plot_signal(df, symbol, action, votes, pretop):
+    plt.style.use('ggplot')
+    fig, ax = plt.subplots(figsize=(10,6))
+    ax.plot(df.index, df["close"], label="Close", color="blue")
+    ax.plot(df.index, df["ema_8"], label="EMA8", color="green")
+    ax.plot(df.index, df["ema_20"], label="EMA20", color="orange")
+    ax.fill_between(df.index, df["support"], df["resistance"], color='grey', alpha=0.2)
+    if pretop:
+        ax.scatter(df.index[-1], df["close"].iloc[-1], color="red", s=80, marker="^", label="Pre-top")
+    ax.set_title(f"{symbol} — {action} — {','.join([v for v in votes])}")
+    ax.set_ylabel("Price")
+    ax.legend()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# ---------------- НОВИЙ PLOT SIGNAL CANDLES ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df.copy()
     df_plot.index.name = "Date"
@@ -273,11 +292,11 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
     addplots = []
     if pretop:
         addplots.append(
-            mpf.make_addplot([df['close'].iloc[-1]]*len(df), type='scatter', markersize=100, marker='^', color='magenta')
+            mpf.make_addplot([df['close'].iloc[-1]]*len(df), type='scatter', markersize=80, marker='^', color='magenta')
         )
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
-    s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray')
+    s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
 
     buf = io.BytesIO()
     mpf.plot(
