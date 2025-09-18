@@ -1,4 +1,4 @@
-# main.py — Покращений Pre-top бот з розумними сигналами
+# main.py — Покращений Pre-top бот з патернами та фільтрацією
 import os
 import time
 import json
@@ -18,7 +18,6 @@ import ta
 # ---------------- BINANCE CLIENT ----------------
 try:
     from binance.client import Client as BinanceClient
-    from binance.streams import ThreadedWebsocketManager
     BINANCE_PY_AVAILABLE = True
 except Exception:
     BINANCE_PY_AVAILABLE = False
@@ -114,11 +113,21 @@ def set_telegram_webhook(webhook_url: str):
 
 # ---------------- MARKET DATA ----------------
 def get_all_usdt_symbols():
+    """Отримати всі пари USDT, виключаючи стейбли та фондові токени"""
     if not client:
         return []
     try:
         ex = client.get_exchange_info()
-        return [s["symbol"] for s in ex["symbols"] if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
+        symbols = [
+            s["symbol"] for s in ex["symbols"]
+            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+        ]
+        blacklist = [
+            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
+            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG"
+        ]
+        filtered = [s for s in symbols if not any(b in s for b in blacklist)]
+        return filtered
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
         return []
@@ -144,17 +153,9 @@ def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     try:
-        df["ret1"] = df["close"].pct_change(1)
-        df["ret5"] = df["close"].pct_change(5)
         df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
         df["ema_20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
-        df["ema_50"] = ta.trend.EMAIndicator(df["close"], 50).ema_indicator()
-        df["sma_50"] = df["close"].rolling(50).mean()
-        df["ATR_14"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range()
         df["RSI_14"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
-        stoch = ta.momentum.StochRSIIndicator(df["close"], 14, 3, 3)
-        df["stoch_k"] = stoch.stochrsi_k()
-        df["stoch_d"] = stoch.stochrsi_d()
         macd = ta.trend.MACD(df["close"])
         df["MACD"] = macd.macd()
         df["MACD_signal"] = macd.macd_signal()
@@ -163,22 +164,6 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
         df["ADX"] = adx.adx()
         df["ADX_pos"] = adx.adx_pos()
         df["ADX_neg"] = adx.adx_neg()
-        bb = ta.volatility.BollingerBands(df["close"], 20, 2)
-        df["bb_h"] = bb.bollinger_hband()
-        df["bb_l"] = bb.bollinger_lband()
-        df["bb_width"] = (df["bb_h"] - df["bb_l"]) / df["bb_l"].replace(0, np.nan)
-        pv = df["close"] * df["volume"]
-        df["vwap_50"] = (pv.rolling(50).sum() / df["volume"].rolling(50).sum()).replace([np.inf, -np.inf], np.nan)
-        df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()
-        df["CCI"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], 20).cci()
-        ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
-        ha_open_vals = [(df["open"].iloc[0] + df["close"].iloc[0]) / 2]
-        for i in range(1, len(df)):
-            ha_open_vals.append((ha_open_vals[-1] + ha_close.iloc[i - 1]) / 2)
-        df["ha_close"] = ha_close
-        df["ha_open"] = ha_open_vals
-        df["ha_body"] = df["ha_close"] - df["ha_open"]
-        df["ha_dir"] = np.sign(df["ha_body"])
         df["support"] = df["low"].rolling(20).min()
         df["resistance"] = df["high"].rolling(20).max()
     except Exception as e:
@@ -188,39 +173,94 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     votes = []
+    confidence = 0.2  # базовий рівень
 
+    # === Трендові індикатори ===
     if last["ema_8"] > last["ema_20"]:
-        votes.append(("ema_bull", 0.1))
+        votes.append("ema_bull")
+        confidence += 0.1
     else:
-        votes.append(("ema_bear", 0.1))
-    if last["MACD_hist"] > 0:
-        votes.append(("macd_up", 0.1))
-    else:
-        votes.append(("macd_down", 0.1))
-    if last["RSI_14"] > 70:
-        votes.append(("rsi_overbought", -0.05))
-    elif last["RSI_14"] < 30:
-        votes.append(("rsi_oversold", 0.05))
-    if last["stoch_k"] > 80:
-        votes.append(("stoch_overbought", -0.05))
-    elif last["stoch_k"] < 20:
-        votes.append(("stoch_oversold", 0.05))
-    if last["ADX"] > 25:
-        if last["ADX_pos"] > last["ADX_neg"]:
-            votes.append(("adx_up", 0.08))
-        else:
-            votes.append(("adx_down", 0.08))
-    if df["ha_dir"].iloc[-5:-1].gt(0).all() and last["ha_dir"] < 0:
-        votes.append(("ha_exhaustion", 0.05))
-    if df["ha_dir"].iloc[-5:-1].lt(0).all() and last["ha_dir"] > 0:
-        votes.append(("ha_exhaustion_buy", 0.05))
+        votes.append("ema_bear")
+        confidence += 0.05
 
+    if last["MACD_hist"] > 0:
+        votes.append("macd_up")
+        confidence += 0.1
+    else:
+        votes.append("macd_down")
+        confidence += 0.05
+
+    if last["RSI_14"] < 30:
+        votes.append("rsi_oversold")
+        confidence += 0.08
+    elif last["RSI_14"] > 70:
+        votes.append("rsi_overbought")
+        confidence += 0.08
+
+    if last["ADX"] > 25:
+        votes.append("strong_trend")
+        confidence *= 1.1
+
+    # === Свічкові патерни ===
+    body = last["close"] - last["open"]
+    rng = last["high"] - last["low"]
+    upper_shadow = last["high"] - max(last["close"], last["open"])
+    lower_shadow = min(last["close"], last["open"]) - last["low"]
+    candle_bonus = 1.0
+
+    if lower_shadow > 2 * abs(body) and body > 0:
+        votes.append("hammer_bull")
+        candle_bonus = 1.2
+    elif upper_shadow > 2 * abs(body) and body < 0:
+        votes.append("shooting_star")
+        candle_bonus = 1.2
+
+    if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
+        votes.append("bullish_engulfing")
+        candle_bonus = 1.25
+    elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
+        votes.append("bearish_engulfing")
+        candle_bonus = 1.25
+
+    if abs(body) < 0.1 * rng:
+        votes.append("doji")
+        candle_bonus = 1.1
+
+    if (
+        prev["close"] < prev["open"]
+        and abs(body) > abs(prev["close"] - prev["open"])
+        and last["close"] > prev["open"]
+    ):
+        votes.append("morning_star")
+        candle_bonus = 1.3
+    elif (
+        prev["close"] > prev["open"]
+        and abs(body) > abs(prev["close"] - prev["open"])
+        and last["close"] < prev["open"]
+    ):
+        votes.append("evening_star")
+        candle_bonus = 1.3
+
+    confidence *= candle_bonus
+
+    # === Сквіз (fake breakout) ===
+    if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
+        votes.append("fake_breakout_short")
+        confidence += 0.15
+    elif last["close"] < last["support"] * 1.005 and last["close"] > last["support"] * 0.99:
+        votes.append("fake_breakout_long")
+        confidence += 0.15
+
+    # === Pre-top ===
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
         if (recent - last10) / last10 > 0.1:
             pretop = True
+            confidence += 0.1
+            votes.append("pretop")
 
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
@@ -228,13 +268,7 @@ def detect_signal(df: pd.DataFrame):
     elif last["close"] <= last["support"] * 1.005:
         action = "LONG"
 
-    confidence = 0.1
-    for vote, weight in votes:
-        confidence += weight
-    if pretop:
-        confidence += 0.08
     confidence = max(0, min(1, confidence))
-
     return action, votes, pretop, last, confidence
 
 # ---------------- ANALYZE SYMBOL ----------------
@@ -247,21 +281,21 @@ def analyze_and_alert(symbol: str):
     prev_signal = state["signals"].get(symbol, "")
 
     logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-                symbol, action, confidence, [v[0] for v in votes], pretop)
+                symbol, action, confidence, [v for v in votes], pretop)
 
     if pretop:
         send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
 
     if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
-            f"⚡ <b>TRADE SIGNAL</b>\n"
+            f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
             f"Price: {last['close']:.6f}\n"
             f"Support: {last['support']:.6f}\n"
             f"Resistance: {last['resistance']:.6f}\n"
             f"Confidence: {confidence:.2f}\n"
-            f"Patterns: {','.join([v[0] for v in votes])}\n"
+            f"Patterns: {','.join(votes)}\n"
             f"Pre-top: {pretop}\n"
             f"Time: {last.name}\n"
         )
@@ -276,8 +310,7 @@ def scan_top_symbols():
         logger.warning("No symbols found for scanning.")
         return
 
-    logger.info("Starting scan for symbols: %s", symbols)
-
+    logger.info("Starting scan for %d symbols", len(symbols))
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
         list(exe.map(analyze_and_alert, symbols))
 
@@ -295,7 +328,7 @@ logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "state_signals_count": len(state.get("signals", {}))})
+    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "signals": len(state.get("signals", {}))})
 
 @app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
 def telegram_webhook(token):
