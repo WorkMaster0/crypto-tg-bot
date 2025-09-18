@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from threading import Thread
+from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor
 import io
 import pandas as pd
@@ -61,7 +61,9 @@ else:
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 
-# ---------------- STATE ----------------
+# ---------------- STATE + LOCK ----------------
+state_lock = Lock()
+
 def load_json_safe(path, default):
     try:
         if os.path.exists(path):
@@ -75,12 +77,11 @@ def load_json_safe(path, default):
 
 def save_json_safe(path, data):
     try:
-        dir_name = os.path.dirname(path)
-        if dir_name and not os.path.exists(dir_name):
-            os.makedirs(dir_name)
+        with state_lock:
+            snapshot = json.loads(json.dumps(data, default=str))  # безпечна копія
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+            json.dump(snapshot, f, indent=2, ensure_ascii=False, default=str)
         os.replace(tmp, path)
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
@@ -293,11 +294,11 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
     if entry and stop:
         atr = last.get("ATR",0.0)
         if action=="LONG":
-            take_levels = [entry + atr*0.5, entry + atr*1.0, entry + atr*1.5]
-            stop = entry - atr*1.0
+            take_levels = [entry + atr * 0.5 * i for i in range(1, 11)]
+            stop = entry - atr * 1.5
         elif action=="SHORT":
-            take_levels = [entry - atr*0.5, entry - atr*1.0, entry - atr*1.5]
-            stop = entry + atr*1.0
+            take_levels = [entry - atr * 0.5 * i for i in range(1, 11)]
+            stop = entry + atr * 1.5
 
     if entry:
         addplots.append(mpf.make_addplot([entry]*len(df), type='scatter', markersize=40, marker='v', color='blue'))
@@ -329,30 +330,32 @@ def analyze_and_alert(symbol: str, chat_id=None):
         return
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
-    prev_signal = state["signals"].get(symbol,"")
+    with state_lock:
+        prev_signal = state["signals"].get(symbol,"")
 
     logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
                 symbol, action, confidence, votes, pretop)
 
-    # Win stats
-    win_stats = state.get("win_stats",{})
-    if symbol not in win_stats:
-        win_stats[symbol] = {"total":0,"wins":0}
-    win_stats[symbol]["total"] += 1
-    if action!="WATCH" and confidence>=CONF_THRESHOLD_MEDIUM:
-        if pretop or "strong_trend" in votes:
-            win_stats[symbol]["wins"] += 1
-    state["win_stats"] = win_stats
+    with state_lock:
+        # Win stats
+        win_stats = state.get("win_stats",{})
+        if symbol not in win_stats:
+            win_stats[symbol] = {"total":0,"wins":0}
+        win_stats[symbol]["total"] += 1
+        if action!="WATCH" and confidence>=CONF_THRESHOLD_MEDIUM:
+            if pretop or "strong_trend" in votes:
+                win_stats[symbol]["wins"] += 1
+        state["win_stats"] = win_stats
 
-    # Історія сигналів
-    if symbol not in state["signal_history"]:
-        state["signal_history"][symbol] = []
-    state["signal_history"][symbol].append({
-        "time": str(datetime.now(timezone.utc)),
-        "action": action,
-        "price": last['close'],
-        "confidence": confidence
-    })
+        # Історія сигналів
+        if symbol not in state["signal_history"]:
+            state["signal_history"][symbol] = []
+        state["signal_history"][symbol].append({
+            "time": str(datetime.now(timezone.utc)),
+            "action": action,
+            "price": last['close'],
+            "confidence": confidence
+        })
 
     save_json_safe(STATE_FILE, state)
 
@@ -367,7 +370,8 @@ def analyze_and_alert(symbol: str, chat_id=None):
         )
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf, chat_id=chat_id)
-        state["signals"][symbol] = action
+        with state_lock:
+            state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
 # ---------------- SMART SCAN JOB ----------------
@@ -382,54 +386,82 @@ def smart_scan_job():
         try:
             with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
                 list(exe.map(analyze_and_alert, symbols))
-        except RuntimeError as e:
-            logger.warning("Executor shutdown: %s", e)
+        except Exception as e:
+            logger.exception("ThreadPoolExecutor error: %s", e)
 
-        state["last_scan"] = str(datetime.now(timezone.utc))
+        with state_lock:
+            state["last_scan"] = str(datetime.now(timezone.utc))
         save_json_safe(STATE_FILE, state)
-        logger.info("Scan finished at %s", state["last_scan"])
+
+        # адаптація частоти
+        strong_count = sum(
+            1 for h in state["signal_history"].values()
+            if h and h[-1]["confidence"]>=0.7
+        )
+        if strong_count > 3:
+            new_interval = 0.5  # кожні 30 сек
+        elif strong_count == 0:
+            new_interval = 3    # раз на 3 хв
+        else:
+            new_interval = 1    # раз на хв
+        try:
+            scheduler.reschedule_job("scan", trigger="interval", minutes=new_interval)
+            logger.info("Rescheduled scan interval to %s min", new_interval)
+        except Exception:
+            pass
+
     except Exception as e:
         logger.exception("smart_scan_job error: %s", e)
 
-# ---------------- SCHEDULER ----------------
-scheduler = BackgroundScheduler()
-scheduler.add_job(smart_scan_job, "interval", minutes=SCAN_INTERVAL_MINUTES, id="scan")
-scheduler.start()
-
-# ---------------- FLASK ROUTES ----------------
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"status":"ok","last_scan":state.get("last_scan")})
-
-@app.route("/telegram", methods=["POST"])
-def telegram_webhook():
+# ---------------- API ROUTES ----------------
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+    if not data:
+        return jsonify({"status":"error","reason":"empty"})
     try:
-        update = request.json
-        if "message" in update and "text" in update["message"]:
-            chat_id = update["message"]["chat"]["id"]
-            text = update["message"]["text"]
-            if text=="/history":
-                if state["signal_history"]:
-                    pdf = FPDF()
-                    pdf.add_page()
-                    pdf.set_font("Arial", size=12)
-                    pdf.cell(200,10,"Signal History",ln=True,align="C")
-                    for sym, signals in state["signal_history"].items():
-                        pdf.cell(200,10,sym,ln=True)
-                        for sig in signals[-5:]:
-                            pdf.cell(200,10,f"{sig['time']} {sig['action']} price={sig['price']:.6f} conf={sig['confidence']:.2f}",ln=True)
-                    buf = io.BytesIO(pdf.output(dest="S").encode("latin-1"))
-                    buf.seek(0)
-                    send_telegram("📊 Signal history PDF", photo=buf, chat_id=chat_id)
-            else:
-                send_telegram(f"Received: {text}", chat_id=chat_id)
-        return jsonify({"ok":True})
-    except Exception as e:
-        logger.exception("telegram_webhook error: %s", e)
-        return jsonify({"ok":False}), 500
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"]["text"].strip().lower()
+    except Exception:
+        return jsonify({"status":"error","reason":"invalid payload"})
+
+    if text=="/signals":
+        with state_lock:
+            sigs = state["signals"]
+        msg = "📊 Active signals:\n" + "\n".join(f"{s}: {a}" for s,a in sigs.items() if a!="WATCH")
+        send_telegram(msg or "No signals", chat_id=chat_id)
+    elif text=="/profile":
+        with state_lock:
+            profile = state["user_profiles"].get(str(chat_id),{})
+        msg = f"👤 Profile: {profile}" if profile else "No profile found"
+        send_telegram(msg, chat_id=chat_id)
+    elif text=="/history":
+        buf = io.BytesIO()
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, txt="Signal History", ln=True, align="C")
+        with state_lock:
+            hist = state["signal_history"]
+        for sym, entries in hist.items():
+            pdf.cell(200, 10, txt=sym, ln=True)
+            for e in entries[-5:]:
+                pdf.cell(200, 10, txt=f"{e['time']} {e['action']} {e['price']:.6f} conf={e['confidence']:.2f}", ln=True)
+        pdf.output(buf)
+        buf.seek(0)
+        send_telegram("📑 Signal history attached", photo=buf, chat_id=chat_id)
+
+    return jsonify({"status":"ok"})
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status":"ok","last_scan":state.get("last_scan")})
 
 # ---------------- MAIN ----------------
 if __name__=="__main__":
     set_telegram_webhook(WEBHOOK_URL)
-    logger.info("Starting Flask app on port %d", PORT)
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(smart_scan_job, "interval", minutes=SCAN_INTERVAL_MINUTES, id="scan")
+    scheduler.start()
+    logger.info("Bot started on port %d", PORT)
     app.run(host="0.0.0.0", port=PORT)
