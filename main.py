@@ -39,8 +39,8 @@ PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 STATE_FILE = "state.json"
 LOG_FILE = "bot.log"
 
-CONF_THRESHOLD_MEDIUM = 0.25
-CONF_THRESHOLD_STRONG = 0.45
+CONF_THRESHOLD_MEDIUM = 0.35
+CONF_THRESHOLD_STRONG = 0.50
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
