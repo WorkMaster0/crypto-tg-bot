@@ -260,7 +260,7 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- СТАРИЙ PLOT SIGNAL (для порівняння) ----------------
+# ---------------- СТАРИЙ PLOT SIGNAL ----------------
 def plot_signal(df, symbol, action, votes, pretop):
     plt.style.use('ggplot')
     fig, ax = plt.subplots(figsize=(10,6))
@@ -279,24 +279,39 @@ def plot_signal(df, symbol, action, votes, pretop):
     buf.seek(0)
     return buf
 
-# ---------------- НОВИЙ PLOT SIGNAL CANDLES ----------------
+# ---------------- НОВИЙ plot_signal_candles ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
-    df_plot = df.copy()
+    df_plot = df.copy()[['open','high','low','close','volume']]
     df_plot.index.name = "Date"
-    df_plot = df_plot[['open','high','low','close','volume']]
 
-    support_levels = df["support"].dropna().unique()
-    resistance_levels = df["resistance"].dropna().unique()
-    hlines = list(support_levels) + list(resistance_levels)
+    # Лінії support/resistance
+    hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
 
     addplots = []
+
+    # Підсвітка Pre-top (останні 3 свічки)
     if pretop:
         addplots.append(
-            mpf.make_addplot([df['close'].iloc[-1]]*len(df), type='scatter', markersize=80, marker='^', color='magenta')
+            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1, type='scatter', markersize=120, marker='^', color='magenta')
         )
 
+    # Підсвітка патернів
+    last = df.iloc[-1]
+    patterns = {
+        "bullish_engulfing": "green",
+        "bearish_engulfing": "red",
+        "hammer_bull": "lime",
+        "shooting_star": "orange",
+        "doji": "blue"
+    }
+    for pat, color in patterns.items():
+        if pat in votes:
+            addplots.append(
+                mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=80, marker='o', color=color)
+            )
+
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
-    s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
 
     buf = io.BytesIO()
     mpf.plot(
