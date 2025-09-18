@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor
 import io
-import copy
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -17,7 +16,6 @@ from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 import ta
 import mplfinance as mpf
-from fpdf import FPDF
 
 # ---------------- BINANCE CLIENT ----------------
 try:
@@ -80,26 +78,18 @@ def load_json_safe(path, default):
     return default
 
 def save_json_safe(path, data):
-    """Безпечне записування state: snapshot під lock, зберігаємо в tmp, потім os.replace."""
     try:
         with state_lock:
             snapshot = json.loads(json.dumps(data, default=str, ensure_ascii=False))
         dir_path = os.path.dirname(os.path.abspath(path))
         os.makedirs(dir_path, exist_ok=True)
         tmp = os.path.join(dir_path, os.path.basename(path) + ".tmp")
-
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2, ensure_ascii=False)
-
-        if not os.path.exists(tmp):
-            logger.error("Temp file %s was not created!", tmp)
-            return
-
         os.replace(tmp, path)
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
-# init state
 state = load_json_safe(STATE_FILE, {
     "signals": {},
     "last_scan": None,
@@ -371,7 +361,6 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
 
 # ---------------- BACKTEST SIGNALS ----------------
 def backtest_signals(symbol, df=None):
-    """Розрахунок реального winrate по історії сигналів"""
     try:
         if df is None:
             df = fetch_klines(symbol, limit=EMA_SCAN_LIMIT*2)
@@ -385,7 +374,6 @@ def backtest_signals(symbol, df=None):
             action, votes, pretop, last, conf = detect_signal(sub_df)
             if action in ["LONG","SHORT"] and conf >= CONF_THRESHOLD_MEDIUM:
                 total += 1
-                # визначаємо перемогу по 1 ATR руху на користь сигналу
                 entry = last['close']
                 atr = float(last.get("ATR") or 0.0)
                 if atr <= 0:
@@ -405,7 +393,6 @@ def backtest_signals(symbol, df=None):
 
 # ---------------- ML / Ranking топ-5 ----------------
 def rank_top_symbols():
-    """Розраховує топ-5 токенів за ймовірністю profit на основі confidence + історії"""
     ranked = []
     with state_lock:
         for sym, sig in state.get("signals", {}).items():
@@ -444,7 +431,18 @@ def scan_market():
 
     logger.info("Market scan complete. Signals: %d", len(results))
 
-#flask
+    # Автовідправка топ-5 сигналів
+    top5 = rank_top_symbols()
+    for sym in top5:
+        sig = state["signals"].get(sym)
+        if sig:
+            df = fetch_klines(sym)
+            if df is not None:
+                df = apply_all_features(df)
+                buf = plot_signal_candles(df, sym, sig["action"], sig.get("votes", []), sig.get("pretop", False))
+                send_telegram(f"{sym} — {sig['action']} — {sig['confidence']:.2f}", photo=buf)
+
+# ---------------- TELEGRAM WEBHOOK ----------------
 @app.route("/telegram_webhook/<token>", methods=["POST"])
 def telegram_webhook(token):
     if token != TELEGRAM_TOKEN:
@@ -454,13 +452,33 @@ def telegram_webhook(token):
         if not data:
             return "No data", 400
 
-        # обробка повідомлень від користувачів
         message = data.get("message")
         if message:
             chat_id = message["chat"]["id"]
             text = message.get("text", "")
-            # приклад відповіді
-            send_telegram(f"Отримано: {text}", chat_id=chat_id)
+            if text.startswith("/"):
+                cmd = text[1:].split()[0].lower()
+                if cmd == "start":
+                    send_telegram("Привіт! Бот запущено і буде надсилати топ-5 сигналів.", chat_id=chat_id)
+                elif cmd == "signals":
+                    top = rank_top_symbols()
+                    if not top:
+                        send_telegram("Поки немає сигналів.", chat_id=chat_id)
+                    else:
+                        for sym in top:
+                            sig = state["signals"].get(sym, {})
+                            action = sig.get("action", "?")
+                            conf = sig.get("confidence", 0)
+                            df = fetch_klines(sym)
+                            if df is not None:
+                                df = apply_all_features(df)
+                                buf = plot_signal_candles(df, sym, action, sig.get("votes", []), sig.get("pretop", False))
+                                send_telegram(f"{sym} — {action} — {conf:.2f}", photo=buf, chat_id=chat_id)
+                else:
+                    send_telegram(f"Невідома команда: {text}", chat_id=chat_id)
+            else:
+                send_telegram(f"Отримано повідомлення: {text}", chat_id=chat_id)
+
         return jsonify({"ok": True})
     except Exception as e:
         logger.exception("Webhook error: %s", e)
