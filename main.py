@@ -260,25 +260,28 @@ def detect_signal(df: pd.DataFrame):
     return action, votes, pretop, last, confidence
 
 # ---------------- PLOT SIGNAL CANDLES ----------------
-# Функція plot_signal_candles з усіма старими функціями
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df[['open','high','low','close','volume']].copy()
     df_plot.index.name = "Date"
     addplots = []
     last = df.iloc[-1]
 
+    # Pre-top
     if pretop:
         addplots.append(
             mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)],
                              type='scatter', markersize=100, marker='^', color='magenta')
         )
 
+    # Патерни
     patterns = {
         "bullish_engulfing": "green",
         "bearish_engulfing": "red",
         "hammer_bull": "lime",
         "shooting_star": "orange",
         "doji": "blue",
+        "fake_breakout_short": "darkred",
+        "fake_breakout_long": "darkgreen"
     }
     for pat, color in patterns.items():
         if pat in votes:
@@ -286,6 +289,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
                 mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=60, marker='o', color=color)
             )
 
+    # Динамічні тейки/стопи ATR
     entry = last['close'] if action in ["LONG","SHORT"] else None
     stop = last['support'] if action=="LONG" else last['resistance'] if action=="SHORT" else None
     take_levels = []
@@ -304,6 +308,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         for tl in take_levels:
             addplots.append(mpf.make_addplot([tl]*len(df), type='scatter', markersize=30, marker='^', color='green'))
 
+    # Основні рівні support/resistance (останні 5 точок)
     h_support = df['support'].dropna().iloc[-5:] if len(df['support'].dropna())>=5 else df['support'].dropna()
     h_resistance = df['resistance'].dropna().iloc[-5:] if len(df['resistance'].dropna())>=5 else df['resistance'].dropna()
     hlines = list(h_support.unique()) + list(h_resistance.unique())
@@ -368,46 +373,91 @@ def analyze_and_alert(symbol: str, chat_id=None):
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
-# ---------------- SMART SCAN JOB ----------------
-def smart_scan_job():
-    try:
-        symbols = get_all_usdt_symbols()
-        if not symbols:
-            logger.warning("No symbols found for scanning.")
-            return
+# ---------------- SMART SCAN SCHEDULER ----------------
+def dynamic_scan_interval():
+    symbols = get_all_usdt_symbols()
+    if not symbols:
+        return SCAN_INTERVAL_MINUTES
+    atrs=[]
+    for s in symbols[:min(5,len(symbols))]:
+        df = fetch_klines(s, limit=30)
+        if df is not None:
+            df = apply_all_features(df)
+            atrs.append(df["ATR"].iloc[-1])
+    avg_atr = sum(atrs)/len(atrs) if atrs else 0
+    return max(1, SCAN_INTERVAL_MINUTES//2) if avg_atr>1 else SCAN_INTERVAL_MINUTES
 
-        logger.info("Starting scan for %d symbols", len(symbols))
-        try:
-            with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-                list(exe.map(analyze_and_alert, symbols))
-        except RuntimeError as e:
-            logger.warning("Executor shutdown: %s", e)
-
-        state["last_scan"] = str(datetime.now(timezone.utc))
-        save_json_safe(STATE_FILE, state)
-        logger.info("Scan finished at %s", state["last_scan"])
-    except Exception as e:
-        logger.exception("smart_scan_job error: %s", e)
+def scan_top_symbols():
+    symbols = get_all_usdt_symbols()
+    if not symbols:
+        logger.warning("No symbols found for scanning.")
+        return
+    logger.info("Starting scan for %d symbols", len(symbols))
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
+        list(exe.map(analyze_and_alert, symbols))
+    state["last_scan"] = str(datetime.now(timezone.utc))
+    save_json_safe(STATE_FILE, state)
+    logger.info("Scan finished at %s", state["last_scan"])
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(smart_scan_job, "interval", minutes=SCAN_INTERVAL_MINUTES, id="scan_job", next_run_time=datetime.now())
+scheduler.add_job(scan_top_symbols, "interval", minutes=dynamic_scan_interval, id="scan_job", next_run_time=datetime.now())
 scheduler.start()
-logger.info("Scheduler started with smart dynamic interval")
+logger.info("Scheduler started with dynamic interval")
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status":"ok","time":str(datetime.now(timezone.utc))})
+    return jsonify({"status":"ok","time":str(datetime.now(timezone.utc)),"signals":len(state.get("signals",{}))})
+
+@app.route(f"/telegram_webhook/<token>", methods=["POST","GET"])
+def telegram_webhook(token):
+    if token!=TELEGRAM_TOKEN:
+        return jsonify({"ok":False,"reason":"invalid token"}),403
+    if request.method=="POST":
+        update = request.get_json(force=True)
+        if "message" in update:
+            msg = update["message"]
+            chat_id = msg["chat"]["id"]
+            text = msg.get("text","").lower()
+            if text.startswith("/scan"):
+                Thread(target=scan_top_symbols, daemon=True).start()
+                send_telegram("Manual scan started.", chat_id=chat_id)
+            elif text.startswith("/status"):
+                send_telegram(f"Status:\nSignals={len(state.get('signals',{}))}\nLast scan={state.get('last_scan')}", chat_id=chat_id)
+            elif text.startswith("/top"):
+                win_stats = state.get("win_stats",{})
+                if win_stats:
+                    top5 = sorted(win_stats.items(), key=lambda x:(x[1]['wins']/x[1]['total'] if x[1]['total']>0 else 0), reverse=True)[:5]
+                    lines = [f"{s[0]} — {((s[1]['wins']/s[1]['total'])*100 if s[1]['total']>0 else 0):.1f}%" for s in top5]
+                    send_telegram("Top-5 tokens by win rate:\n" + "\n".join(lines), chat_id=chat_id)
+                else:
+                    send_telegram("No win stats available yet.", chat_id=chat_id)
+            elif text.startswith("/profile"):
+                parts = text.split()
+                if len(parts)>=2:
+                    param = parts[1]
+                    value = float(parts[2]) if len(parts)>=3 else None
+                    profile = state["user_profiles"].get(str(chat_id), {"confidence":0.6,"tfs":"15m","take_count":3})
+                    if param=="confidence" and value:
+                        profile["confidence"]=value
+                        state["user_profiles"][str(chat_id)]=profile
+                        save_json_safe(STATE_FILE,state)
+                        send_telegram(f"Profile updated: {profile}", chat_id=chat_id)
+    return jsonify({"ok":True})
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
-if WEBHOOK_URL:
-    Thread(target=lambda: set_telegram_webhook(WEBHOOK_URL), daemon=True).start()
+def auto_register_webhook():
+    if WEBHOOK_URL and TELEGRAM_TOKEN:
+        logger.info("Registering Telegram webhook: %s", WEBHOOK_URL)
+        set_telegram_webhook(WEBHOOK_URL)
+
+Thread(target=auto_register_webhook, daemon=True).start()
 
 # ---------------- WARMUP ----------------
 def warmup_and_first_scan():
     try:
-        smart_scan_job()
+        scan_top_symbols()
     except Exception as e:
         logger.exception("warmup_and_first_scan error: %s", e)
 
