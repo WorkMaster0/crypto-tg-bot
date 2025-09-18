@@ -31,3 +31,4 @@ ta
 aiogram
 lightgbm
 mplfinance
+websocket
