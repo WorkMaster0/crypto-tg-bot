@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 import requests
 from flask import Flask, request, jsonify
@@ -261,27 +260,7 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- PLOT SIGNAL ----------------
-# Стара функція залишена для порівняння
-def plot_signal(df, symbol, action, votes, pretop):
-    plt.style.use('ggplot')
-    fig, ax = plt.subplots(figsize=(10,6))
-    ax.plot(df.index, df["close"], label="Close", color="blue")
-    ax.plot(df.index, df["ema_8"], label="EMA8", color="green")
-    ax.plot(df.index, df["ema_20"], label="EMA20", color="orange")
-    ax.fill_between(df.index, df["support"], df["resistance"], color='grey', alpha=0.2)
-    if pretop:
-        ax.scatter(df.index[-1], df["close"].iloc[-1], color="red", s=80, marker="^", label="Pre-top")
-    ax.set_title(f"{symbol} — {action} — {','.join([v for v in votes])}")
-    ax.set_ylabel("Price")
-    ax.legend()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-# ---------------- НОВИЙ plot_signal_candles ----------------
+# ---------------- PLOT SIGNAL CANDLES ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
     df_plot = df.copy()
     df_plot.index.name = "Date"
@@ -344,7 +323,6 @@ def analyze_and_alert(symbol: str):
             f"Pre-top: {pretop}\n"
             f"Time: {last.name}\n"
         )
-        # Використовуємо новий свічковий графік
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
         state["signals"][symbol] = action
