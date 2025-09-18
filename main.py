@@ -1,4 +1,4 @@
-# main.py — Повний покращений Pre-top бот з мульти-таймфреймами, графіками та Telegram
+# main.py — Повний покращений Pre-top бот з графіками та Telegram
 import os
 import time
 import json
@@ -96,7 +96,7 @@ def send_telegram(text: str, photo=None):
         if photo:
             files = {'photo': photo}
             data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
-            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=10)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=10)
         else:
             payload = {
                 "chat_id": CHAT_ID,
@@ -104,9 +104,7 @@ def send_telegram(text: str, photo=None):
                 "parse_mode": "MarkdownV2",
                 "disable_web_page_preview": True
             }
-            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
-        if r.status_code != 200:
-            logger.error("Telegram send failed: %s %s", r.status_code, r.text)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
@@ -264,7 +262,8 @@ def detect_signal(df: pd.DataFrame):
 
 # ---------------- PLOT SIGNAL ----------------
 def plot_signal(df, symbol, action, votes, pretop):
-    plt.style.use('seaborn-darkgrid')
+    # Використовуємо стандартний стиль, гарантовано наявний
+    plt.style.use('ggplot')
     fig, ax = plt.subplots(figsize=(10,6))
     ax.plot(df.index, df["close"], label="Close", color="blue")
     ax.plot(df.index, df["ema_8"], label="EMA8", color="green")
