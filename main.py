@@ -59,7 +59,7 @@ if BINANCE_PY_AVAILABLE and BINANCE_API_KEY and BINANCE_API_SECRET:
     client = BinanceClient(
         api_key=BINANCE_API_KEY,
         api_secret=BINANCE_API_SECRET,
-        requests_params={"timeout": 30}
+        requests_params={"timeout": 120}
     )
 else:
     client = None
