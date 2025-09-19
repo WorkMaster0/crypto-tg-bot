@@ -341,10 +341,10 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
     addplots = []
 
     if pretop:
-        addplots.append(
-            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1,
-                             type='scatter', markersize=120, marker='^', color='magenta')
-        )
+    ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
+    addplots.append(
+        mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta')
+    )
 
     last = df.iloc[-1]
     patterns = {
@@ -355,10 +355,11 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
         "doji": "blue"
     }
     for pat, color in patterns.items():
-        if pat in votes:
-            addplots.append(
-                mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=80, marker='o', color=color)
-            )
+    if pat in votes:
+        ydata = [np.nan]*(len(df)-1) + [last['close']]
+        addplots.append(
+            mpf.make_addplot(ydata, type='scatter', markersize=80, marker='o', color=color)
+        )
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
