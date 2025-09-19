@@ -230,16 +230,44 @@ def send_top_symbols_telegram():
 @app.route("/telegram_webhook/<token>", methods=["POST"])
 def telegram_webhook(token):
     try:
-        if token != TELEGRAM_TOKEN: return jsonify({"ok":False,"error":"invalid token"}),403
-        update=request.get_json(force=True) or {}
-        msg=update.get("message")
-        if not msg: return jsonify({"ok":True})
-        text=msg.get("text","").lower().strip()
+        if token != TELEGRAM_TOKEN: 
+            return jsonify({"ok":False,"error":"invalid token"}),403
+
+        update = request.get_json(force=True) or {}
+        msg = update.get("message")
+        if not msg: 
+            return jsonify({"ok":True})
+
+        text = msg.get("text","").lower().strip()
+
+        # ---- Команди ----
         if text.startswith("/top"): 
             Thread(target=send_top_symbols_telegram, daemon=True).start()
             send_telegram("⏳ Processing top symbols, please wait...")
+
+        elif text.startswith("/scan"): 
+            Thread(target=send_top_symbols_telegram, daemon=True).start()
+            send_telegram("⚡ Manual scan started.")
+
+        elif text.startswith("/status"): 
+            last_scan = state.get("top_cache", {}).get("timestamp")
+            send_telegram(f"📝 Status:\nCached Top: {len(state.get('top_cache',{}).get('data',[]))} symbols\nLast scan: {last_scan}")
+
+        elif text.startswith("/history"):
+            parts = text.split()
+            if len(parts) >= 2:
+                symbol = parts[1].upper()
+                df = fetch_klines(symbol)
+                if df is not None and len(df)>=30:
+                    df = apply_all_features(df)
+                    buf = plot_backtest_signals(df, symbol, conf_threshold=CONF_THRESHOLD_MEDIUM)
+                    send_telegram(f"📈 Strong Signals for {symbol}", photo=buf)
+                else:
+                    send_telegram(f"❌ No data for {symbol}")
+
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
+
     return jsonify({"ok":True})
 
 # ---------------- MAIN ----------------
