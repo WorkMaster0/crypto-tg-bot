@@ -502,6 +502,12 @@ def auto_register_webhook():
         url = f"{WEBHOOK_URL}/telegram_webhook"   # 👈 БЕЗ ТОКЕНА У ШЛЯХУ
         logger.info("Registering Telegram webhook: %s", url)
         set_telegram_webhook(url)
+        
+def force_register_webhook():
+    if WEBHOOK_URL and TELEGRAM_TOKEN:
+        url = f"{WEBHOOK_URL}/telegram_webhook"
+        resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
+        logger.info("Force setWebhook resp: %s", resp.text)
 
 # ---------------- WARMUP ----------------
 def warmup_and_first_scan():
@@ -512,11 +518,10 @@ def warmup_and_first_scan():
 
 Thread(target=warmup_and_first_scan, daemon=True).start()
 
-# ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
 
-    # 👉 реєструємо вебхук перед запуском Flask
     auto_register_webhook()
+    force_register_webhook()   # 👈 гарантовано ставимо вебхук
 
     app.run(host="0.0.0.0", port=PORT)
