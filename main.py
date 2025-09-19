@@ -1,4 +1,4 @@
-# main.py — Повний покращений Pre-top бот з графіками та Telegram (свічкові графіки)
+# main.py — Повний покращений Pre-top бот з графіками, Telegram і backtest winrate
 import os
 import time
 import json
@@ -131,7 +131,7 @@ def get_all_usdt_symbols():
         ]
         blacklist = [
             "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
-            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1"
+            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1", "BTTC"
         ]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
         return filtered
@@ -262,48 +262,49 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- НОВИЙ plot_signal_candles з розумними рівнями ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
+# ---------------- BACKTEST WINRATE ----------------
+def backtest_winrate(df: pd.DataFrame, n_levels=5):
+    df = apply_all_features(df)
+    results = []
+
+    for i in range(1, len(df)):
+        sub_df = df.iloc[:i+1]
+        action, votes, pretop, last, conf = detect_signal(sub_df)
+        if action in ["LONG", "SHORT"]:
+            support = last["support"]
+            resistance = last["resistance"]
+            entry = last["close"]
+            win = False
+            lose = False
+            if action == "LONG":
+                win = (df["high"].iloc[i:] >= resistance).any()
+                lose = (df["low"].iloc[i:] <= entry - 0.5*(resistance-entry)).any()
+            else:  # SHORT
+                win = (df["low"].iloc[i:] <= support).any()
+                lose = (df["high"].iloc[i:] >= entry + 0.5*(entry-support)).any()
+            results.append((action, win, lose))
+
+    total_signals = len(results)
+    wins = sum(1 for _, w, l in results if w)
+    losses = sum(1 for _, w, l in results if l)
+    winrate = wins / total_signals if total_signals > 0 else 0
+    return winrate, results
+
+# ---------------- PLOT HISTORY ----------------
+def plot_history(df, symbol, n_levels=5):
     df_plot = df.copy()[['open','high','low','close','volume']]
     df_plot.index.name = "Date"
 
     closes = df['close'].values
-
-    # Локальні максимуми → опори
     peaks, _ = find_peaks(closes, distance=5)
     peak_vals = closes[peaks]
     top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
 
-    # Локальні мінімуми → підтримки
     troughs, _ = find_peaks(-closes, distance=5)
     trough_vals = closes[troughs]
     top_supports = sorted(trough_vals)[:n_levels]
 
     hlines = list(top_supports) + list(top_resistances)
-
-    addplots = []
-
-    # Підсвітка Pre-top
-    if pretop:
-        addplots.append(
-            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1,
-                             type='scatter', markersize=120, marker='^', color='magenta')
-        )
-
-    # Підсвітка патернів
-    last = df.iloc[-1]
-    patterns = {
-        "bullish_engulfing": "green",
-        "bearish_engulfing": "red",
-        "hammer_bull": "lime",
-        "shooting_star": "orange",
-        "doji": "blue"
-    }
-    for pat, color in patterns.items():
-        if pat in votes:
-            addplots.append(
-                mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=80, marker='o', color=color)
-            )
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
@@ -314,15 +315,26 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
         type='candle',
         style=s,
         volume=True,
-        addplot=addplots,
         hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-        title=f"{symbol} — {action} — {','.join([v for v in votes])}",
+        title=f"{symbol} — Signal History",
         ylabel='Price',
         ylabel_lower='Volume',
         savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
     )
     buf.seek(0)
     return buf
+
+# ---------------- PLOT TOP5 ----------------
+def get_top5_symbols(symbols):
+    winrates = {}
+    for sym in symbols:
+        df = fetch_klines(sym)
+        if df is None or len(df) < 30:
+            continue
+        wr, _ = backtest_winrate(df)
+        winrates[sym] = wr
+    sorted_wr = sorted(winrates.items(), key=lambda x: x[1], reverse=True)
+    return sorted_wr[:5]
 
 # ---------------- ANALYZE SYMBOL ----------------
 def analyze_and_alert(symbol: str):
@@ -372,13 +384,6 @@ def scan_top_symbols():
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
 
-# ---------------- SCHEDULER ----------------
-scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES),
-                  id="scan_job", next_run_time=datetime.now())
-scheduler.start()
-logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
-
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
@@ -399,11 +404,20 @@ def telegram_webhook(token):
             elif text.startswith("/status"):
                 send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}")
             elif text.startswith("/top"):
-                pretop_tokens = [s for s in state.get("signals", {})]
-                if pretop_tokens:
-                    send_telegram("Pre-top tokens:\n" + "\n".join(pretop_tokens))
-                else:
-                    send_telegram("No pre-top tokens detected yet.")
+                symbols = get_all_usdt_symbols()
+                top5 = get_top5_symbols(symbols)
+                msg_text = "Top5 tokens by winrate:\n" + "\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
+                send_telegram(msg_text)
+            elif text.startswith("/history"):
+                parts = text.split()
+                if len(parts) >= 2:
+                    symbol = parts[1].upper()
+                    df = fetch_klines(symbol)
+                    if df is not None and len(df) >= 30:
+                        buf = plot_history(df, symbol)
+                        send_telegram(f"History for {symbol}", photo=buf)
+                    else:
+                        send_telegram(f"No data for {symbol}")
     return jsonify({"ok": True})
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
