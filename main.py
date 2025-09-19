@@ -446,20 +446,23 @@ def scan_top_symbols():
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "signals": len(state.get("signals", {}))})
+    return jsonify({
+        "status": "ok",
+        "time": str(datetime.now(timezone.utc)),
+        "signals": len(state.get("signals", {}))
+    })
 
-@app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
-def telegram_webhook(token):
-    if token != TELEGRAM_TOKEN:
-        return jsonify({"ok": False, "reason": "invalid token"}), 403
-
-    if request.method == "POST":
+@app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    try:
         update = request.get_json(force=True) or {}
+        logger.info("Telegram update: %s", update)   # 👈 ЛОГУЄМО ВСІ АПДЕЙТИ
+
         msg = update.get("message")
         if not msg:
             return jsonify({"ok": True})
 
-        text = msg.get("text", "").lower()
+        text = msg.get("text", "").lower().strip()
 
         if text.startswith("/scan"):
             send_telegram("⚡ Manual scan started.")
@@ -489,15 +492,16 @@ def telegram_webhook(token):
                 else:
                     send_telegram(f"❌ No data for {symbol}")
 
+    except Exception as e:
+        logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
 
 # ---------------- AUTO REGISTER WEBHOOK ----------------
 def auto_register_webhook():
     if WEBHOOK_URL and TELEGRAM_TOKEN:
-        logger.info("Registering Telegram webhook: %s", WEBHOOK_URL)
-        set_telegram_webhook(WEBHOOK_URL)
-
-Thread(target=auto_register_webhook, daemon=True).start()
+        url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"   # 👈 Додаємо токен у шлях
+        logger.info("Registering Telegram webhook: %s", url)
+        set_telegram_webhook(url)
 
 # ---------------- WARMUP ----------------
 def warmup_and_first_scan():
