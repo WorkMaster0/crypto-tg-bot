@@ -37,6 +37,7 @@ TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
 
 STATE_DIR = "data"
 os.makedirs(STATE_DIR, exist_ok=True)
@@ -404,142 +405,59 @@ def analyze_and_alert(symbol:str, chat_id=None):
     if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
             f"⚡ TRADE SIGNAL\nSymbol: {symbol}\nAction: {action}\nPrice: {last['close']:.6f}\n"
-            f"Support: {last['support']:.6f}\nResistance: {last['resistance']:.6f}\n"
-            f"Confidence: {confidence:.2f}\nVotes: {', '.join(votes)}\nPre-top: {pretop}"
+            f"Confidence: {confidence:.2f}\nVotes: {', '.join(votes)}"
         )
-        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
-        send_telegram(msg, photo=photo_buf, chat_id=chat_id)
+        buf = plot_signal_candles(df, symbol, action, votes, pretop)
+        send_telegram(msg, photo=buf, chat_id=chat_id)
 
-# ---------------- SCAN ----------------
+# ---------------- SCAN ALL SYMBOLS BATCH ----------------
 def scan_top_symbols_safe():
-    if not scan_lock.acquire(blocking=False):
-        logger.info("Previous scan still running, skipping this run")
-        return
     try:
         scan_top_symbols()
-    finally:
-        scan_lock.release()
+    except Exception as e:
+        logger.exception("scan_top_symbols_safe error: %s", e)
 
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
     if not symbols:
+        logger.warning("No symbols to scan")
         return
-    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        list(exe.map(analyze_and_alert, symbols))
+    total = len(symbols)
+    logger.info(f"Starting scan for {total} symbols in batches of {BATCH_SIZE}")
+
+    for i in range(0, total, BATCH_SIZE):
+        batch = symbols[i:i+BATCH_SIZE]
+        workers = min(PARALLEL_WORKERS, len(batch))
+        with ThreadPoolExecutor(max_workers=workers) as exe:
+            list(exe.map(analyze_and_alert, batch))
+        logger.info(f"Completed batch {i//BATCH_SIZE + 1} / {((total-1)//BATCH_SIZE)+1}")
+
     with state_lock:
         state["last_scan"] = str(datetime.now(timezone.utc))
         save_json_safe(STATE_FILE, state)
-
-# ---------------- SCHEDULER ----------------
-scheduler = BackgroundScheduler()
-scheduler.add_job(
-    scan_top_symbols_safe,
-    "interval",
-    minutes=SCAN_INTERVAL_MINUTES,
-    next_run_time=datetime.now(),
-    max_instances=3   # <-- тут дозволяємо одночасно до 3
-)
-scheduler.start()
+    logger.info("Scan completed for all symbols")
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status":"ok", "time": str(datetime.now(timezone.utc)), "signals": len(state.get("signals", {}))})
+    return "Bot is running!"
 
-@app.route(f"/telegram_webhook/<token>", methods=["POST","GET"])
-def telegram_webhook(token):
-    if token != TELEGRAM_TOKEN:
-        return jsonify({"ok": False, "reason": "invalid token"}), 403
-    if request.method == "POST":
-        update = request.get_json(force=True)
-        if "message" in update:
-            msg = update["message"]
-            chat_id = msg["chat"]["id"]
-            text = msg.get("text", "").lower()
-
-            if text.startswith("/scan"):
-                Thread(target=scan_top_symbols_safe, daemon=True).start()
-                send_telegram("Manual scan started.", chat_id=chat_id)
-
-            elif text.startswith("/status"):
-                send_telegram(f"Status:\nSignals={len(state.get('signals',{}))}\nLast scan={state.get('last_scan')}", chat_id=chat_id)
-
-            elif text.startswith("/top"):
-                win_stats = state.get("win_stats",{})
-                if win_stats:
-                    top5 = sorted(win_stats.items(), key=lambda x: (x[1]['wins']/x[1]['total'] if x[1]['total']>0 else 0), reverse=True)[:5]
-                    lines = [f"{s[0]} — {((s[1]['wins']/s[1]['total'])*100 if s[1]['total']>0 else 0):.1f}%" for s in top5]
-                    send_telegram("Top-5 tokens by win rate:\n" + "\n".join(lines), chat_id=chat_id)
-                else:
-                    send_telegram("No win stats available yet.", chat_id=chat_id)
-
-            elif text.startswith("/profile"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    param = parts[1]
-                    value = float(parts[2]) if len(parts) >= 3 else None
-                    profile = state["user_profiles"].get(str(chat_id), {"confidence":0.6,"tfs":"15m","take_count":3})
-                    if param=="confidence" and value:
-                        profile["confidence"] = value
-                        state["user_profiles"][str(chat_id)] = profile
-                        save_json_safe(STATE_FILE,state)
-                        send_telegram(f"Profile updated: {profile}", chat_id=chat_id)
-
-            elif text.startswith("/history"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    symbol = parts[1].upper()
-                    pdf_buf = generate_signal_history_pdf(symbol)
-                    if pdf_buf:
-                        send_telegram(f"📄 Signal history for {symbol}", photo=pdf_buf, chat_id=chat_id, is_document=True, filename=f"{symbol}_history.pdf")
-                    else:
-                        send_telegram(f"No history found for {symbol}", chat_id=chat_id)
-
-            elif text.startswith("/mlplot"):
-                parts = text.split()
-                if len(parts) >= 2:
-                    symbol = parts[1].upper()
-                    history = state.get("signal_history", {}).get(symbol, [])
-                    df = fetch_klines(symbol)
-                    if df is not None and history:
-                        fig, ax = plt.subplots(figsize=(12,6))
-                        ax.plot(df.index, df['close'], label='Close')
-                        for item in history:
-                            t = pd.to_datetime(item['time']).tz_convert("UTC")
-                            y = item['price']
-                            color = 'green' if item['action']=='LONG' else 'red'
-                            ax.scatter(t, y, color=color, s=50)
-                        ax.set_title(f"{symbol} — All Signals")
-                        ax.set_xlabel("Time")
-                        ax.set_ylabel("Price")
-                        buf = io.BytesIO()
-                        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-                        plt.close(fig)
-                        buf.seek(0)
-                        send_telegram(f"ML plot for {symbol}", photo=buf, chat_id=chat_id)
-                    else:
-                        send_telegram(f"No data or history for {symbol}", chat_id=chat_id)
-
+@app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    data = request.json
+    # Тут можна обробляти команди користувача
     return jsonify({"ok": True})
 
-# ---------------- AUTO REGISTER WEBHOOK ----------------
-def auto_register_webhook():
-    if WEBHOOK_URL and TELEGRAM_TOKEN:
-        set_telegram_webhook(WEBHOOK_URL)
+# ---------------- SCHEDULER ----------------
+scheduler = BackgroundScheduler()
+scheduler.add_job(scan_top_symbols_safe, "interval", minutes=SCAN_INTERVAL_MINUTES)
+scheduler.start()
 
-Thread(target=auto_register_webhook, daemon=True).start()
+# ---------------- WEBHOOK ----------------
+if WEBHOOK_URL:
+    set_telegram_webhook(WEBHOOK_URL)
 
-# ---------------- WARMUP ----------------
-def warmup_and_first_scan():
-    try:
-        scan_top_symbols_safe()
-    except Exception as e:
-        logger.exception("warmup_and_first_scan error: %s", e)
-
-# Запускаємо warmup лише в основному worker
-if __name__=="__main__" and os.environ.get("GUNICORN_WORKER_ID", "0") == "0":
-    Thread(target=warmup_and_first_scan, daemon=True).start()
-
-# ---------------- MAIN ----------------
-if __name__=="__main__":
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    logger.info(f"Starting bot on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
