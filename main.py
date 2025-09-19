@@ -452,7 +452,7 @@ def home():
         "signals": len(state.get("signals", {}))
     })
 
-@app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+@app.route("/telegram_webhook", methods=["POST"])
 def telegram_webhook():
     try:
         update = request.get_json(force=True) or {}
@@ -499,7 +499,7 @@ def telegram_webhook():
 # ---------------- AUTO REGISTER WEBHOOK ----------------
 def auto_register_webhook():
     if WEBHOOK_URL and TELEGRAM_TOKEN:
-        url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"   # 👈 Додаємо токен у шлях
+        url = f"{WEBHOOK_URL}/telegram_webhook"   # 👈 БЕЗ ТОКЕНА У ШЛЯХУ
         logger.info("Registering Telegram webhook: %s", url)
         set_telegram_webhook(url)
 
