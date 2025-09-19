@@ -66,6 +66,7 @@ app = Flask(__name__)
 
 # ---------------- STATE + LOCK ----------------
 state_lock = Lock()
+scan_lock = Lock()  # Lock для APScheduler та ручних сканів
 
 def load_json_safe(path, default):
     try:
@@ -177,8 +178,8 @@ def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
             logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt+1, e)
             time.sleep(0.5)
     return None
-    
-    # ---------------- FEATURE ENGINEERING ----------------
+
+# ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     try:
@@ -410,6 +411,15 @@ def analyze_and_alert(symbol:str, chat_id=None):
         send_telegram(msg, photo=photo_buf, chat_id=chat_id)
 
 # ---------------- SCAN ----------------
+def scan_top_symbols_safe():
+    if not scan_lock.acquire(blocking=False):
+        logger.info("Previous scan still running, skipping this run")
+        return
+    try:
+        scan_top_symbols()
+    finally:
+        scan_lock.release()
+
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
     if not symbols:
@@ -422,7 +432,7 @@ def scan_top_symbols():
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols, "interval", minutes=SCAN_INTERVAL_MINUTES, next_run_time=datetime.now())
+scheduler.add_job(scan_top_symbols_safe, "interval", minutes=SCAN_INTERVAL_MINUTES, next_run_time=datetime.now())
 scheduler.start()
 
 # ---------------- FLASK ROUTES ----------------
@@ -442,7 +452,7 @@ def telegram_webhook(token):
             text = msg.get("text", "").lower()
 
             if text.startswith("/scan"):
-                Thread(target=scan_top_symbols, daemon=True).start()
+                Thread(target=scan_top_symbols_safe, daemon=True).start()
                 send_telegram("Manual scan started.", chat_id=chat_id)
 
             elif text.startswith("/status"):
@@ -516,7 +526,7 @@ Thread(target=auto_register_webhook, daemon=True).start()
 # ---------------- WARMUP ----------------
 def warmup_and_first_scan():
     try:
-        scan_top_symbols()
+        scan_top_symbols_safe()
     except Exception as e:
         logger.exception("warmup_and_first_scan error: %s", e)
 
