@@ -336,6 +336,68 @@ def get_top5_symbols(symbols):
     sorted_wr = sorted(winrates.items(), key=lambda x: x[1], reverse=True)
     return sorted_wr[:5]
 
+# ---------------- PLOT SIGNAL CANDLES ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
+    df_plot = df.copy()[['open','high','low','close','volume']]
+    df_plot.index.name = "Date"
+
+    closes = df['close'].values
+
+    # Локальні максимуми → опори
+    peaks, _ = find_peaks(closes, distance=5)
+    peak_vals = closes[peaks]
+    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
+
+    # Локальні мінімуми → підтримки
+    troughs, _ = find_peaks(-closes, distance=5)
+    trough_vals = closes[troughs]
+    top_supports = sorted(trough_vals)[:n_levels]
+
+    hlines = list(top_supports) + list(top_resistances)
+
+    addplots = []
+
+    # Підсвітка Pre-top
+    if pretop:
+        addplots.append(
+            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1,
+                             type='scatter', markersize=120, marker='^', color='magenta')
+        )
+
+    # Підсвітка патернів
+    last = df.iloc[-1]
+    patterns = {
+        "bullish_engulfing": "green",
+        "bearish_engulfing": "red",
+        "hammer_bull": "lime",
+        "shooting_star": "orange",
+        "doji": "blue"
+    }
+    for pat, color in patterns.items():
+        if pat in votes:
+            addplots.append(
+                mpf.make_addplot([last['close']]*len(df), type='scatter', markersize=80, marker='o', color=color)
+            )
+
+    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style=s,
+        volume=True,
+        addplot=addplots,
+        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+        title=f"{symbol} — {action} — {','.join([v for v in votes])}",
+        ylabel='Price',
+        ylabel_lower='Volume',
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+    )
+    buf.seek(0)
+    return buf
+
 # ---------------- ANALYZE SYMBOL ----------------
 def analyze_and_alert(symbol: str):
     df = fetch_klines(symbol)
