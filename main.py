@@ -444,11 +444,6 @@ def scan_top_symbols():
     logger.info("Scan finished at %s", state["last_scan"])
 
 # ---------------- FLASK ROUTES ----------------
-from flask import Flask, request, jsonify
-from threading import Thread
-import logging
-import requests
-
 app = Flask(__name__)
 logger = logging.getLogger("pretop-bot")
 
@@ -518,8 +513,9 @@ def setup_webhook():
         resp = requests.get(f"{base_url}/deleteWebhook")
         logger.info("deleteWebhook resp: %s", resp.text)
 
-        # Ставимо новий вебхук
-        resp = requests.get(f"{base_url}/setWebhook?url={WEBHOOK_URL}")
+        # 🔹 Ставимо новий вебхук на /telegram_webhook
+        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"   # <- Ось тут зміна
+        resp = requests.get(f"{base_url}/setWebhook?url={webhook_url}")
         logger.info("setWebhook resp: %s", resp.text)
 
         # Перевіряємо
