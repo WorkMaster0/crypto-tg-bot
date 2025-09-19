@@ -167,16 +167,18 @@ def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
                 "open_time","open","high","low","close","volume",
                 "close_time","qav","num_trades","tb_base","tb_quote","ignore"
             ])
-            df = df[["open_time","open","high","low","close","volume"]].astype(float)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            df = df[["open_time","open","high","low","close","volume"]].astype({
+                "open": float, "high": float, "low": float, "close": float, "volume": float
+            })
             df.set_index("open_time", inplace=True)
             return df
         except Exception as e:
             logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt+1, e)
             time.sleep(0.5)
     return None
-
-# ---------------- FEATURE ENGINEERING ----------------
+    
+    # ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     try:
@@ -200,11 +202,15 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
+    if df is None or len(df) < 2:
+        return "WATCH", [], False, df.iloc[-1] if len(df) else None, 0.0
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
     confidence = 0.2
 
+    # EMA
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
@@ -212,6 +218,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("ema_bear")
         confidence += 0.05
 
+    # MACD
     if last["MACD_hist"] > 0:
         votes.append("macd_up")
         confidence += 0.1
@@ -219,6 +226,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("macd_down")
         confidence += 0.05
 
+    # RSI
     if last["RSI_14"] < 30:
         votes.append("rsi_oversold")
         confidence += 0.08
@@ -226,10 +234,12 @@ def detect_signal(df: pd.DataFrame):
         votes.append("rsi_overbought")
         confidence += 0.08
 
+    # ADX
     if last["ADX"] > 25:
         votes.append("strong_trend")
         confidence *= 1.1
 
+    # Свічні патерни
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
@@ -256,12 +266,14 @@ def detect_signal(df: pd.DataFrame):
 
     confidence *= candle_bonus
 
+    # Pre-top
     pretop = False
     if len(df) >= 10 and (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.1:
         pretop = True
         confidence += 0.1
         votes.append("pretop")
 
+    # Action
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
         action = "SHORT"
@@ -284,8 +296,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
 
     patterns = {
         "bullish_engulfing":"green", "bearish_engulfing":"red",
-        "hammer_bull":"lime", "shooting_star":"orange", "doji":"blue",
-        "fake_breakout_short":"darkred", "fake_breakout_long":"darkgreen"
+        "hammer_bull":"lime", "shooting_star":"orange", "doji":"blue"
     }
     for pat,color in patterns.items():
         if pat in votes:
@@ -311,8 +322,8 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         for tl in take_levels:
             addplots.append(mpf.make_addplot([tl]*len(df), type='line', color='green', linewidth=0.5))
 
-    h_support = df['support'].dropna().iloc[-5:] if len(df['support'].dropna())>=5 else df['support'].dropna()
-    h_resistance = df['resistance'].dropna().iloc[-5:] if len(df['resistance'].dropna())>=5 else df['resistance'].dropna()
+    h_support = df['support'].dropna().iloc[-5:]
+    h_resistance = df['resistance'].dropna().iloc[-5:]
     hlines = list(h_support.unique()) + list(h_resistance.unique())
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
@@ -332,6 +343,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
         savefig=dict(fname=buf, dpi=100, bbox_inches='tight', facecolor='white'),
         tight_layout=True
     )
+    plt.close("all")
     buf.seek(0)
     return buf
 
@@ -347,7 +359,7 @@ def generate_signal_history_pdf(symbol):
     pdf.set_font("Arial","",12)
     for item in history[-50:]:
         pdf.cell(0,8,f"{item['time']} | {item['action']} | Price: {item['price']:.6f} | Conf: {item['confidence']:.2f}",ln=True)
-    pdf_bytes = pdf.output(dest="S").encode("latin1")
+    pdf_bytes = pdf.output(dest="S").encode("latin1", "ignore")
     buf = io.BytesIO(pdf_bytes)
     buf.seek(0)
     return buf
@@ -359,6 +371,8 @@ def analyze_and_alert(symbol:str, chat_id=None):
         return
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
+    if last is None:
+        return
 
     with state_lock:
         prev_signal = state["signals"].get(symbol, "")
@@ -383,8 +397,6 @@ def analyze_and_alert(symbol:str, chat_id=None):
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
-    logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s", symbol, action, confidence, votes, pretop)
-
     if pretop:
         send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}", chat_id=chat_id)
 
@@ -401,21 +413,17 @@ def analyze_and_alert(symbol:str, chat_id=None):
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
     if not symbols:
-        logger.warning("No symbols found for scanning.")
         return
-    logger.info("Starting scan for %d symbols", len(symbols))
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
         list(exe.map(analyze_and_alert, symbols))
     with state_lock:
         state["last_scan"] = str(datetime.now(timezone.utc))
         save_json_safe(STATE_FILE, state)
-    logger.info("Scan finished at %s", state["last_scan"])
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
 scheduler.add_job(scan_top_symbols, "interval", minutes=SCAN_INTERVAL_MINUTES, next_run_time=datetime.now())
 scheduler.start()
-logger.info("Scheduler started")
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
@@ -501,7 +509,6 @@ def telegram_webhook(token):
 # ---------------- AUTO REGISTER WEBHOOK ----------------
 def auto_register_webhook():
     if WEBHOOK_URL and TELEGRAM_TOKEN:
-        logger.info("Registering Telegram webhook: %s", WEBHOOK_URL)
         set_telegram_webhook(WEBHOOK_URL)
 
 Thread(target=auto_register_webhook, daemon=True).start()
@@ -517,5 +524,4 @@ Thread(target=warmup_and_first_scan, daemon=True).start()
 
 # ---------------- MAIN ----------------
 if __name__=="__main__":
-    logger.info("Starting pre-top detector bot")
     app.run(host="0.0.0.0", port=PORT)
