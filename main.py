@@ -16,6 +16,8 @@ from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 import ta
 import mplfinance as mpf
+from scipy.signal import find_peaks
+import numpy as np
 
 # ---------------- BINANCE CLIENT ----------------
 try:
@@ -260,39 +262,32 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- СТАРИЙ PLOT SIGNAL ----------------
-def plot_signal(df, symbol, action, votes, pretop):
-    plt.style.use('ggplot')
-    fig, ax = plt.subplots(figsize=(10,6))
-    ax.plot(df.index, df["close"], label="Close", color="blue")
-    ax.plot(df.index, df["ema_8"], label="EMA8", color="green")
-    ax.plot(df.index, df["ema_20"], label="EMA20", color="orange")
-    ax.fill_between(df.index, df["support"], df["resistance"], color='grey', alpha=0.2)
-    if pretop:
-        ax.scatter(df.index[-1], df["close"].iloc[-1], color="red", s=80, marker="^", label="Pre-top")
-    ax.set_title(f"{symbol} — {action} — {','.join([v for v in votes])}")
-    ax.set_ylabel("Price")
-    ax.legend()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-# ---------------- НОВИЙ plot_signal_candles ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop):
+# ---------------- НОВИЙ plot_signal_candles з розумними рівнями ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
     df_plot = df.copy()[['open','high','low','close','volume']]
     df_plot.index.name = "Date"
 
-    # Лінії support/resistance
-    hlines = list(df["support"].dropna().unique()) + list(df["resistance"].dropna().unique())
+    closes = df['close'].values
+
+    # Локальні максимуми → опори
+    peaks, _ = find_peaks(closes, distance=5)
+    peak_vals = closes[peaks]
+    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
+
+    # Локальні мінімуми → підтримки
+    troughs, _ = find_peaks(-closes, distance=5)
+    trough_vals = closes[troughs]
+    top_supports = sorted(trough_vals)[:n_levels]
+
+    hlines = list(top_supports) + list(top_resistances)
 
     addplots = []
 
-    # Підсвітка Pre-top (останні 3 свічки)
+    # Підсвітка Pre-top
     if pretop:
         addplots.append(
-            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1, type='scatter', markersize=120, marker='^', color='magenta')
+            mpf.make_addplot([df['close'].iloc[-i] for i in range(3,0,-1)]*1,
+                             type='scatter', markersize=120, marker='^', color='magenta')
         )
 
     # Підсвітка патернів
