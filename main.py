@@ -366,26 +366,31 @@ def generate_signal_history_pdf(symbol):
     return buf
 
 # ---------------- ANALYZE SYMBOL ----------------
-def analyze_and_alert(symbol:str, chat_id=None):
+def analyze_and_alert(symbol: str, chat_id=None):
     df = fetch_klines(symbol)
     if df is None or len(df) < 30:
+        logger.info(f"{symbol}: not enough data")
         return
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
     if last is None:
         return
 
+    logger.info(f"{symbol}: action={action}, confidence={confidence:.2f}, pretop={pretop}")
+
     with state_lock:
         prev_signal = state["signals"].get(symbol, "")
+        # Оновлення win_stats
         win_stats = state.get("win_stats", {})
         if symbol not in win_stats:
-            win_stats[symbol] = {"total":0, "wins":0}
+            win_stats[symbol] = {"total": 0, "wins": 0}
         win_stats[symbol]["total"] += 1
         if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM:
             if pretop or "strong_trend" in votes:
                 win_stats[symbol]["wins"] += 1
         state["win_stats"] = win_stats
 
+        # Історія сигналів
         if symbol not in state["signal_history"]:
             state["signal_history"][symbol] = []
         state["signal_history"][symbol].append({
@@ -395,9 +400,12 @@ def analyze_and_alert(symbol:str, chat_id=None):
             "confidence": confidence,
             "votes": votes
         })
+
+        # Оновлення останнього сигналу
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
+    # Відправка повідомлень у Telegram одразу
     if pretop:
         send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}", chat_id=chat_id)
 
@@ -411,13 +419,10 @@ def analyze_and_alert(symbol:str, chat_id=None):
 
 # ---------------- SCAN ALL SYMBOLS BATCH ----------------
 def scan_top_symbols_safe():
-    if not scan_lock.acquire(blocking=False):
-        logger.info("Previous scan still running, skipping this run")
-        return
     try:
         scan_top_symbols()
-    finally:
-        scan_lock.release()
+    except Exception as e:
+        logger.exception("scan_top_symbols_safe error: %s", e)
 
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
@@ -430,9 +435,10 @@ def scan_top_symbols():
     for i in range(0, total, BATCH_SIZE):
         batch = symbols[i:i+BATCH_SIZE]
         workers = min(PARALLEL_WORKERS, len(batch))
+        logger.info(f"Processing batch {i//BATCH_SIZE + 1} with {len(batch)} symbols")
         with ThreadPoolExecutor(max_workers=workers) as exe:
-            list(exe.map(analyze_and_alert, batch))
-        logger.info(f"Completed batch {i//BATCH_SIZE + 1} / {((total-1)//BATCH_SIZE)+1}")
+            # Виклик analyze_and_alert для кожного символу окремо
+            list(exe.map(lambda s: analyze_and_alert(s), batch))
 
     with state_lock:
         state["last_scan"] = str(datetime.now(timezone.utc))
