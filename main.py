@@ -131,7 +131,7 @@ def get_all_usdt_symbols():
         ]
         blacklist = [
             "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
-            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG"
+            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1"
         ]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
         return filtered
