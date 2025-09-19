@@ -295,6 +295,55 @@ def backtest_winrate(df: pd.DataFrame, n_levels=5):
     winrate = wins / total_signals if total_signals > 0 else 0
     return winrate, results
 
+# ---------------- PLOT BACKTEST SIGNALS ----------------
+def plot_backtest_signals(df, symbol, n_levels=5):
+    df_plot = df.copy()[['open','high','low','close','volume']]
+    df_plot.index.name = "Date"
+
+    long_dates, long_prices = [], []
+    short_dates, short_prices = [], []
+
+    # Пробігаємо історію та визначаємо сигнали
+    for i in range(1, len(df)):
+        sub_df = df.iloc[:i+1]
+        action, _, _, last, _ = detect_signal(sub_df)
+        if action == "LONG":
+            long_dates.append(last.name)
+            long_prices.append(last["close"])
+        elif action == "SHORT":
+            short_dates.append(last.name)
+            short_prices.append(last["close"])
+
+    addplots = []
+
+    if long_dates:
+        ydata = pd.Series([np.nan]*len(df), index=df.index)
+        ydata.loc[long_dates] = long_prices
+        addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=80, marker='^', color='green'))
+
+    if short_dates:
+        ydata = pd.Series([np.nan]*len(df), index=df.index)
+        ydata.loc[short_dates] = short_prices
+        addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=80, marker='v', color='red'))
+
+    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style=s,
+        volume=True,
+        addplot=addplots,
+        title=f"{symbol} — Backtest Signals",
+        ylabel='Price',
+        ylabel_lower='Volume',
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+    )
+    buf.seek(0)
+    return buf
+
 # ---------------- PLOT HISTORY ----------------
 def plot_history(df, symbol, n_levels=5):
     df_plot = df.copy()[['open','high','low','close','volume']]
@@ -497,15 +546,16 @@ def telegram_webhook(token):
             send_telegram(msg_text)
 
         elif text.startswith("/history"):
-            parts = text.split()
-            if len(parts) >= 2:
-                symbol = parts[1].upper()
-                df = fetch_klines(symbol)
-                if df is not None and len(df) >= 30:
-                    buf = plot_history(df, symbol)
-                    send_telegram(f"📈 History for {symbol}", photo=buf)
-                else:
-                    send_telegram(f"❌ No data for {symbol}")
+    parts = text.split()
+    if len(parts) >= 2:
+        symbol = parts[1].upper()
+        df = fetch_klines(symbol)
+        if df is not None and len(df) >= 30:
+            df = apply_all_features(df)
+            buf = plot_backtest_signals(df, symbol)
+            send_telegram(f"📈 Backtest Signals for {symbol}", photo=buf)
+        else:
+            send_telegram(f"❌ No data for {symbol}")
 
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
