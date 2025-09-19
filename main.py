@@ -515,4 +515,8 @@ Thread(target=warmup_and_first_scan, daemon=True).start()
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
+
+    # 👉 реєструємо вебхук перед запуском Flask
+    auto_register_webhook()
+
     app.run(host="0.0.0.0", port=PORT)
