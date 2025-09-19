@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from threading import Thread, Lock
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 import io
 
@@ -33,7 +33,6 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
-TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
@@ -67,7 +66,7 @@ app = Flask(__name__)
 
 # ---------------- STATE + LOCK ----------------
 state_lock = Lock()
-scan_lock = Lock()  # Lock для APScheduler та ручних сканів
+scan_lock = Lock()
 
 def load_json_safe(path, default):
     try:
@@ -412,10 +411,13 @@ def analyze_and_alert(symbol:str, chat_id=None):
 
 # ---------------- SCAN ALL SYMBOLS BATCH ----------------
 def scan_top_symbols_safe():
+    if not scan_lock.acquire(blocking=False):
+        logger.info("Previous scan still running, skipping this run")
+        return
     try:
         scan_top_symbols()
-    except Exception as e:
-        logger.exception("scan_top_symbols_safe error: %s", e)
+    finally:
+        scan_lock.release()
 
 def scan_top_symbols():
     symbols = get_all_usdt_symbols()
@@ -445,7 +447,6 @@ def home():
 @app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     data = request.json
-    # Тут можна обробляти команди користувача
     return jsonify({"ok": True})
 
 # ---------------- SCHEDULER ----------------
