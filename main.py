@@ -1,4 +1,4 @@
-# main.py — Pre-top бот з графіками, Telegram, профілями користувачів, історією сигналів та ML графіками
+# main.py — Pre-top бот з графіками, Telegram, історією сигналів та ML графіками
 import os
 import time
 import json
@@ -462,3 +462,4 @@ if WEBHOOK_URL:
 if __name__ == "__main__":
     logger.info(f"Starting bot on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
+
