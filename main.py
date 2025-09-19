@@ -129,8 +129,8 @@ def get_all_usdt_symbols():
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
         ]
         blacklist = [
-            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
-            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1", "BTTC"
+            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD", "STRAX", "GNS", "ALCX",
+            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
         ]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
         return filtered
@@ -496,18 +496,30 @@ def telegram_webhook():
         logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
 
-# ---------------- AUTO REGISTER WEBHOOK ----------------
-def auto_register_webhook():
-    if WEBHOOK_URL and TELEGRAM_TOKEN:
-        url = f"{WEBHOOK_URL}/telegram_webhook"   # 👈 БЕЗ ТОКЕНА У ШЛЯХУ
-        logger.info("Registering Telegram webhook: %s", url)
-        set_telegram_webhook(url)
-        
-def force_register_webhook():
-    if WEBHOOK_URL and TELEGRAM_TOKEN:
-        url = f"{WEBHOOK_URL}/telegram_webhook"
-        resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
-        logger.info("Force setWebhook resp: %s", resp.text)
+# ---------------- TELEGRAM WEBHOOK SETUP ----------------
+def setup_webhook():
+    if not TELEGRAM_TOKEN or not WEBHOOK_URL:
+        logger.error("❌ TELEGRAM_TOKEN or WEBHOOK_URL is missing!")
+        return
+
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+    try:
+        # 🔹 1. Видаляємо старий вебхук
+        resp = requests.get(f"{base_url}/deleteWebhook")
+        logger.info("deleteWebhook resp: %s", resp.text)
+
+        # 🔹 2. Ставимо новий вебхук
+        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
+        resp = requests.get(f"{base_url}/setWebhook?url={webhook_url}")
+        logger.info("setWebhook resp: %s", resp.text)
+
+        # 🔹 3. Перевіряємо
+        resp = requests.get(f"{base_url}/getWebhookInfo")
+        logger.info("getWebhookInfo resp: %s", resp.text)
+
+    except Exception as e:
+        logger.exception("Webhook setup error: %s", e)
 
 # ---------------- WARMUP ----------------
 def warmup_and_first_scan():
@@ -521,7 +533,6 @@ Thread(target=warmup_and_first_scan, daemon=True).start()
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
 
-    auto_register_webhook()
-    force_register_webhook()   # 👈 гарантовано ставимо вебхук
+    setup_webhook()   # 👈 Тепер автоматично все налаштовує
 
     app.run(host="0.0.0.0", port=PORT)
