@@ -5,12 +5,12 @@ import json
 import logging
 import re
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 import io
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import requests
-from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
 import numpy as np
@@ -31,6 +31,7 @@ PORT = int(os.getenv("PORT", "5000"))
 
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
+PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "5"))
 
 STATE_FILE = "state.json"
 LOG_FILE = "bot.log"
@@ -49,19 +50,10 @@ logger = logging.getLogger("pretop-bot")
 
 # ---------------- BINANCE ----------------
 if BINANCE_PY_AVAILABLE and BINANCE_API_KEY and BINANCE_API_SECRET:
-    from requests import Session
-    session = Session()
-    client = BinanceClient(
-        api_key=BINANCE_API_KEY,
-        api_secret=BINANCE_API_SECRET,
-        requests_params={"timeout": 30}
-    )
+    client = BinanceClient(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 else:
     client = None
     logger.warning("Binance client unavailable or API keys missing")
-
-# ---------------- FLASK ----------------
-app = Flask(__name__)
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -121,8 +113,7 @@ def get_all_usdt_symbols():
         return []
     try:
         ex = client.get_exchange_info()
-        symbols = [s["symbol"] for s in ex["symbols"] 
-                   if s["quoteAsset"]=="USDT" and s["status"]=="TRADING"]
+        symbols = [s["symbol"] for s in ex["symbols"] if s["quoteAsset"]=="USDT" and s["status"]=="TRADING"]
         blacklist = ["BUSD","USDC","FDUSD","TUSD","DAI","EUR","GBP","AUD",
                      "STRAX","GNS","ALCX","BTCST","COIN","AAPL","TSLA",
                      "MSFT","META","GOOG","USD1","BTTC","ARDR","DF","XNO"]
@@ -172,6 +163,8 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
+    if len(df)<2:
+        return "WATCH", [], False, df.iloc[-1], 0.0
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
@@ -250,13 +243,17 @@ def plot_backtest_signals(df, symbol, conf_threshold=CONF_THRESHOLD_MEDIUM):
 # ---------------- TOP SYMBOLS ----------------
 def get_top5_symbols(symbols):
     results=[]
-    for s in symbols:
-        df=fetch_klines(s)
-        if df is None or len(df)<20: continue
+    def process_symbol(s):
+        df = fetch_klines(s)
+        if df is None or len(df)<20: return None
         signals=backtest_winrate(df)
-        win_count=sum(1 for a,c in signals if c>=CONF_THRESHOLD_MEDIUM)
-        total=len(signals)
-        if total>0: results.append((s,win_count/total))
+        total = len(signals)
+        if total==0: return None
+        win_count = sum(1 for a,c in signals if c>=CONF_THRESHOLD_MEDIUM)
+        return (s, win_count/total)
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        for r in executor.map(process_symbol, symbols):
+            if r: results.append(r)
     results.sort(key=lambda x:x[1],reverse=True)
     return results[:5]
 
@@ -272,13 +269,11 @@ def update_top_cache():
 def send_top_symbols_telegram():
     try:
         now = time.time()
-        # використовуємо кеш, якщо свіжий
         if state["top_cache"].get("timestamp") and now - state["top_cache"]["timestamp"] < CACHE_EXPIRY:
             top5 = state["top_cache"]["data"]
         else:
             update_top_cache()
             top5 = state["top_cache"]["data"]
-
         if top5:
             msg_text="🏆 Top5 tokens by strong signal winrate:\n" + "\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
         else:
@@ -299,31 +294,26 @@ def background_top_cache_updater():
 Thread(target=background_top_cache_updater, daemon=True).start()
 
 # ---------------- TELEGRAM WEBHOOK ----------------
+from flask import Flask, request, jsonify
+app = Flask(__name__)
+
 @app.route("/telegram_webhook/<token>", methods=["POST"])
 def telegram_webhook(token):
     try:
-        if token != TELEGRAM_TOKEN: 
-            return jsonify({"ok":False,"error":"invalid token"}),403
-
+        if token != TELEGRAM_TOKEN: return jsonify({"ok":False,"error":"invalid token"}),403
         update = request.get_json(force=True) or {}
         msg = update.get("message")
-        if not msg: 
-            return jsonify({"ok":True})
-
+        if not msg: return jsonify({"ok":True})
         text = msg.get("text","").lower().strip()
-
         if text.startswith("/top"): 
             Thread(target=send_top_symbols_telegram, daemon=True).start()
             send_telegram("⏳ Processing top symbols, please wait...")
-
         elif text.startswith("/scan"): 
             Thread(target=send_top_symbols_telegram, daemon=True).start()
             send_telegram("⚡ Manual scan started.")
-
         elif text.startswith("/status"): 
             last_scan = state.get("top_cache", {}).get("timestamp")
             send_telegram(f"📝 Status:\nCached Top: {len(state.get('top_cache',{}).get('data',[]))} symbols\nLast scan: {last_scan}")
-
         elif text.startswith("/history"):
             parts = text.split()
             if len(parts) >= 2:
@@ -335,10 +325,8 @@ def telegram_webhook(token):
                     send_telegram(f"📈 Strong Signals for {symbol}", photo=buf)
                 else:
                     send_telegram(f"❌ No data for {symbol}")
-
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
-
     return jsonify({"ok":True})
 
 # ---------------- MAIN ----------------
