@@ -444,6 +444,14 @@ def scan_top_symbols():
     logger.info("Scan finished at %s", state["last_scan"])
 
 # ---------------- FLASK ROUTES ----------------
+from flask import Flask, request, jsonify
+from threading import Thread
+import logging
+import requests
+
+app = Flask(__name__)
+logger = logging.getLogger("pretop-bot")
+
 @app.route("/")
 def home():
     return jsonify({
@@ -456,7 +464,7 @@ def home():
 def telegram_webhook():
     try:
         update = request.get_json(force=True) or {}
-        logger.info("Telegram update: %s", update)   # 👈 ЛОГУЄМО ВСІ АПДЕЙТИ
+        logger.info("Telegram update: %s", update)
 
         msg = update.get("message")
         if not msg:
@@ -496,6 +504,7 @@ def telegram_webhook():
         logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
 
+
 # ---------------- TELEGRAM WEBHOOK SETUP ----------------
 def setup_webhook():
     if not TELEGRAM_TOKEN or not WEBHOOK_URL:
@@ -505,16 +514,15 @@ def setup_webhook():
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
     try:
-        # 🔹 1. Видаляємо старий вебхук
+        # Видаляємо старий вебхук
         resp = requests.get(f"{base_url}/deleteWebhook")
         logger.info("deleteWebhook resp: %s", resp.text)
 
-        # 🔹 2. Ставимо новий вебхук
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        resp = requests.get(f"{base_url}/setWebhook?url={webhook_url}")
+        # Ставимо новий вебхук
+        resp = requests.get(f"{base_url}/setWebhook?url={WEBHOOK_URL}")
         logger.info("setWebhook resp: %s", resp.text)
 
-        # 🔹 3. Перевіряємо
+        # Перевіряємо
         resp = requests.get(f"{base_url}/getWebhookInfo")
         logger.info("getWebhookInfo resp: %s", resp.text)
 
@@ -530,9 +538,11 @@ def warmup_and_first_scan():
 
 Thread(target=warmup_and_first_scan, daemon=True).start()
 
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
 
-    setup_webhook()   # 👈 Тепер автоматично все налаштовує
+    setup_webhook()  # 🔹 автоматично ставимо вебхук
+    Thread(target=warmup_and_first_scan, daemon=True).start()
 
     app.run(host="0.0.0.0", port=PORT)
