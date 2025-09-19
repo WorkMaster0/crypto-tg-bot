@@ -4,6 +4,7 @@ import time
 import json
 import logging
 import re
+import requests
 from datetime import datetime, timezone
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
