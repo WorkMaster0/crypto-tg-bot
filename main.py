@@ -455,9 +455,15 @@ def home():
         "signals": len(state.get("signals", {}))
     })
 
-@app.route("/telegram_webhook", methods=["POST"])
-def telegram_webhook():
+# 🔹 Змінено маршрут на прийом токена у URL
+@app.route("/telegram_webhook/<token>", methods=["POST"])
+def telegram_webhook(token):
     try:
+        # Можна перевірити токен на відповідність TELEGRAM_TOKEN, якщо хочеш
+        if token != TELEGRAM_TOKEN:
+            logger.warning("Received webhook with invalid token: %s", token)
+            return jsonify({"ok": False, "error": "invalid token"}), 403
+
         update = request.get_json(force=True) or {}
         logger.info("Telegram update: %s", update)
 
@@ -498,7 +504,6 @@ def telegram_webhook():
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
-
 
 # ---------------- TELEGRAM WEBHOOK SETUP ----------------
 def setup_webhook():
