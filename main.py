@@ -432,7 +432,13 @@ def scan_top_symbols():
 
 # ---------------- SCHEDULER ----------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols_safe, "interval", minutes=SCAN_INTERVAL_MINUTES, next_run_time=datetime.now())
+scheduler.add_job(
+    scan_top_symbols_safe,
+    "interval",
+    minutes=SCAN_INTERVAL_MINUTES,
+    next_run_time=datetime.now(),
+    max_instances=3   # <-- тут дозволяємо одночасно до 3
+)
 scheduler.start()
 
 # ---------------- FLASK ROUTES ----------------
@@ -530,7 +536,9 @@ def warmup_and_first_scan():
     except Exception as e:
         logger.exception("warmup_and_first_scan error: %s", e)
 
-Thread(target=warmup_and_first_scan, daemon=True).start()
+# Запускаємо warmup лише в основному worker
+if __name__=="__main__" and os.environ.get("GUNICORN_WORKER_ID", "0") == "0":
+    Thread(target=warmup_and_first_scan, daemon=True).start()
 
 # ---------------- MAIN ----------------
 if __name__=="__main__":
