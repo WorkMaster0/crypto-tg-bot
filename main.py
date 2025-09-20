@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from threading import Thread
 import io
+import asyncio
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -399,66 +400,46 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
 
 # ---------------- WEBSOCKET (kline) ----------------
 def start_websocket():
-    global twm
     if not client:
         logger.warning("Binance client unavailable, websocket not started")
         return
 
-    try:
+    async def run_ws():
         twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
         twm.start()
-    except Exception as e:
-        logger.exception("Failed to start ThreadedWebsocketManager: %s", e)
-        return
 
-    symbols = get_all_usdt_symbols()
-    if not symbols:
-        logger.warning("No symbols found for WebSocket subscription.")
-        return
+        def handle_kline(msg):
+            symbol = msg['s']
+            k = msg['k']
+            if k['x']:  # закрита свічка
+                df_new = pd.DataFrame([{
+                    'open_time': pd.to_datetime(k['t'], unit='ms', utc=True),
+                    'open': float(k['o']),
+                    'high': float(k['h']),
+                    'low': float(k['l']),
+                    'close': float(k['c']),
+                    'volume': float(k['v'])
+                }])
+                if symbol in symbol_data:
+                    symbol_data[symbol] = pd.concat([symbol_data[symbol], df_new]).tail(EMA_SCAN_LIMIT)
+                else:
+                    symbol_data[symbol] = df_new
+                analyze_and_alert(symbol)
 
-    logger.info("Subscribing to WebSocket for %d symbols (TOP_LIMIT=%d)", len(symbols), TOP_LIMIT)
-
-    # build per-symbol callback to preserve symbol within closure
-    def make_callback(sym):
-        def _callback(msg):
+        symbols = get_all_usdt_symbols()
+        for sym in symbols:
             try:
-                k = msg.get('k', {})
-                if not k:
-                    return
-                # process only closed candles
-                if k.get('x'):
-                    df_new = pd.DataFrame([{
-                        'open_time': pd.to_datetime(k['t'], unit='ms', utc=True),
-                        'open': float(k['o']),
-                        'high': float(k['h']),
-                        'low': float(k['l']),
-                        'close': float(k['c']),
-                        'volume': float(k['v'])
-                    }]).set_index('open_time')
-                    # merge into cache
-                    df_old = symbol_data.get(sym)
-                    if df_old is not None:
-                        combined = pd.concat([df_old, df_new])
-                        combined = combined[~combined.index.duplicated(keep="last")].tail(EMA_SCAN_LIMIT)
-                    else:
-                        combined = df_new
-                    symbol_data[sym] = combined
-                    # analyze in background to avoid blocking ws thread
-                    Thread(target=analyze_and_alert, args=(sym,), daemon=True).start()
+                twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
+                logger.info(f"✅ Started websocket for {sym}")
             except Exception as e:
-                logger.exception("WebSocket callback error for %s: %s", sym, e)
-        return _callback
+                logger.error(f"Failed to start kline socket for {sym}: {e}")
 
-    for sym in symbols:
-        try:
-            cb = make_callback(sym)
-            # start_kline_socket expects lowercase symbol name (e.g. btcusdt)
-            twm.start_kline_socket(callback=cb, symbol=sym.lower(), interval='15m')
-            time.sleep(0.05)  # slight pause between subscriptions
-        except Exception as e:
-            logger.exception("Failed to start kline socket for %s: %s", sym, e)
+        twm.join()
 
-    logger.info("WebSocket subscriptions started")
+    # створюємо loop вручну у потоці
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_ws())
 
 # ---------------- SIMPLE SCANNER LOOP (fallback periodic re-check) ----------------
 def scanner_loop():
