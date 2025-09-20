@@ -334,13 +334,19 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
         ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
         addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta'))
 
-    # Previous signals LONG/SHORT
-    hist = state.get("signal_history", {}).get(symbol, [])
-    for h in hist:
-        y = [np.nan]*(len(df)-1) + [h["price"]]
-        color = "green" if h["action"] == "LONG" else "red"
-        if h["action"] in ["LONG", "SHORT"]:
-            addplots.append(mpf.make_addplot(y, type='scatter', markersize=50, marker='o', color=color))
+    # Previous signals LONG/SHORT (малюємо по часу)
+hist = state.get("signal_history", {}).get(symbol, [])
+for h in hist:
+    if h["action"] in ["LONG", "SHORT"]:
+        ts = pd.to_datetime(h["time"])
+        if ts in df.index:  # сигнал відповідає існуючій свічці
+            idx = df.index.get_loc(ts)
+            y = [np.nan] * len(df)
+            y[idx] = h["price"]
+            color = "green" if h["action"] == "LONG" else "red"
+            addplots.append(
+                mpf.make_addplot(y, type="scatter", markersize=60, marker="o", color=color)
+            )
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
