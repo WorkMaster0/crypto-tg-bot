@@ -109,6 +109,7 @@ def send_telegram(text: str, photo=None):
 def get_all_usdt_symbols():
     if not client:
         return []
+
     try:
         ex = client.get_exchange_info()
         symbols = [
@@ -116,12 +117,13 @@ def get_all_usdt_symbols():
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
         ]
         blacklist = [
-            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
-            "STRAX", "GNS", "ALCX", "BTCST", "COIN", "AAPL", "TSLA", "MSFT",
-            "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
+            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD", 
+            "STRAX", "GNS", "ALCX", "BTCST", "COIN", "AAPL", "TSLA", 
+            "MSFT", "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
         ]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
-        return filtered
+        # 🔹 Обмежуємо кількість символів
+        return filtered[:TOP_LIMIT]
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
         return []
@@ -369,12 +371,13 @@ def scan_top_symbols():
     if not symbols:
         logger.warning("No symbols found for scanning.")
         return
+
     logger.info("Starting scan for %d symbols", len(symbols))
-    for sym in symbols:
-        try:
-            analyze_and_alert(sym)
-        except Exception as e:
-            logger.exception("Error scanning symbol %s: %s", sym, e)
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
+        for sym in symbols:
+            exe.submit(lambda s=sym: analyze_and_alert(s))
+            time.sleep(0.2)  # 🔹 пауза 200 мс між запитами
 
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
