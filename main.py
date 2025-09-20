@@ -29,7 +29,6 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
@@ -43,10 +42,6 @@ LOG_FILE = "bot.log"
 CONF_THRESHOLD_MEDIUM = 0.60
 CONF_THRESHOLD_STRONG = 0.80
 
-STOP_LOSS = 0.02   # 2%
-TAKE_PROFIT = 0.04 # 4%
-LOOKAHEAD_BARS = 5 # 5 свічок
-
 # ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
@@ -54,19 +49,6 @@ logging.basicConfig(
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
 logger = logging.getLogger("pretop-bot")
-
-# ---------------- BINANCE ----------------
-if BINANCE_PY_AVAILABLE and BINANCE_API_KEY and BINANCE_API_SECRET:
-    from requests import Session
-    session = Session()
-    client = BinanceClient(
-        api_key=BINANCE_API_KEY,
-        api_secret=BINANCE_API_SECRET,
-        requests_params={"timeout": 30}
-    )
-else:
-    client = None
-    logger.warning("Binance client unavailable or API keys missing")
 
 # ---------------- FLASK ----------------
 app = Flask(__name__)
@@ -123,8 +105,27 @@ def send_telegram(text: str, photo=None):
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
+# ---------------- BINANCE LAZY CLIENT ----------------
+client = None
+def get_client():
+    global client
+    if client is None and BINANCE_PY_AVAILABLE and BINANCE_API_KEY and BINANCE_API_SECRET:
+        from requests import Session
+        session = Session()
+        client = BinanceClient(
+            api_key=BINANCE_API_KEY,
+            api_secret=BINANCE_API_SECRET,
+            requests_params={"timeout": 30}
+        )
+    return client
+
 # ---------------- MARKET DATA ----------------
-def get_all_usdt_symbols():
+_symbols_cache = {"timestamp": 0, "symbols": []}
+def get_all_usdt_symbols(force_refresh=False):
+    now = time.time()
+    if not force_refresh and now - _symbols_cache["timestamp"] < 300:  # кеш на 5 хв
+        return _symbols_cache["symbols"]
+    client = get_client()
     if not client:
         return []
     for attempt in range(5):
@@ -136,6 +137,7 @@ def get_all_usdt_symbols():
                          "STRAX","GNS","ALCX","BTCST","COIN","AAPL","TSLA",
                          "MSFT","META","GOOG","USD1","BTTC","ARDR","DF","XNO"]
             filtered = [s for s in symbols if not any(b in s for b in blacklist)]
+            _symbols_cache.update({"timestamp": now, "symbols": filtered})
             return filtered
         except Exception as e:
             logger.warning("get_all_usdt_symbols attempt %d failed: %s", attempt+1, e)
@@ -144,10 +146,11 @@ def get_all_usdt_symbols():
     return []
 
 def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
+    client = get_client()
+    if not client:
+        return None
     for attempt in range(3):
         try:
-            if not client:
-                raise RuntimeError("Binance client unavailable")
             kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
             df = pd.DataFrame(kl, columns=["open_time", "open", "high", "low", "close", "volume",
                                            "close_time", "qav", "num_trades", "tb_base", "tb_quote", "ignore"])
@@ -226,31 +229,26 @@ def detect_signal(df: pd.DataFrame):
     return action, votes, pretop, last, confidence
 
 # ---------------- BACKTEST ----------------
-def backtest_winrate(df: pd.DataFrame):
+def backtest_winrate(df: pd.DataFrame, stop_loss=0.02, take_profit=0.04, candles=5):
     df = apply_all_features(df)
-    wins = 0
-    losses = 0
-    signals = 0
-    for i in range(LOOKAHEAD_BARS, len(df)-LOOKAHEAD_BARS):
+    results=[]
+    for i in range(candles, len(df)):
         sub_df = df.iloc[:i+1]
-        action, votes, pretop, last, conf = detect_signal(sub_df)
-        if conf >= CONF_THRESHOLD_MEDIUM and action in ["LONG","SHORT"]:
+        action,votes,pretop,last,conf=detect_signal(sub_df)
+        if conf>=CONF_THRESHOLD_MEDIUM and action!="WATCH":
+            # Симуляція 5 свічок, стоп/профіт
             entry = last["close"]
-            signals += 1
-            lookahead = df.iloc[i+1:i+LOOKAHEAD_BARS+1]
-            if action=="LONG":
-                if (lookahead["high"] >= entry*(1+TAKE_PROFIT)).any():
-                    wins += 1
-                elif (lookahead["low"] <= entry*(1-STOP_LOSS)).any():
-                    losses += 1
-            elif action=="SHORT":
-                if (lookahead["low"] <= entry*(1-TAKE_PROFIT)).any():
-                    wins += 1
-                elif (lookahead["high"] >= entry*(1+STOP_LOSS)).any():
-                    losses += 1
-    total = wins + losses
-    winrate = wins/total if total>0 else 0
-    return winrate, signals
+            future = df.iloc[i+1:i+1+candles]["close"].values if i+1+candles <= len(df) else []
+            win=False
+            for p in future:
+                if action=="LONG":
+                    if p >= entry*(1+take_profit): win=True; break
+                    elif p <= entry*(1-stop_loss): win=False; break
+                elif action=="SHORT":
+                    if p <= entry*(1-take_profit): win=True; break
+                    elif p >= entry*(1+stop_loss): win=False; break
+            results.append((action, conf, win))
+    return results
 
 # ---------------- PLOT BACKTEST ----------------
 def plot_backtest_signals(df, symbol, conf_threshold=CONF_THRESHOLD_MEDIUM):
@@ -258,7 +256,7 @@ def plot_backtest_signals(df, symbol, conf_threshold=CONF_THRESHOLD_MEDIUM):
     df_plot.index.name="Date"
     long_dates,long_prices=[],[]
     short_dates,short_prices=[],[]
-    for i in range(LOOKAHEAD_BARS, len(df)-LOOKAHEAD_BARS):
+    for i in range(1,len(df)):
         sub_df=df.iloc[:i+1]
         action,votes,pretop,last,conf=detect_signal(sub_df)
         if conf<conf_threshold: continue
@@ -279,10 +277,11 @@ def get_top5_symbols(symbols):
     results=[]
     for s in symbols:
         df=fetch_klines(s)
-        if df is None or len(df)<50: continue
-        winrate, signals = backtest_winrate(df)
-        if signals>0:
-            results.append((s,winrate))
+        if df is None or len(df)<20: continue
+        signals=backtest_winrate(df)
+        win_count=sum(1 for a,c,win in signals if win)
+        total=len(signals)
+        if total>0: results.append((s,win_count/total))
     results.sort(key=lambda x:x[1],reverse=True)
     return results[:5]
 
@@ -292,14 +291,11 @@ def scan_top_symbols():
         symbols = get_all_usdt_symbols()[:TOP_LIMIT]
         results=[]
         with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-            futures={executor.submit(backtest_winrate, fetch_klines(s)):s for s in symbols}
+            futures={executor.submit(get_top5_symbols,[s]):s for s in symbols}
             for fut in as_completed(futures):
                 try:
-                    winrate = fut.result()
-                    if winrate and isinstance(winrate, tuple):
-                        w, sigs = winrate
-                        if sigs>0:
-                            results.append((futures[fut], w))
+                    res=fut.result()
+                    if res: results.extend(res)
                 except Exception as e:
                     logger.warning("scan error %s: %s", futures[fut], e)
         results.sort(key=lambda x:x[1],reverse=True)
