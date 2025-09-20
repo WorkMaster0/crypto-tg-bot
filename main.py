@@ -442,6 +442,20 @@ def setup_webhook():
 Thread(target=warmup_data, daemon=True).start()
 Thread(target=scan_top_symbols, daemon=True).start()
 
+# ---------------- BACKGROUND SCANNER LOOP ----------------
+def scanner_loop():
+    while True:
+        try:
+            logger.info("🔄 Auto-scan started")
+            scan_top_symbols()
+            logger.info("✅ Auto-scan finished")
+        except Exception as e:
+            logger.exception("Scanner loop error: %s", e)
+        time.sleep(SCAN_INTERVAL_MINUTES * 60)
+
+# Запускаємо окремим фоновим потоком
+Thread(target=scanner_loop, daemon=True).start()
+
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
