@@ -489,23 +489,34 @@ def telegram_webhook(token):
             )
 
         elif text.startswith("/top"):
-            symbols = get_all_usdt_symbols()
-            top5 = get_top5_symbols(symbols)
+    symbols = get_all_usdt_symbols()[:TOP_LIMIT]
+    if not symbols:
+        send_telegram("❌ No symbols available for top scan")
+    else:
+        winrates = {}
+
+        def calc_wr(sym):
+            df = fetch_klines(sym)
+            if df is None or len(df) < 30:
+                return None
+            wr, _ = backtest_winrate(df)
+            return (sym, wr)
+
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
+            futures = [exe.submit(calc_wr, s) for s in symbols]
+            for fut in futures:
+                res = fut.result()
+                if res:
+                    winrates[res[0]] = res[1]
+
+        if not winrates:
+            send_telegram("❌ No data to calculate top symbols")
+        else:
+            sorted_wr = sorted(winrates.items(), key=lambda x: x[1], reverse=True)[:5]
             msg_text = "🏆 Top5 tokens by winrate:\n" + "\n".join(
-                [f"{s[0]}: {s[1]*100:.1f}%" for s in top5]
+                [f"{s[0]}: {s[1]*100:.1f}%" for s in sorted_wr]
             )
             send_telegram(msg_text)
-
-        elif text.startswith("/history"):
-            parts = text.split()
-            if len(parts) >= 2:
-                symbol = parts[1].upper()
-                df = fetch_klines(symbol)
-                if df is not None and len(df) >= 30:
-                    buf = plot_history(df, symbol)
-                    send_telegram(f"📈 History for {symbol}", photo=buf)
-                else:
-                    send_telegram(f"❌ No data for {symbol}")
 
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
