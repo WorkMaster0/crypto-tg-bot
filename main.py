@@ -30,6 +30,7 @@ TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
+REQUEST_DELAY = 0.2  # затримка між запитами до Binance (сек)
 
 STATE_FILE = "state.json"
 LOG_FILE = "bot.log"
@@ -136,6 +137,7 @@ def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
             df = df[["open_time", "open", "high", "low", "close", "volume"]].astype(float)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df.set_index("open_time", inplace=True)
+            time.sleep(REQUEST_DELAY)
             return df
         except Exception as e:
             logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt + 1, e)
@@ -268,58 +270,6 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- PLOT SIGNAL CANDLES ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
-    df_plot = df[['open','high','low','close','volume']].copy()
-    df_plot.index.name = "Date"
-
-    closes = df['close'].values
-    peaks, _ = find_peaks(closes, distance=5)
-    peak_vals = closes[peaks]
-    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
-
-    troughs, _ = find_peaks(-closes, distance=5)
-    trough_vals = sorted(closes[troughs])[:n_levels]
-    hlines = list(trough_vals) + list(top_resistances)
-
-    addplots = []
-
-    last = df.iloc[-1]
-    if pretop:
-        ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
-        addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta'))
-
-    patterns = {
-        "bullish_engulfing": "green",
-        "bearish_engulfing": "red",
-        "hammer_bull": "lime",
-        "shooting_star": "orange",
-        "doji": "blue"
-    }
-    for pat, color in patterns.items():
-        if pat in votes:
-            ydata = [np.nan]*(len(df)-1) + [last['close']]
-            addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=80, marker='o', color=color))
-
-    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
-
-    buf = io.BytesIO()
-    mpf.plot(
-        df_plot,
-        type='candle',
-        style=s,
-        volume=True,
-        addplot=addplots,
-        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-        title=f"{symbol} — {action} — {','.join(votes)}",
-        ylabel='Price',
-        ylabel_lower='Volume',
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
-    )
-    buf.seek(0)
-    return buf
-
 # ---------------- ANALYZE SYMBOL ----------------
 def analyze_and_alert(symbol: str):
     df = update_symbol(symbol)
@@ -330,35 +280,77 @@ def analyze_and_alert(symbol: str):
     prev_signal = state["signals"].get(symbol, "")
 
     logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-                symbol, action, confidence, votes, pretop)
+                symbol, action, confidence, [v for v in votes], pretop)
+
+    # Зберігаємо історію сигналів для /history
+    hist = state["signal_history"].setdefault(symbol, [])
+    hist.append({"time": str(last.name), "action": action, "price": last["close"]})
+    hist = hist[-50:]  # обмежимо історію
+    state["signal_history"][symbol] = hist
 
     if pretop:
-        send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
+        Thread(target=send_telegram, args=(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}",)).start()
 
     if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
+        msg = (
+            f"⚡ TRADE SIGNAL\n"
+            f"Symbol: {symbol}\n"
+            f"Action: {action}\n"
+            f"Price: {last['close']:.6f}\n"
+            f"Support: {last['support']:.6f}\n"
+            f"Resistance: {last['resistance']:.6f}\n"
+            f"Confidence: {confidence:.2f}\n"
+            f"Patterns: {','.join(votes)}\n"
+            f"Pre-top: {pretop}\n"
+            f"Time: {last.name}\n"
+        )
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
+        Thread(target=send_telegram, args=(msg, photo_buf)).start()
         state["signals"][symbol] = action
-        save_json_safe(STATE_FILE, state)
 
-        def send_signal_with_plot():
-            try:
-                msg = (
-                    f"⚡ TRADE SIGNAL\n"
-                    f"Symbol: {symbol}\n"
-                    f"Action: {action}\n"
-                    f"Price: {last['close']:.6f}\n"
-                    f"Support: {last['support']:.6f}\n"
-                    f"Resistance: {last['resistance']:.6f}\n"
-                    f"Confidence: {confidence:.2f}\n"
-                    f"Patterns: {','.join(votes)}\n"
-                    f"Pre-top: {pretop}\n"
-                    f"Time: {last.name}\n"
-                )
-                photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
-                send_telegram(msg, photo=photo_buf)
-            except Exception as e:
-                logger.exception("send_signal_with_plot error: %s", e)
+    save_json_safe(STATE_FILE, state)
 
-        Thread(target=send_signal_with_plot, daemon=True).start()
+# ---------------- PLOT SIGNAL CANDLES ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
+    df_plot = df.copy()[['open','high','low','close','volume']]
+    df_plot.index.name = "Date"
+
+    closes = df['close'].values
+    peaks, _ = find_peaks(closes, distance=5)
+    peak_vals = closes[peaks]
+    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
+
+    troughs, _ = find_peaks(-closes, distance=5)
+    trough_vals = sorted(closes[troughs])[:n_levels]
+
+    hlines = list(trough_vals) + list(top_resistances)
+    addplots = []
+
+    last = df.iloc[-1]
+
+    # Pre-top highlight
+    if pretop:
+        ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
+        addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta'))
+
+    # Previous signals LONG/SHORT
+    hist = state.get("signal_history", {}).get(symbol, [])
+    for h in hist:
+        y = [np.nan]*(len(df)-1) + [h["price"]]
+        color = "green" if h["action"] == "LONG" else "red"
+        if h["action"] in ["LONG", "SHORT"]:
+            addplots.append(mpf.make_addplot(y, type='scatter', markersize=50, marker='o', color=color))
+
+    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
+
+    buf = io.BytesIO()
+    mpf.plot(df_plot, type='candle', style=s, volume=True, addplot=addplots,
+             hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+             title=f"{symbol} — {action}", ylabel='Price', ylabel_lower='Volume',
+             savefig=dict(fname=buf, dpi=100, bbox_inches='tight'))
+    buf.seek(0)
+    return buf
 
 # ---------------- MASTER SCAN ----------------
 def scan_top_symbols():
@@ -366,10 +358,12 @@ def scan_top_symbols():
     if not symbols:
         logger.warning("No symbols found for scanning.")
         return
-
     logger.info("Starting scan for %d symbols", len(symbols))
-    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        list(exe.map(analyze_and_alert, symbols))
+    for sym in symbols:
+        try:
+            analyze_and_alert(sym)
+        except Exception as e:
+            logger.exception("Error scanning symbol %s: %s", sym, e)
 
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
@@ -388,7 +382,6 @@ def home():
 def telegram_webhook(token):
     try:
         if token != TELEGRAM_TOKEN:
-            logger.warning("Received webhook with invalid token: %s", token)
             return jsonify({"ok": False, "error": "invalid token"}), 403
 
         update = request.get_json(force=True) or {}
@@ -399,19 +392,22 @@ def telegram_webhook(token):
         text = msg.get("text", "").lower().strip()
 
         if text.startswith("/scan"):
-            send_telegram("⚡ Manual scan started.")
             Thread(target=scan_top_symbols, daemon=True).start()
+            send_telegram("⚡ Manual scan started.")
 
         elif text.startswith("/status"):
-            send_telegram(
-                f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}"
-            )
+            send_telegram(f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}")
 
-        elif text.startswith("/top"):
-            symbols = get_all_usdt_symbols()
-            top5 = sorted(((sym, analyze_and_alert(sym)) for sym in symbols), key=lambda x: 0, reverse=True)[:5]
-            msg_text = "🏆 Top5 tokens:\n" + "\n".join([f"{s[0]}" for s in top5])
-            send_telegram(msg_text)
+        elif text.startswith("/history"):
+            parts = text.split()
+            if len(parts) >= 2:
+                symbol = parts[1].upper()
+                df = symbol_data.get(symbol) or fetch_klines(symbol)
+                if df is not None and len(df) >= 30:
+                    buf = plot_signal_candles(df, symbol, "", [], False)
+                    send_telegram(f"📈 History for {symbol}", photo=buf)
+                else:
+                    send_telegram(f"❌ No data for {symbol}")
 
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
@@ -422,7 +418,6 @@ def setup_webhook():
     if not TELEGRAM_TOKEN or not WEBHOOK_URL:
         logger.error("❌ TELEGRAM_TOKEN or WEBHOOK_URL is missing!")
         return
-
     try:
         base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
         requests.get(f"{base_url}/deleteWebhook")
