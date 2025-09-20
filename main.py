@@ -567,15 +567,13 @@ def start_background_tasks():
     Thread(target=scanner_loop, daemon=True).start()
 
 
-# Flask 3.1+ has no before_first_request, so hook into before_serving
-@app.before_serving
-def _start_background():
-    start_background_tasks()
+# ---------------- INIT ON IMPORT ----------------
+# Це виконається при старті gunicorn
+logger.info("Starting pre-top detector bot (import phase)")
+setup_webhook()
+start_background_tasks()
 
 
-# ---------------- MAIN (for local run) ----------------
+# ---------------- MAIN (для локального запуску) ----------------
 if __name__ == "__main__":
-    logger.info("Starting pre-top detector bot (local run)")
-    setup_webhook()
-    start_background_tasks()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
