@@ -4,6 +4,7 @@ import time
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Thread
 import io
@@ -150,32 +151,39 @@ def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
             df = df[["open_time","open","high","low","close","volume"]].astype(float)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df.set_index("open_time", inplace=True)
-            time.sleep(0.15)
+            time.sleep(0.5)  # було 0.15 → збільшили
             return df
         except Exception as e:
             logger.warning("fetch_klines_rest %s attempt %d error: %s", symbol, attempt+1, e)
-            time.sleep(0.5)
+            time.sleep(1)
     return None
 
-# ---------------- DATA WARMUP ----------------
+# ---------------- DATA WARMUP (async/future версія) ----------------
+def warmup_symbol(symbol):
+    """Завантажує історичні дані для одного символу"""
+    df = None
+    for attempt in range(3):
+        df = fetch_klines_rest(symbol)
+        if df is not None:
+            break
+        time.sleep(1)
+    if df is not None and len(df) > 0:
+        symbol_data[symbol] = df
+        logger.info("✅ Warmed up symbol %s (%d bars)", symbol, len(df))
+    else:
+        logger.warning("❌ No data fetched for %s", symbol)
+    time.sleep(1.5)  # пауза між символами
+
 def warmup_data():
     symbols = get_all_usdt_symbols()
-    logger.info("Warming up data for %d symbols", len(symbols))
-    for sym in symbols:
-        try:
-            df = None
-            for attempt in range(3):
-                df = fetch_klines_rest(sym)
-                if df is not None:
-                    break
-                time.sleep(1)  # пауза між запитами
-            if df is not None and len(df) > 0:
-                symbol_data[sym] = df
-            else:
-                logger.warning("No data fetched for %s", sym)
-            time.sleep(0.3)  # **обов'язкова пауза** між запитами, щоб не перевищити ліміт
-        except Exception as e:
-            logger.exception("warmup_data error for %s: %s", sym, e)
+    logger.info("Starting warmup for %d symbols", len(symbols))
+    if not symbols:
+        return
+
+    # Використовуємо ThreadPoolExecutor для паралельного завантаження невеликими потоками
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for sym in symbols:
+            executor.submit(warmup_symbol, sym)
 
 # ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
