@@ -332,30 +332,34 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
     # Pre-top highlight
     if pretop:
         ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
-        addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta'))
+        addplots.append(
+            mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta')
+        )
 
     # Previous signals LONG/SHORT (малюємо по часу)
     hist = state.get("signal_history", {}).get(symbol, [])
     for h in hist:
-    if h["action"] in ["LONG", "SHORT"]:
-        ts = pd.to_datetime(h["time"])
-        if ts in df.index:  # сигнал відповідає існуючій свічці
-            idx = df.index.get_loc(ts)
-            y = [np.nan] * len(df)
-            y[idx] = h["price"]
-            color = "green" if h["action"] == "LONG" else "red"
-            addplots.append(
-                mpf.make_addplot(y, type="scatter", markersize=60, marker="o", color=color)
-            )
+        if h["action"] in ["LONG", "SHORT"]:
+            ts = pd.to_datetime(h["time"])
+            if ts in df.index:  # сигнал відповідає існуючій свічці
+                idx = df.index.get_loc(ts)
+                y = [np.nan] * len(df)
+                y[idx] = h["price"]
+                color = "green" if h["action"] == "LONG" else "red"
+                addplots.append(
+                    mpf.make_addplot(y, type="scatter", markersize=60, marker="o", color=color)
+                )
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
 
     buf = io.BytesIO()
-    mpf.plot(df_plot, type='candle', style=s, volume=True, addplot=addplots,
-             hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-             title=f"{symbol} — {action}", ylabel='Price', ylabel_lower='Volume',
-             savefig=dict(fname=buf, dpi=100, bbox_inches='tight'))
+    mpf.plot(
+        df_plot, type='candle', style=s, volume=True, addplot=addplots,
+        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+        title=f"{symbol} — {action}", ylabel='Price', ylabel_lower='Volume',
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+    )
     buf.seek(0)
     return buf
 
