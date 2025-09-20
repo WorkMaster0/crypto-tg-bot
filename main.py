@@ -33,6 +33,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
+SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 
@@ -41,6 +42,10 @@ LOG_FILE = "bot.log"
 
 CONF_THRESHOLD_MEDIUM = 0.60
 CONF_THRESHOLD_STRONG = 0.80
+
+STOP_LOSS = 0.02   # 2%
+TAKE_PROFIT = 0.04 # 4%
+LOOKAHEAD_BARS = 5 # 5 свічок
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -90,8 +95,7 @@ state = load_json_safe(STATE_FILE, {
     "signals": {}, 
     "last_scan": None, 
     "signal_history": {},
-    "top_cache": {"timestamp": None, "data": []},
-    "symbols_cache": {"timestamp": None, "symbols": []}
+    "top_cache": {"timestamp": None, "data": []}
 })
 
 # ---------------- TELEGRAM ----------------
@@ -107,7 +111,7 @@ def send_telegram(text: str, photo=None):
         if photo:
             files = {'photo': ('signal.png', photo, 'image/png')}
             data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=20)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=15)
         else:
             payload = {
                 "chat_id": CHAT_ID,
@@ -115,23 +119,14 @@ def send_telegram(text: str, photo=None):
                 "parse_mode": "MarkdownV2",
                 "disable_web_page_preview": True
             }
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=20)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=15)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
 # ---------------- MARKET DATA ----------------
-def get_all_usdt_symbols(force=False):
-    """Кешує список монет, щоб не падати від постійних запитів"""
-    now = time.time()
-    if (not force and 
-        state["symbols_cache"]["timestamp"] and 
-        now - state["symbols_cache"]["timestamp"] < 3600 and 
-        state["symbols_cache"]["symbols"]):
-        return state["symbols_cache"]["symbols"]
-
+def get_all_usdt_symbols():
     if not client:
         return []
-
     for attempt in range(5):
         try:
             ex = client.get_exchange_info()
@@ -141,15 +136,12 @@ def get_all_usdt_symbols(force=False):
                          "STRAX","GNS","ALCX","BTCST","COIN","AAPL","TSLA",
                          "MSFT","META","GOOG","USD1","BTTC","ARDR","DF","XNO"]
             filtered = [s for s in symbols if not any(b in s for b in blacklist)]
-            state["symbols_cache"] = {"timestamp": now, "symbols": filtered}
-            save_json_safe(STATE_FILE, state)
             return filtered
         except Exception as e:
             logger.warning("get_all_usdt_symbols attempt %d failed: %s", attempt+1, e)
             time.sleep(0.5*(2**attempt))
-
     logger.error("Failed to fetch USDT symbols from Binance after retries")
-    return state["symbols_cache"]["symbols"] or []
+    return []
 
 def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
     for attempt in range(3):
@@ -236,13 +228,29 @@ def detect_signal(df: pd.DataFrame):
 # ---------------- BACKTEST ----------------
 def backtest_winrate(df: pd.DataFrame):
     df = apply_all_features(df)
-    results=[]
-    for i in range(1,len(df)):
-        sub_df=df.iloc[:i+1]
-        action,votes,pretop,last,conf=detect_signal(sub_df)
-        if conf>=CONF_THRESHOLD_MEDIUM:
-            results.append((action, conf))
-    return results
+    wins = 0
+    losses = 0
+    signals = 0
+    for i in range(LOOKAHEAD_BARS, len(df)-LOOKAHEAD_BARS):
+        sub_df = df.iloc[:i+1]
+        action, votes, pretop, last, conf = detect_signal(sub_df)
+        if conf >= CONF_THRESHOLD_MEDIUM and action in ["LONG","SHORT"]:
+            entry = last["close"]
+            signals += 1
+            lookahead = df.iloc[i+1:i+LOOKAHEAD_BARS+1]
+            if action=="LONG":
+                if (lookahead["high"] >= entry*(1+TAKE_PROFIT)).any():
+                    wins += 1
+                elif (lookahead["low"] <= entry*(1-STOP_LOSS)).any():
+                    losses += 1
+            elif action=="SHORT":
+                if (lookahead["low"] <= entry*(1-TAKE_PROFIT)).any():
+                    wins += 1
+                elif (lookahead["high"] >= entry*(1+STOP_LOSS)).any():
+                    losses += 1
+    total = wins + losses
+    winrate = wins/total if total>0 else 0
+    return winrate, signals
 
 # ---------------- PLOT BACKTEST ----------------
 def plot_backtest_signals(df, symbol, conf_threshold=CONF_THRESHOLD_MEDIUM):
@@ -250,7 +258,7 @@ def plot_backtest_signals(df, symbol, conf_threshold=CONF_THRESHOLD_MEDIUM):
     df_plot.index.name="Date"
     long_dates,long_prices=[],[]
     short_dates,short_prices=[],[]
-    for i in range(1,len(df)):
+    for i in range(LOOKAHEAD_BARS, len(df)-LOOKAHEAD_BARS):
         sub_df=df.iloc[:i+1]
         action,votes,pretop,last,conf=detect_signal(sub_df)
         if conf<conf_threshold: continue
@@ -271,11 +279,10 @@ def get_top5_symbols(symbols):
     results=[]
     for s in symbols:
         df=fetch_klines(s)
-        if df is None or len(df)<20: continue
-        signals=backtest_winrate(df)
-        win_count=sum(1 for a,c in signals if c>=CONF_THRESHOLD_MEDIUM and a!="WATCH")
-        total=len(signals)
-        if total>0: results.append((s,win_count/total))
+        if df is None or len(df)<50: continue
+        winrate, signals = backtest_winrate(df)
+        if signals>0:
+            results.append((s,winrate))
     results.sort(key=lambda x:x[1],reverse=True)
     return results[:5]
 
@@ -285,11 +292,14 @@ def scan_top_symbols():
         symbols = get_all_usdt_symbols()[:TOP_LIMIT]
         results=[]
         with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-            futures={executor.submit(get_top5_symbols,[s]):s for s in symbols}
+            futures={executor.submit(backtest_winrate, fetch_klines(s)):s for s in symbols}
             for fut in as_completed(futures):
                 try:
-                    res=fut.result()
-                    if res: results.extend(res)
+                    winrate = fut.result()
+                    if winrate and isinstance(winrate, tuple):
+                        w, sigs = winrate
+                        if sigs>0:
+                            results.append((futures[fut], w))
                 except Exception as e:
                     logger.warning("scan error %s: %s", futures[fut], e)
         results.sort(key=lambda x:x[1],reverse=True)
@@ -313,38 +323,25 @@ def telegram_webhook(token):
         msg=update.get("message")
         if not msg: return jsonify({"ok":True})
         text=msg.get("text","").lower().strip()
-
         if text.startswith("/scan"): 
             Thread(target=scan_top_symbols, daemon=True).start()
             send_telegram("⚡ Manual scan started.")
-
         elif text.startswith("/status"): 
             send_telegram(f"📝 Status:\nSignals={len(state.get('signals',{}))}\nLast scan={state.get('last_scan')}")
-
         elif text.startswith("/top"):
             now = time.time()
-            if state["top_cache"]["timestamp"] and now - state["top_cache"]["timestamp"] < 300:
+            if state["top_cache"]["timestamp"] and now - state["top_cache"]["timestamp"] < 120:
                 top5 = state["top_cache"]["data"]
             else:
-                def update_top():
-                    symbols = get_all_usdt_symbols()[:TOP_LIMIT]
-                    top5_new = get_top5_symbols(symbols)
-                    state["top_cache"]={"timestamp":time.time(),"data":top5_new}
-                    save_json_safe(STATE_FILE,state)
-                    if top5_new:
-                        send_telegram("🏆 Top5 tokens:\n"+"\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5_new]))
-                    else:
-                        send_telegram("❌ No top symbols found")
-                Thread(target=update_top, daemon=True).start()
-                send_telegram("⏳ Calculating fresh top5...")
-                return jsonify({"ok":True})
-
+                symbols = get_all_usdt_symbols()[:TOP_LIMIT]
+                top5 = get_top5_symbols(symbols)
+                state["top_cache"]={"timestamp":now,"data":top5}
+                save_json_safe(STATE_FILE,state)
             if top5:
-                msg_text="🏆 Cached Top5 tokens:\n"+"\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
+                msg_text="🏆 Top5 tokens by strong signal winrate:\n"+"\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
             else:
                 msg_text="❌ No top symbols found"
             send_telegram(msg_text)
-
         elif text.startswith("/history"):
             parts=text.split()
             if len(parts)>=2:
@@ -355,7 +352,6 @@ def telegram_webhook(token):
                     buf=plot_backtest_signals(df,symbol,conf_threshold=CONF_THRESHOLD_MEDIUM)
                     send_telegram(f"📈 Strong Signals for {symbol}",photo=buf)
                 else: send_telegram(f"❌ No data for {symbol}")
-
     except Exception as e:
         logger.exception("telegram_webhook error: %s",e)
     return jsonify({"ok":True})
