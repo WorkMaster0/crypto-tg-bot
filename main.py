@@ -160,7 +160,8 @@ def update_symbol(symbol):
     df_new = fetch_klines(symbol)
     if df_new is not None:
         if df_old is not None:
-            combined = pd.concat([df_old, df_new]).drop_duplicates(subset="open_time").tail(EMA_SCAN_LIMIT)
+            combined = pd.concat([df_old, df_new])
+            combined = combined[~combined.index.duplicated(keep="last")].tail(EMA_SCAN_LIMIT)
         else:
             combined = df_new
         symbol_data[symbol] = combined
