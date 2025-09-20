@@ -7,7 +7,6 @@ import re
 from datetime import datetime, timezone
 from threading import Thread
 import io
-import asyncio
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,8 +25,8 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
-TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))  # рекомендую 30-100 для початку
-SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))  # автоскан інтервал (мінімум 1)
+TOP_LIMIT = int(os.getenv("TOP_LIMIT", "30"))  # обмежуємо для старту
+SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 
 STATE_FILE = "state.json"
@@ -44,7 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pretop-bot")
 
-# ---------------- BINANCE CLIENT (для warmup та метаданих) ----------------
+# ---------------- BINANCE CLIENT ----------------
 try:
     from binance import ThreadedWebsocketManager
     from binance.client import Client as BinanceClient
@@ -106,13 +105,10 @@ def send_telegram(text: str, photo=None):
 
 # ---------------- MARKET DATA CACHE ----------------
 symbol_data = {}  # { "BTCUSDT": DataFrame(...) }
-twm = None        # ThreadedWebsocketManager instance (global, щоб його не зібрало GC)
+twm = None        # ThreadedWebsocketManager instance
 
 # ---------------- HELPERS: SYMBOLS ----------------
 def get_all_usdt_symbols():
-    """
-    Повертає обмежений список USDT-символів (TOP_LIMIT) з blacklist-фільтром.
-    """
     if not client:
         logger.warning("Binance client missing — cannot get symbols")
         return []
@@ -129,21 +125,14 @@ def get_all_usdt_symbols():
             "MSFT", "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
         ]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
-        if not filtered:
-            logger.warning("No filtered symbols after blacklist (check exchange_info output)")
-        # лог для діагностики (перші 20)
         logger.info("Symbols sample: %s", filtered[:20])
         return filtered[:TOP_LIMIT]
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
         return []
 
-# ---------------- SAFE FETCH (для warmup лише) ----------------
+# ---------------- SAFE FETCH ----------------
 def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
-    """
-    Лімітований REST fetch - використовується тільки для warmup.
-    Має retry + delay щоб мінімізувати ризик бану.
-    """
     if not client:
         return None
     for attempt in range(3):
@@ -154,7 +143,7 @@ def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
             df = df[["open_time","open","high","low","close","volume"]].astype(float)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df.set_index("open_time", inplace=True)
-            time.sleep(0.15)  # невелика пауза між REST запитами
+            time.sleep(0.15)
             return df
         except Exception as e:
             logger.warning("fetch_klines_rest %s attempt %d error: %s", symbol, attempt+1, e)
@@ -163,10 +152,6 @@ def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
 
 # ---------------- DATA WARMUP ----------------
 def warmup_data():
-    """
-    Разове наповнення symbol_data через REST (обмежено TOP_LIMIT).
-    Якщо Binance повертає помилку — просто лог і продовжує.
-    """
     symbols = get_all_usdt_symbols()
     logger.info("Warming up data for %d symbols", len(symbols))
     for sym in symbols:
@@ -174,8 +159,6 @@ def warmup_data():
             df = fetch_klines_rest(sym)
             if df is not None and len(df) > 0:
                 symbol_data[sym] = df
-            else:
-                logger.debug("No warmup data for %s", sym)
         except Exception as e:
             logger.exception("warmup_data error for %s: %s", sym, e)
 
@@ -232,32 +215,24 @@ def detect_signal(df: pd.DataFrame):
         votes.append("strong_trend")
         confidence *= 1.1
 
-    # Свічкові патерни
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
     lower_shadow = min(last["close"], last["open"]) - last["low"]
-    candle_bonus = 1.0
 
     if lower_shadow > 2 * abs(body) and body > 0:
         votes.append("hammer_bull")
-        candle_bonus = 1.2
     elif upper_shadow > 2 * abs(body) and body < 0:
         votes.append("shooting_star")
-        candle_bonus = 1.2
 
     if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
         votes.append("bullish_engulfing")
-        candle_bonus = 1.25
     elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
         votes.append("bearish_engulfing")
-        candle_bonus = 1.25
 
     if abs(body) < 0.1 * rng:
         votes.append("doji")
-        candle_bonus = 1.1
 
-    # Fake breakout
     if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
         votes.append("fake_breakout_short")
         confidence += 0.15
@@ -265,7 +240,6 @@ def detect_signal(df: pd.DataFrame):
         votes.append("fake_breakout_long")
         confidence += 0.15
 
-    # Pre-top
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
@@ -288,26 +262,20 @@ def analyze_and_alert(symbol: str):
     try:
         df = symbol_data.get(symbol)
         if df is None or len(df) < 30:
-            logger.debug("analyze_and_alert: no data for %s", symbol)
             return
         df_feat = apply_all_features(df)
         action, votes, pretop, last, confidence = detect_signal(df_feat)
         prev_signal = state["signals"].get(symbol, "")
 
-        logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-                    symbol, action, confidence, [v for v in votes], pretop)
-
-        # Save history
         hist = state["signal_history"].setdefault(symbol, [])
         hist.append({"time": str(last.name), "action": action, "price": float(last["close"])})
-        hist = hist[-200:]  # keep limited history
+        hist = hist[-200:]
         state["signal_history"][symbol] = hist
 
         if pretop:
             Thread(target=send_telegram, args=(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}",), daemon=True).start()
 
         if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
-            # update state before sending (to avoid duplicates)
             state["signals"][symbol] = action
             save_json_safe(STATE_FILE, state)
 
@@ -324,7 +292,6 @@ def analyze_and_alert(symbol: str):
                 f"Time: {last.name}\n"
             )
 
-            # build plot in background to avoid blocking WS thread
             def send_with_plot():
                 try:
                     photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
@@ -333,11 +300,8 @@ def analyze_and_alert(symbol: str):
                     logger.exception("send_with_plot error: %s", e)
 
             Thread(target=send_with_plot, daemon=True).start()
-
         else:
-            # save state even if no new signal (history updated)
             save_json_safe(STATE_FILE, state)
-
     except Exception as e:
         logger.exception("analyze_and_alert error for %s: %s", symbol, e)
 
@@ -360,14 +324,12 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
 
     last = df.iloc[-1]
 
-    # Pre-top highlight
     if pretop:
         ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
         addplots.append(
             mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta')
         )
 
-    # Previous signals LONG/SHORT (by time)
     hist = state.get("signal_history", {}).get(symbol, [])
     for h in hist:
         try:
@@ -382,7 +344,6 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
                         mpf.make_addplot(y, type="scatter", markersize=60, marker="o", color=color)
                     )
         except Exception:
-            # пропускаємо точки, які вже не в індексі
             continue
 
     mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
@@ -398,34 +359,34 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
     buf.seek(0)
     return buf
 
-# ---------------- WEBSOCKET (kline) ----------------
+# ---------------- WEBSOCKET ----------------
 def start_websocket():
     if not client:
         logger.warning("Binance client unavailable, websocket not started")
         return
 
-    async def run_ws():
+    def handle_kline(msg):
+        symbol = msg['s']
+        k = msg['k']
+        if k['x']:
+            df_new = pd.DataFrame([{
+                'open_time': pd.to_datetime(k['t'], unit='ms', utc=True),
+                'open': float(k['o']),
+                'high': float(k['h']),
+                'low': float(k['l']),
+                'close': float(k['c']),
+                'volume': float(k['v'])
+            }])
+            if symbol in symbol_data:
+                symbol_data[symbol] = pd.concat([symbol_data[symbol], df_new]).tail(EMA_SCAN_LIMIT)
+            else:
+                symbol_data[symbol] = df_new
+            analyze_and_alert(symbol)
+
+    try:
+        global twm
         twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
         twm.start()
-
-        def handle_kline(msg):
-            symbol = msg['s']
-            k = msg['k']
-            if k['x']:  # закрита свічка
-                df_new = pd.DataFrame([{
-                    'open_time': pd.to_datetime(k['t'], unit='ms', utc=True),
-                    'open': float(k['o']),
-                    'high': float(k['h']),
-                    'low': float(k['l']),
-                    'close': float(k['c']),
-                    'volume': float(k['v'])
-                }])
-                if symbol in symbol_data:
-                    symbol_data[symbol] = pd.concat([symbol_data[symbol], df_new]).tail(EMA_SCAN_LIMIT)
-                else:
-                    symbol_data[symbol] = df_new
-                analyze_and_alert(symbol)
-
         symbols = get_all_usdt_symbols()
         for sym in symbols:
             try:
@@ -433,20 +394,14 @@ def start_websocket():
                 logger.info(f"✅ Started websocket for {sym}")
             except Exception as e:
                 logger.error(f"Failed to start kline socket for {sym}: {e}")
+    except Exception as e:
+        logger.exception("start_websocket error: %s", e)
 
-        twm.join()
-
-    # створюємо loop вручну у потоці
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_ws())
-
-# ---------------- SIMPLE SCANNER LOOP (fallback periodic re-check) ----------------
+# ---------------- SCANNER LOOP ----------------
 def scanner_loop():
     while True:
         try:
-            logger.info("🔄 Auto-scan (re-analyze cache) started")
-            # run analyze on cached symbols (no REST calls)
+            logger.info("🔄 Auto-scan started")
             for sym in list(symbol_data.keys()):
                 try:
                     analyze_and_alert(sym)
@@ -457,7 +412,7 @@ def scanner_loop():
             logger.info("✅ Auto-scan finished")
         except Exception as e:
             logger.exception("Scanner loop error: %s", e)
-        time.sleep(max(30, SCAN_INTERVAL_MINUTES * 60))  # at least 30s
+        time.sleep(max(30, SCAN_INTERVAL_MINUTES * 60))
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
@@ -473,27 +428,19 @@ def home():
 def telegram_webhook(token):
     try:
         if token != TELEGRAM_TOKEN:
-            logger.warning("Received webhook with invalid token: %s", token)
             return jsonify({"ok": False, "error": "invalid token"}), 403
-
         update = request.get_json(force=True) or {}
         msg = update.get("message")
         if not msg:
             return jsonify({"ok": True})
-
         text = msg.get("text", "").lower().strip()
-
         if text.startswith("/scan"):
-            # analyze all cached symbols in background
             for sym in list(symbol_data.keys()):
                 Thread(target=analyze_and_alert, args=(sym,), daemon=True).start()
             send_telegram("⚡ Manual scan started.")
-
         elif text.startswith("/status"):
             send_telegram(f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}\nCached symbols={len(symbol_data)}")
-
         elif text.startswith("/top"):
-            # quick top by current confidence (local, approximate)
             scores = {}
             for sym, df in symbol_data.items():
                 try:
@@ -510,7 +457,6 @@ def telegram_webhook(token):
             else:
                 msg_text = "❌ No data to compute top."
             send_telegram(msg_text)
-
         elif text.startswith("/history"):
             parts = text.split()
             if len(parts) >= 2:
@@ -540,21 +486,17 @@ def setup_webhook():
     except Exception as e:
         logger.exception("Webhook setup error: %s", e)
 
-
-# ---------------- START BACKGROUND TASKS ----------------
+# ---------------- BACKGROUND TASKS ----------------
 def start_background_tasks():
     Thread(target=warmup_data, daemon=True).start()
     Thread(target=start_websocket, daemon=True).start()
     Thread(target=scanner_loop, daemon=True).start()
 
-
-# ---------------- INIT ON IMPORT ----------------
-# Це виконається при старті gunicorn
+# ---------------- INIT ----------------
 logger.info("Starting pre-top detector bot (import phase)")
 setup_webhook()
 start_background_tasks()
 
-
-# ---------------- MAIN (для локального запуску) ----------------
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, threaded=True)
