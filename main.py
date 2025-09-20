@@ -1,4 +1,4 @@
-# main.py — Pre-top бот з графіками, Telegram і backtest winrate (WebSocket-версія)
+# main.py — Pre-top бот з графіками, Telegram і WebSocket (Render-ready)
 import os
 import time
 import json
@@ -25,7 +25,7 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
-TOP_LIMIT = int(os.getenv("TOP_LIMIT", "30"))  # обмежуємо для старту
+TOP_LIMIT = int(os.getenv("TOP_LIMIT", "30"))
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 
@@ -47,7 +47,13 @@ logger = logging.getLogger("pretop-bot")
 try:
     from binance import ThreadedWebsocketManager
     from binance.client import Client as BinanceClient
-    client = BinanceClient(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET) if BINANCE_API_KEY and BINANCE_API_SECRET else None
+    client = None
+    if BINANCE_API_KEY and BINANCE_API_SECRET:
+        try:
+            client = BinanceClient(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+            logger.info("✅ Binance client initialized")
+        except Exception as e:
+            logger.warning("Binance client init skipped due to API ban: %s", e)
 except Exception as e:
     logger.exception("Binance library unavailable: %s", e)
     client = None
@@ -104,63 +110,13 @@ def send_telegram(text: str, photo=None):
         logger.exception("send_telegram error: %s", e)
 
 # ---------------- MARKET DATA CACHE ----------------
-symbol_data = {}  # { "BTCUSDT": DataFrame(...) }
-twm = None        # ThreadedWebsocketManager instance
+symbol_data = {}
+twm = None
 
-# ---------------- HELPERS: SYMBOLS ----------------
+# ---------------- HELPERS ----------------
 def get_all_usdt_symbols():
-    if not client:
-        logger.warning("Binance client missing — cannot get symbols")
-        return []
-
-    try:
-        ex = client.get_exchange_info()
-        symbols = [
-            s["symbol"] for s in ex["symbols"]
-            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
-        ]
-        blacklist = [
-            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
-            "STRAX", "GNS", "ALCX", "BTCST", "COIN", "AAPL", "TSLA",
-            "MSFT", "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
-        ]
-        filtered = [s for s in symbols if not any(b in s for b in blacklist)]
-        logger.info("Symbols sample: %s", filtered[:20])
-        return filtered[:TOP_LIMIT]
-    except Exception as e:
-        logger.exception("get_all_usdt_symbols error: %s", e)
-        return []
-
-# ---------------- SAFE FETCH ----------------
-def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
-    if not client:
-        return None
-    for attempt in range(3):
-        try:
-            kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            df = pd.DataFrame(kl, columns=["open_time","open","high","low","close","volume",
-                                           "close_time","qav","num_trades","tb_base","tb_quote","ignore"])
-            df = df[["open_time","open","high","low","close","volume"]].astype(float)
-            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-            df.set_index("open_time", inplace=True)
-            time.sleep(0.15)
-            return df
-        except Exception as e:
-            logger.warning("fetch_klines_rest %s attempt %d error: %s", symbol, attempt+1, e)
-            time.sleep(0.5)
-    return None
-
-# ---------------- DATA WARMUP ----------------
-def warmup_data():
-    symbols = get_all_usdt_symbols()
-    logger.info("Warming up data for %d symbols", len(symbols))
-    for sym in symbols:
-        try:
-            df = fetch_klines_rest(sym)
-            if df is not None and len(df) > 0:
-                symbol_data[sym] = df
-        except Exception as e:
-            logger.exception("warmup_data error for %s: %s", sym, e)
+    default_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT"]
+    return default_symbols[:TOP_LIMIT]
 
 # ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -361,14 +317,15 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
 
 # ---------------- WEBSOCKET ----------------
 def start_websocket():
-    if not client:
-        logger.warning("Binance client unavailable, websocket not started")
+    global twm
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        logger.warning("Binance API keys missing — WebSocket not started")
         return
 
     def handle_kline(msg):
         symbol = msg['s']
         k = msg['k']
-        if k['x']:
+        if k['x']:  # закінчилася свічка
             df_new = pd.DataFrame([{
                 'open_time': pd.to_datetime(k['t'], unit='ms', utc=True),
                 'open': float(k['o']),
@@ -384,35 +341,14 @@ def start_websocket():
             analyze_and_alert(symbol)
 
     try:
-        global twm
         twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
         twm.start()
         symbols = get_all_usdt_symbols()
         for sym in symbols:
-            try:
-                twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
-                logger.info(f"✅ Started websocket for {sym}")
-            except Exception as e:
-                logger.error(f"Failed to start kline socket for {sym}: {e}")
+            twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
+            logger.info(f"✅ WebSocket started for {sym}")
     except Exception as e:
         logger.exception("start_websocket error: %s", e)
-
-# ---------------- SCANNER LOOP ----------------
-def scanner_loop():
-    while True:
-        try:
-            logger.info("🔄 Auto-scan started")
-            for sym in list(symbol_data.keys()):
-                try:
-                    analyze_and_alert(sym)
-                except Exception as e:
-                    logger.exception("scanner_loop analyze error for %s: %s", sym, e)
-            state["last_scan"] = str(datetime.now(timezone.utc))
-            save_json_safe(STATE_FILE, state)
-            logger.info("✅ Auto-scan finished")
-        except Exception as e:
-            logger.exception("Scanner loop error: %s", e)
-        time.sleep(max(30, SCAN_INTERVAL_MINUTES * 60))
 
 # ---------------- FLASK ROUTES ----------------
 @app.route("/")
@@ -426,14 +362,12 @@ def home():
 
 @app.route("/telegram_webhook/<token>", methods=["POST"])
 def telegram_webhook(token):
-    try:
-        if token != TELEGRAM_TOKEN:
-            return jsonify({"ok": False, "error": "invalid token"}), 403
-        update = request.get_json(force=True) or {}
-        msg = update.get("message")
-        if not msg:
-            return jsonify({"ok": True})
-        text = msg.get("text", "").lower().strip()
+    if token != TELEGRAM_TOKEN:
+        return jsonify({"ok": False, "error": "invalid token"}), 403
+    update = request.get_json(force=True) or {}
+    msg = update.get("message")
+    if msg:
+        text = msg.get("text","").lower().strip()
         if text.startswith("/scan"):
             for sym in list(symbol_data.keys()):
                 Thread(target=analyze_and_alert, args=(sym,), daemon=True).start()
@@ -467,33 +401,26 @@ def telegram_webhook(token):
                     send_telegram(f"📈 History for {symbol}", photo=buf)
                 else:
                     send_telegram(f"❌ No data for {symbol}")
-    except Exception as e:
-        logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
 
-# ---------------- TELEGRAM WEBHOOK SETUP ----------------
+# ---------------- WEBHOOK SETUP ----------------
 def setup_webhook():
     if not TELEGRAM_TOKEN or not WEBHOOK_URL:
-        logger.error("❌ TELEGRAM_TOKEN or WEBHOOK_URL is missing!")
+        logger.warning("Webhook skipped: missing TELEGRAM_TOKEN or WEBHOOK_URL")
         return
     try:
-        base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-        requests.get(f"{base_url}/deleteWebhook", timeout=10)
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
-        requests.get(f"{base_url}/setWebhook?url={webhook_url}", timeout=10)
-        requests.get(f"{base_url}/getWebhookInfo", timeout=10)
-        logger.info("Webhook setup attempted: %s", webhook_url)
+        url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}", timeout=10)
+        logger.info("Webhook set: %s", url)
     except Exception as e:
         logger.exception("Webhook setup error: %s", e)
 
 # ---------------- BACKGROUND TASKS ----------------
 def start_background_tasks():
-    Thread(target=warmup_data, daemon=True).start()
     Thread(target=start_websocket, daemon=True).start()
-    Thread(target=scanner_loop, daemon=True).start()
 
 # ---------------- INIT ----------------
-logger.info("Starting pre-top detector bot (import phase)")
+logger.info("Starting pre-top detector bot")
 setup_webhook()
 start_background_tasks()
 
