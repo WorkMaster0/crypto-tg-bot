@@ -36,7 +36,7 @@ PORT = int(os.getenv("PORT", "5000"))
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
-PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
+PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "3"))
 
 STATE_FILE = "state.json"
 LOG_FILE = "bot.log"
