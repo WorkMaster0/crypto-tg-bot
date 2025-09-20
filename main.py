@@ -559,23 +559,23 @@ def setup_webhook():
     except Exception as e:
         logger.exception("Webhook setup error: %s", e)
 
-# ---------------- START BACKGROUND TASKS WHEN APP BOOTS (works under gunicorn) ----------------
-@app.before_first_request
-def _start_background_tasks():
-    # warmup (REST) limited to TOP_LIMIT symbols
+
+# ---------------- START BACKGROUND TASKS ----------------
+def start_background_tasks():
     Thread(target=warmup_data, daemon=True).start()
-    # start websocket subscriptions (will update symbol_data)
     Thread(target=start_websocket, daemon=True).start()
-    # periodic scanner to re-evaluate cache
     Thread(target=scanner_loop, daemon=True).start()
+
+
+# Flask 3.1+ has no before_first_request, so hook into before_serving
+@app.before_serving
+def _start_background():
+    start_background_tasks()
+
 
 # ---------------- MAIN (for local run) ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot (local run)")
     setup_webhook()
-    # warmup + ws + scanner started by before_first_request when the first HTTP request comes;
-    # but for direct run we'll start them now to populate cache immediately
-    Thread(target=warmup_data, daemon=True).start()
-    Thread(target=start_websocket, daemon=True).start()
-    Thread(target=scanner_loop, daemon=True).start()
+    start_background_tasks()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
