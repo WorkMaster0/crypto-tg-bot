@@ -1,4 +1,4 @@
-# main.py — Pre-top бот з графіками, Telegram і backtest (WebSocket-версія)
+# main.py — Pre-top бот з графіками, Telegram і backtest (WebSocket-версія, стабільна)
 import os
 import time
 import json
@@ -45,13 +45,16 @@ logging.basicConfig(
 logger = logging.getLogger("pretop-bot")
 
 # ---------------- BINANCE CLIENT ----------------
+client = None
+twm = None
+
 try:
     from binance import ThreadedWebsocketManager
     from binance.client import Client as BinanceClient
     client = BinanceClient(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET) if BINANCE_API_KEY and BINANCE_API_SECRET else None
     logger.info("✅ Binance client initialized")
 except Exception as e:
-    logger.exception("Binance library unavailable: %s", e)
+    logger.warning("Binance library unavailable: %s", e)
     client = None
 
 # ---------------- FLASK ----------------
@@ -107,7 +110,6 @@ def send_telegram(text: str, photo=None):
 
 # ---------------- MARKET DATA CACHE ----------------
 symbol_data = {}  # { "BTCUSDT": DataFrame(...) }
-twm = None        # ThreadedWebsocketManager instance
 
 # ---------------- HELPERS: SYMBOLS ----------------
 def get_all_usdt_symbols():
@@ -133,36 +135,12 @@ def get_all_usdt_symbols():
         logger.exception("get_all_usdt_symbols error: %s", e)
         return []
 
-# ---------------- SAFE FETCH ----------------
-def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
-    if not client:
-        return None
-    for attempt in range(3):
-        try:
-            kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            df = pd.DataFrame(kl, columns=["open_time","open","high","low","close","volume",
-                                           "close_time","qav","num_trades","tb_base","tb_quote","ignore"])
-            df = df[["open_time","open","high","low","close","volume"]].astype(float)
-            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-            df.set_index("open_time", inplace=True)
-            time.sleep(0.15)
-            return df
-        except Exception as e:
-            logger.warning("fetch_klines_rest %s attempt %d error: %s", symbol, attempt+1, e)
-            time.sleep(0.5)
-    return None
-
 # ---------------- DATA WARMUP ----------------
 def warmup_data():
     symbols = get_all_usdt_symbols()
     logger.info("Warming up data for %d symbols", len(symbols))
     for sym in symbols:
-        try:
-            df = fetch_klines_rest(sym)
-            if df is not None and len(df) > 0:
-                symbol_data[sym] = df
-        except Exception as e:
-            logger.exception("warmup_data error for %s: %s", sym, e)
+        symbol_data[sym] = pd.DataFrame(columns=["open","high","low","close","volume"])
 
 # ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,7 +166,7 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
-    prev = df.iloc[-2]
+    prev = df.iloc[-2] if len(df) > 1 else last
     votes = []
     confidence = 0.2
 
@@ -263,7 +241,7 @@ def detect_signal(df: pd.DataFrame):
 def analyze_and_alert(symbol: str):
     try:
         df = symbol_data.get(symbol)
-        if df is None or len(df) < 30:
+        if df is None or len(df) < 2:
             return
         df_feat = apply_all_features(df)
         action, votes, pretop, last, confidence = detect_signal(df_feat)
@@ -385,41 +363,30 @@ def start_websocket():
                 symbol_data[symbol] = df_new
             analyze_and_alert(symbol)
 
-    while True:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            global twm
-            twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
-            twm.start()
-            symbols = get_all_usdt_symbols()
-            for sym in symbols:
-                twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
-                logger.info(f"✅ Started websocket for {sym}")
-            logger.info("WebSocket manager running")
-            loop.run_forever()
-        except Exception as e:
-            logger.exception("WebSocket error, will retry in 10s: %s", e)
-            try:
-                if twm:
-                    twm.stop()
-            except:
-                pass
-            time.sleep(10)
+    # asyncio цикл у потоці
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        global twm
+        twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+        twm.start()
+        symbols = get_all_usdt_symbols()
+        for sym in symbols:
+            twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
+            logger.info(f"✅ Started websocket for {sym}")
+        loop.run_forever()
+    except Exception as e:
+        logger.exception("start_websocket error: %s", e)
 
 # ---------------- SCANNER LOOP ----------------
 def scanner_loop():
     while True:
         try:
-            logger.info("🔄 Auto-scan started")
             for sym in list(symbol_data.keys()):
-                try:
-                    analyze_and_alert(sym)
-                except Exception as e:
-                    logger.exception("scanner_loop analyze error for %s: %s", sym, e)
+                analyze_and_alert(sym)
             state["last_scan"] = str(datetime.now(timezone.utc))
             save_json_safe(STATE_FILE, state)
-            logger.info("✅ Auto-scan finished")
         except Exception as e:
             logger.exception("Scanner loop error: %s", e)
         time.sleep(max(30, SCAN_INTERVAL_MINUTES * 60))
@@ -450,33 +417,6 @@ def telegram_webhook(token):
             send_telegram("⚡ Manual scan started.")
         elif text.startswith("/status"):
             send_telegram(f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}\nCached symbols={len(symbol_data)}")
-        elif text.startswith("/top"):
-            scores = {}
-            for sym, df in symbol_data.items():
-                try:
-                    if df is None or len(df) < 30:
-                        continue
-                    df_feat = apply_all_features(df)
-                    _, _, _, _, conf = detect_signal(df_feat)
-                    scores[sym] = conf
-                except Exception:
-                    continue
-            top5 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
-            if top5:
-                msg_text = "🏆 Top5 tokens by confidence:\n" + "\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
-            else:
-                msg_text = "❌ No data to compute top."
-            send_telegram(msg_text)
-        elif text.startswith("/history"):
-            parts = text.split()
-            if len(parts) >= 2:
-                symbol = parts[1].upper()
-                df = symbol_data.get(symbol)
-                if df is not None and len(df) >= 30:
-                    buf = plot_signal_candles(df, symbol, "", [], False)
-                    send_telegram(f"📈 History for {symbol}", photo=buf)
-                else:
-                    send_telegram(f"❌ No data for {symbol}")
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
@@ -491,7 +431,6 @@ def setup_webhook():
         requests.get(f"{base_url}/deleteWebhook", timeout=10)
         webhook_url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
         requests.get(f"{base_url}/setWebhook?url={webhook_url}", timeout=10)
-        requests.get(f"{base_url}/getWebhookInfo", timeout=10)
         logger.info("Webhook set: %s", webhook_url)
     except Exception as e:
         logger.exception("Webhook setup error: %s", e)
