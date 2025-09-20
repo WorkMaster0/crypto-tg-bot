@@ -446,18 +446,34 @@ def telegram_webhook(token):
     try:
         if token != TELEGRAM_TOKEN:
             return jsonify({"ok": False, "error": "invalid token"}), 403
+
         update = request.get_json(force=True) or {}
         msg = update.get("message")
         if not msg:
             return jsonify({"ok": True})
-        text = msg.get("text", "").lower().strip()
-        if text.startswith("/scan"):
+
+        text = msg.get("text", "").strip()
+        if not text:
+            return jsonify({"ok": True})
+
+        # Відділяємо команду від username та аргументів
+        parts = text.split()
+        cmd = parts[0].split("@")[0].lower()  # /scan, /status, /top, /history
+
+        if cmd == "/scan":
             for sym in list(symbol_data.keys()):
                 Thread(target=analyze_and_alert, args=(sym,), daemon=True).start()
             send_telegram("⚡ Manual scan started.")
-        elif text.startswith("/status"):
-            send_telegram(f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}\nCached symbols={len(symbol_data)}")
-        elif text.startswith("/top"):
+
+        elif cmd == "/status":
+            send_telegram(
+                f"📝 Status:\n"
+                f"Signals={len(state.get('signals', {}))}\n"
+                f"Last scan={state.get('last_scan')}\n"
+                f"Cached symbols={len(symbol_data)}"
+            )
+
+        elif cmd == "/top":
             scores = {}
             for sym, df in symbol_data.items():
                 try:
@@ -470,12 +486,14 @@ def telegram_webhook(token):
                     continue
             top5 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
             if top5:
-                msg_text = "🏆 Top5 tokens by confidence:\n" + "\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
+                msg_text = "🏆 Top5 tokens by confidence:\n" + "\n".join(
+                    [f"{s[0]}: {s[1]*100:.1f}%" for s in top5]
+                )
             else:
                 msg_text = "❌ No data to compute top."
             send_telegram(msg_text)
-        elif text.startswith("/history"):
-            parts = text.split()
+
+        elif cmd == "/history":
             if len(parts) >= 2:
                 symbol = parts[1].upper()
                 df = symbol_data.get(symbol)
@@ -484,8 +502,15 @@ def telegram_webhook(token):
                     send_telegram(f"📈 History for {symbol}", photo=buf)
                 else:
                     send_telegram(f"❌ No data for {symbol}")
+            else:
+                send_telegram("❌ Usage: /history SYMBOL")
+
+        else:
+            send_telegram("❌ Unknown command. Available: /scan, /status, /top, /history")
+
     except Exception as e:
         logger.exception("telegram_webhook error: %s", e)
+
     return jsonify({"ok": True})
 
 # ---------------- TELEGRAM WEBHOOK SETUP ----------------
