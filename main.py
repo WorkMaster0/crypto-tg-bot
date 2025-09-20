@@ -368,8 +368,8 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
 
 # ---------------- WEBSOCKET ----------------
 def start_websocket():
-    if not client:
-        logger.warning("Binance client unavailable, websocket not started")
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        logger.warning("Binance API keys missing — websocket not started")
         return
 
     def handle_kline(msg):
@@ -390,20 +390,29 @@ def start_websocket():
                 symbol_data[symbol] = df_new
             analyze_and_alert(symbol)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-    try:
-        global twm
-        twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
-        twm.start()
-        symbols = get_all_usdt_symbols()
-        for sym in symbols:
-            twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
-            logger.info(f"✅ Started websocket for {sym}")
-        loop.run_forever()
-    except Exception as e:
-        logger.exception("start_websocket error: %s", e)
+            global twm
+            twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+            twm.start()
+
+            symbols = get_all_usdt_symbols()
+            if not symbols:
+                logger.warning("No symbols fetched — retrying in 60 seconds")
+                time.sleep(60)
+                continue
+
+            for sym in symbols:
+                twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
+                logger.info(f"✅ Started websocket for {sym}")
+
+            loop.run_forever()
+        except Exception as e:
+            logger.exception("Websocket error, restarting in 60s: %s", e)
+            time.sleep(60)
 
 # ---------------- SCANNER LOOP ----------------
 def scanner_loop():
@@ -487,10 +496,14 @@ def setup_webhook():
     try:
         base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
         requests.get(f"{base_url}/deleteWebhook", timeout=10)
+
+        # Важливо: не додаємо "/telegram_webhook" у WEBHOOK_URL
         webhook_url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
         requests.get(f"{base_url}/setWebhook?url={webhook_url}", timeout=10)
-        requests.get(f"{base_url}/getWebhookInfo", timeout=10)
+
+        info = requests.get(f"{base_url}/getWebhookInfo", timeout=10).json()
         logger.info("Webhook set: %s", webhook_url)
+        logger.info("Webhook info: %s", info)
     except Exception as e:
         logger.exception("Webhook setup error: %s", e)
 
