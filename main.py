@@ -159,31 +159,19 @@ def fetch_klines_rest(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
     return None
 
 # ---------------- DATA WARMUP (async/future версія) ----------------
-def warmup_symbol(symbol):
-    """Завантажує історичні дані для одного символу"""
-    df = None
-    for attempt in range(3):
-        df = fetch_klines_rest(symbol)
-        if df is not None:
-            break
-        time.sleep(1)
-    if df is not None and len(df) > 0:
-        symbol_data[symbol] = df
-        logger.info("✅ Warmed up symbol %s (%d bars)", symbol, len(df))
-    else:
-        logger.warning("❌ No data fetched for %s", symbol)
-    time.sleep(1.5)  # пауза між символами
-
 def warmup_data():
     symbols = get_all_usdt_symbols()
-    logger.info("Starting warmup for %d symbols", len(symbols))
-    if not symbols:
-        return
-
-    # Використовуємо ThreadPoolExecutor для паралельного завантаження невеликими потоками
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        for sym in symbols:
-            executor.submit(warmup_symbol, sym)
+    logger.info("Warming up data for %d symbols", len(symbols))
+    for sym in symbols:
+        try:
+            df = fetch_klines_rest(sym)
+            if df is not None and len(df) > 0:
+                symbol_data[sym] = df
+                logger.info("✅ Data loaded for %s", sym)
+            else:
+                logger.warning("No data fetched for %s", sym)
+        except Exception as e:
+            logger.exception("warmup_data error for %s: %s", sym, e)
 
 # ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
