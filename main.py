@@ -335,8 +335,8 @@ def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
         addplots.append(mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta'))
 
     # Previous signals LONG/SHORT (малюємо по часу)
-hist = state.get("signal_history", {}).get(symbol, [])
-for h in hist:
+    hist = state.get("signal_history", {}).get(symbol, [])
+    for h in hist:
     if h["action"] in ["LONG", "SHORT"]:
         ts = pd.to_datetime(h["time"])
         if ts in df.index:  # сигнал відповідає існуючій свічці
