@@ -33,7 +33,6 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
-SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 
@@ -91,7 +90,8 @@ state = load_json_safe(STATE_FILE, {
     "signals": {}, 
     "last_scan": None, 
     "signal_history": {},
-    "top_cache": {"timestamp": None, "data": []}
+    "top_cache": {"timestamp": None, "data": []},
+    "symbols_cache": {"timestamp": None, "symbols": []}
 })
 
 # ---------------- TELEGRAM ----------------
@@ -107,7 +107,7 @@ def send_telegram(text: str, photo=None):
         if photo:
             files = {'photo': ('signal.png', photo, 'image/png')}
             data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=15)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=20)
         else:
             payload = {
                 "chat_id": CHAT_ID,
@@ -115,14 +115,23 @@ def send_telegram(text: str, photo=None):
                 "parse_mode": "MarkdownV2",
                 "disable_web_page_preview": True
             }
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=15)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=20)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
 # ---------------- MARKET DATA ----------------
-def get_all_usdt_symbols():
+def get_all_usdt_symbols(force=False):
+    """Кешує список монет, щоб не падати від постійних запитів"""
+    now = time.time()
+    if (not force and 
+        state["symbols_cache"]["timestamp"] and 
+        now - state["symbols_cache"]["timestamp"] < 3600 and 
+        state["symbols_cache"]["symbols"]):
+        return state["symbols_cache"]["symbols"]
+
     if not client:
         return []
+
     for attempt in range(5):
         try:
             ex = client.get_exchange_info()
@@ -132,12 +141,15 @@ def get_all_usdt_symbols():
                          "STRAX","GNS","ALCX","BTCST","COIN","AAPL","TSLA",
                          "MSFT","META","GOOG","USD1","BTTC","ARDR","DF","XNO"]
             filtered = [s for s in symbols if not any(b in s for b in blacklist)]
+            state["symbols_cache"] = {"timestamp": now, "symbols": filtered}
+            save_json_safe(STATE_FILE, state)
             return filtered
         except Exception as e:
             logger.warning("get_all_usdt_symbols attempt %d failed: %s", attempt+1, e)
             time.sleep(0.5*(2**attempt))
+
     logger.error("Failed to fetch USDT symbols from Binance after retries")
-    return []
+    return state["symbols_cache"]["symbols"] or []
 
 def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
     for attempt in range(3):
@@ -301,25 +313,38 @@ def telegram_webhook(token):
         msg=update.get("message")
         if not msg: return jsonify({"ok":True})
         text=msg.get("text","").lower().strip()
+
         if text.startswith("/scan"): 
             Thread(target=scan_top_symbols, daemon=True).start()
             send_telegram("⚡ Manual scan started.")
+
         elif text.startswith("/status"): 
             send_telegram(f"📝 Status:\nSignals={len(state.get('signals',{}))}\nLast scan={state.get('last_scan')}")
+
         elif text.startswith("/top"):
             now = time.time()
-            if state["top_cache"]["timestamp"] and now - state["top_cache"]["timestamp"] < 120:
+            if state["top_cache"]["timestamp"] and now - state["top_cache"]["timestamp"] < 300:
                 top5 = state["top_cache"]["data"]
             else:
-                symbols = get_all_usdt_symbols()[:TOP_LIMIT]
-                top5 = get_top5_symbols(symbols)
-                state["top_cache"]={"timestamp":now,"data":top5}
-                save_json_safe(STATE_FILE,state)
+                def update_top():
+                    symbols = get_all_usdt_symbols()[:TOP_LIMIT]
+                    top5_new = get_top5_symbols(symbols)
+                    state["top_cache"]={"timestamp":time.time(),"data":top5_new}
+                    save_json_safe(STATE_FILE,state)
+                    if top5_new:
+                        send_telegram("🏆 Top5 tokens:\n"+"\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5_new]))
+                    else:
+                        send_telegram("❌ No top symbols found")
+                Thread(target=update_top, daemon=True).start()
+                send_telegram("⏳ Calculating fresh top5...")
+                return jsonify({"ok":True})
+
             if top5:
-                msg_text="🏆 Top5 tokens by strong signal winrate:\n"+"\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
+                msg_text="🏆 Cached Top5 tokens:\n"+"\n".join([f"{s[0]}: {s[1]*100:.1f}%" for s in top5])
             else:
                 msg_text="❌ No top symbols found"
             send_telegram(msg_text)
+
         elif text.startswith("/history"):
             parts=text.split()
             if len(parts)>=2:
@@ -330,6 +355,7 @@ def telegram_webhook(token):
                     buf=plot_backtest_signals(df,symbol,conf_threshold=CONF_THRESHOLD_MEDIUM)
                     send_telegram(f"📈 Strong Signals for {symbol}",photo=buf)
                 else: send_telegram(f"❌ No data for {symbol}")
+
     except Exception as e:
         logger.exception("telegram_webhook error: %s",e)
     return jsonify({"ok":True})
