@@ -1,4 +1,4 @@
-# main.py — Pre-top бот з графіками, Telegram і backtest winrate
+# main.py — Pre-top бот для Render з WebSocket і Telegram
 import os
 import time
 import json
@@ -10,31 +10,22 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 
 import pandas as pd
-import matplotlib.pyplot as plt
 import requests
-from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
 from scipy.signal import find_peaks
 import numpy as np
-
-# ---------------- BINANCE CLIENT ----------------
-try:
-    from binance.client import Client as BinanceClient
-    BINANCE_PY_AVAILABLE = True
-except Exception:
-    BINANCE_PY_AVAILABLE = False
+from flask import Flask, request, jsonify
 
 # ---------------- CONFIG ----------------
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", "5000"))
 
-TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
-SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "1"))
+TOP_LIMIT = int(os.getenv("TOP_LIMIT", "50"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 
@@ -52,18 +43,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pretop-bot")
 
-# ---------------- BINANCE ----------------
-if BINANCE_PY_AVAILABLE and BINANCE_API_KEY and BINANCE_API_SECRET:
-    from requests import Session
-    session = Session()
-    client = BinanceClient(
-        api_key=BINANCE_API_KEY,
-        api_secret=BINANCE_API_SECRET,
-        requests_params={"timeout": 30}  # <- тут ставимо 30 секунд
-    )
-else:
+# ---------------- BINANCE CLIENT ----------------
+try:
+    from binance.client import Client as BinanceClient
+    from binance import ThreadedWebsocketManager
+    client = BinanceClient(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+    logger.info("✅ Binance client initialized")
+except Exception as e:
+    logger.warning("Binance client unavailable: %s", e)
     client = None
-    logger.warning("Binance client unavailable or API keys missing")
 
 # ---------------- FLASK ----------------
 app = Flask(__name__)
@@ -115,16 +103,7 @@ def send_telegram(text: str, photo=None):
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
-def set_telegram_webhook(webhook_url: str):
-    if not TELEGRAM_TOKEN or not webhook_url:
-        return
-    try:
-        resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", json={"url": webhook_url}, timeout=10)
-        logger.info("setWebhook resp: %s", resp.text if resp else "None")
-    except Exception as e:
-        logger.exception("set_telegram_webhook error: %s", e)
-
-# ---------------- MARKET DATA ----------------
+# ---------------- SYMBOLS ----------------
 def get_all_usdt_symbols():
     if not client:
         return []
@@ -134,35 +113,33 @@ def get_all_usdt_symbols():
             s["symbol"] for s in ex["symbols"]
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
         ]
-        blacklist = [
-            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD", "STRAX", "GNS", "ALCX",
-            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
-        ]
+        blacklist = ["BUSD","USDC","FDUSD","TUSD","DAI","EUR","GBP","AUD"]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
-        return filtered
+        return filtered[:TOP_LIMIT]
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
         return []
 
+# ---------------- FETCH HISTORICAL ----------------
 def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
     for attempt in range(3):
         try:
             if not client:
                 raise RuntimeError("Binance client unavailable")
             kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            df = pd.DataFrame(kl, columns=["open_time", "open", "high", "low", "close", "volume",
-                                           "close_time", "qav", "num_trades", "tb_base", "tb_quote", "ignore"])
-            df = df[["open_time", "open", "high", "low", "close", "volume"]].astype(float)
+            df = pd.DataFrame(kl, columns=["open_time","open","high","low","close","volume",
+                                           "close_time","qav","num_trades","tb_base","tb_quote","ignore"])
+            df = df[["open_time","open","high","low","close","volume"]].astype(float)
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df.set_index("open_time", inplace=True)
             return df
         except Exception as e:
-            logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt + 1, e)
+            logger.warning("fetch_klines %s attempt %d error: %s", symbol, attempt+1, e)
             time.sleep(0.5)
     return None
 
-# ---------------- FEATURE ENGINEERING ----------------
-def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------- FEATURES ----------------
+def apply_all_features(df):
     df = df.copy()
     try:
         df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
@@ -183,7 +160,7 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------- SIGNAL DETECTION ----------------
-def detect_signal(df: pd.DataFrame):
+def detect_signal(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
@@ -267,145 +244,14 @@ def detect_signal(df: pd.DataFrame):
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- BACKTEST WINRATE ----------------
-def backtest_winrate(df: pd.DataFrame, n_levels=5):
-    df = apply_all_features(df)
-    results = []
+# ---------------- SYMBOL DATA (WEBSOCKET) ----------------
+symbol_data = {}
 
-    for i in range(1, len(df)):
-        sub_df = df.iloc[:i+1]
-        action, votes, pretop, last, conf = detect_signal(sub_df)
-        if action in ["LONG", "SHORT"]:
-            support = last["support"]
-            resistance = last["resistance"]
-            entry = last["close"]
-            win = False
-            lose = False
-            if action == "LONG":
-                win = (df["high"].iloc[i:] >= resistance).any()
-                lose = (df["low"].iloc[i:] <= entry - 0.5*(resistance-entry)).any()
-            else:  # SHORT
-                win = (df["low"].iloc[i:] <= support).any()
-                lose = (df["high"].iloc[i:] >= entry + 0.5*(entry-support)).any()
-            results.append((action, win, lose))
-
-    total_signals = len(results)
-    wins = sum(1 for _, w, l in results if w)
-    losses = sum(1 for _, w, l in results if l)
-    winrate = wins / total_signals if total_signals > 0 else 0
-    return winrate, results
-
-# ---------------- PLOT HISTORY ----------------
-def plot_history(df, symbol, n_levels=5):
-    df_plot = df.copy()[['open','high','low','close','volume']]
-    df_plot.index.name = "Date"
-
-    closes = df['close'].values
-    peaks, _ = find_peaks(closes, distance=5)
-    peak_vals = closes[peaks]
-    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
-
-    troughs, _ = find_peaks(-closes, distance=5)
-    trough_vals = closes[troughs]
-    top_supports = sorted(trough_vals)[:n_levels]
-
-    hlines = list(top_supports) + list(top_resistances)
-
-    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
-
-    buf = io.BytesIO()
-    mpf.plot(
-        df_plot,
-        type='candle',
-        style=s,
-        volume=True,
-        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-        title=f"{symbol} — Signal History",
-        ylabel='Price',
-        ylabel_lower='Volume',
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
-    )
-    buf.seek(0)
-    return buf
-
-# ---------------- PLOT SIGNAL CANDLES ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
-    df_plot = df.copy()[['open','high','low','close','volume']]
-    df_plot.index.name = "Date"
-
-    closes = df['close'].values
-    peaks, _ = find_peaks(closes, distance=5)
-    peak_vals = closes[peaks]
-    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
-
-    troughs, _ = find_peaks(-closes, distance=5)
-    trough_vals = closes[troughs]
-    top_supports = sorted(trough_vals)[:n_levels]
-
-    hlines = list(top_supports) + list(top_resistances)
-    addplots = []
-
-    last = df.iloc[-1]
-
-    # --- Pre-top highlight ---
-    if pretop:
-        ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
-        addplots.append(
-            mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta')
-        )
-
-    # --- Pattern highlights ---
-    patterns = {
-        "bullish_engulfing": "green",
-        "bearish_engulfing": "red",
-        "hammer_bull": "lime",
-        "shooting_star": "orange",
-        "doji": "blue"
-    }
-    for pat, color in patterns.items():
-        if pat in votes:
-            ydata = [np.nan]*(len(df)-1) + [last['close']]
-            addplots.append(
-                mpf.make_addplot(ydata, type='scatter', markersize=80, marker='o', color=color)
-            )
-
-    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
-
-    buf = io.BytesIO()
-    mpf.plot(
-        df_plot,
-        type='candle',
-        style=s,
-        volume=True,
-        addplot=addplots,
-        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
-        title=f"{symbol} — {action} — {','.join([v for v in votes])}",
-        ylabel='Price',
-        ylabel_lower='Volume',
-        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
-    )
-    buf.seek(0)
-    return buf
-
-# ---------------- PLOT TOP5 ----------------
-def get_top5_symbols(symbols):
-    winrates = {}
-    for sym in symbols:
-        df = fetch_klines(sym)
-        if df is None or len(df) < 30:
-            continue
-        wr, _ = backtest_winrate(df)
-        winrates[sym] = wr
-    sorted_wr = sorted(winrates.items(), key=lambda x: x[1], reverse=True)
-    return sorted_wr[:5]
-
-# ---------------- ANALYZE SYMBOL ----------------
-def analyze_and_alert(symbol: str):
-    df = fetch_klines(symbol)
+def analyze_and_alert(symbol):
+    df = symbol_data.get(symbol)
     if df is None or len(df) < 30:
         return
+
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
     prev_signal = state["signals"].get(symbol, "")
@@ -429,30 +275,48 @@ def analyze_and_alert(symbol: str):
             f"Pre-top: {pretop}\n"
             f"Time: {last.name}\n"
         )
-        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
-        send_telegram(msg, photo=photo_buf)
+        # Для простоти поки без графіка
+        send_telegram(msg)
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
-# ---------------- MASTER SCAN ----------------
-def scan_top_symbols():
-    symbols = get_all_usdt_symbols()
-    if not symbols:
-        logger.warning("No symbols found for scanning.")
+# ---------------- WEBSOCKET ----------------
+def start_websocket():
+    if not client:
+        logger.warning("Binance client missing — websocket not started")
         return
 
-    logger.info("Starting scan for %d symbols", len(symbols))
-    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        list(exe.map(analyze_and_alert, symbols))
+    def handle_kline(msg):
+        k = msg['k']
+        if k['x']:
+            df_new = pd.DataFrame([{
+                'open_time': pd.to_datetime(k['t'], unit='ms', utc=True),
+                'open': float(k['o']),
+                'high': float(k['h']),
+                'low': float(k['l']),
+                'close': float(k['c']),
+                'volume': float(k['v'])
+            }]).set_index('open_time')
+            symbol = msg['s']
+            if symbol in symbol_data:
+                symbol_data[symbol] = pd.concat([symbol_data[symbol], df_new]).tail(EMA_SCAN_LIMIT)
+            else:
+                symbol_data[symbol] = df_new
+            analyze_and_alert(symbol)
 
-    state["last_scan"] = str(datetime.now(timezone.utc))
-    save_json_safe(STATE_FILE, state)
-    logger.info("Scan finished at %s", state["last_scan"])
+    try:
+        twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+        twm.start()
+        symbols = get_all_usdt_symbols()
+        for sym in symbols:
+            twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
+            logger.info("✅ WebSocket started for %s", sym)
+    except Exception as e:
+        logger.exception("start_websocket error: %s", e)
+
+Thread(target=start_websocket, daemon=True).start()
 
 # ---------------- FLASK ROUTES ----------------
-app = Flask(__name__)
-logger = logging.getLogger("pretop-bot")
-
 @app.route("/")
 def home():
     return jsonify({
@@ -461,95 +325,45 @@ def home():
         "signals": len(state.get("signals", {}))
     })
 
-# 🔹 Змінено маршрут на прийом токена у URL
 @app.route("/telegram_webhook/<token>", methods=["POST"])
 def telegram_webhook(token):
-    try:
-        # Можна перевірити токен на відповідність TELEGRAM_TOKEN, якщо хочеш
-        if token != TELEGRAM_TOKEN:
-            logger.warning("Received webhook with invalid token: %s", token)
-            return jsonify({"ok": False, "error": "invalid token"}), 403
+    if token != TELEGRAM_TOKEN:
+        return jsonify({"ok": False, "error": "invalid token"}), 403
+    update = request.get_json(force=True) or {}
+    msg = update.get("message")
+    if not msg:
+        return jsonify({"ok": True})
+    text = msg.get("text","").lower().strip()
 
-        update = request.get_json(force=True) or {}
-        logger.info("Telegram update: %s", update)
-
-        msg = update.get("message")
-        if not msg:
-            return jsonify({"ok": True})
-
-        text = msg.get("text", "").lower().strip()
-
-        if text.startswith("/scan"):
-            send_telegram("⚡ Manual scan started.")
-            Thread(target=scan_top_symbols, daemon=True).start()
-
-        elif text.startswith("/status"):
-            send_telegram(
-                f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}"
-            )
-
-        elif text.startswith("/top"):
-            symbols = get_all_usdt_symbols()
-            top5 = get_top5_symbols(symbols)
-            msg_text = "🏆 Top5 tokens by winrate:\n" + "\n".join(
-                [f"{s[0]}: {s[1]*100:.1f}%" for s in top5]
-            )
-            send_telegram(msg_text)
-
-        elif text.startswith("/history"):
-            parts = text.split()
-            if len(parts) >= 2:
-                symbol = parts[1].upper()
-                df = fetch_klines(symbol)
-                if df is not None and len(df) >= 30:
-                    buf = plot_history(df, symbol)
-                    send_telegram(f"📈 History for {symbol}", photo=buf)
-                else:
-                    send_telegram(f"❌ No data for {symbol}")
-
-    except Exception as e:
-        logger.exception("telegram_webhook error: %s", e)
+    if text.startswith("/status"):
+        send_telegram(f"📝 Status: Signals={len(state.get('signals',{}))}")
+    elif text.startswith("/history"):
+        parts = text.split()
+        if len(parts)>=2:
+            symbol = parts[1].upper()
+            df = fetch_klines(symbol)
+            if df is not None and len(df)>=30:
+                send_telegram(f"📈 History for {symbol}")
+            else:
+                send_telegram(f"❌ No data for {symbol}")
     return jsonify({"ok": True})
 
-# ---------------- TELEGRAM WEBHOOK SETUP ----------------
+# ---------------- WEBHOOK SETUP ----------------
 def setup_webhook():
     if not TELEGRAM_TOKEN or not WEBHOOK_URL:
-        logger.error("❌ TELEGRAM_TOKEN or WEBHOOK_URL is missing!")
+        logger.warning("TELEGRAM_TOKEN or WEBHOOK_URL missing")
         return
-
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
+    url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
     try:
-        # Видаляємо старий вебхук
-        resp = requests.get(f"{base_url}/deleteWebhook")
-        logger.info("deleteWebhook resp: %s", resp.text)
-
-        # 🔹 Ставимо новий вебхук на /telegram_webhook
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"   # <- Ось тут зміна
-        resp = requests.get(f"{base_url}/setWebhook?url={webhook_url}")
-        logger.info("setWebhook resp: %s", resp.text)
-
-        # Перевіряємо
-        resp = requests.get(f"{base_url}/getWebhookInfo")
-        logger.info("getWebhookInfo resp: %s", resp.text)
-
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook")
+        resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
+        logger.info("Webhook set resp: %s", resp.text)
     except Exception as e:
-        logger.exception("Webhook setup error: %s", e)
+        logger.exception("setup_webhook error: %s", e)
 
-# ---------------- WARMUP ----------------
-def warmup_and_first_scan():
-    try:
-        scan_top_symbols()
-    except Exception as e:
-        logger.exception("warmup_and_first_scan error: %s", e)
-
-Thread(target=warmup_and_first_scan, daemon=True).start()
+setup_webhook()
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
-    logger.info("Starting pre-top detector bot")
-
-    setup_webhook()  # 🔹 автоматично ставимо вебхук
-    Thread(target=warmup_and_first_scan, daemon=True).start()
-
+    logger.info("Starting Pre-top bot")
     app.run(host="0.0.0.0", port=PORT)
