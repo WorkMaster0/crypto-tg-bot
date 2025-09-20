@@ -163,9 +163,17 @@ def warmup_data():
     logger.info("Warming up data for %d symbols", len(symbols))
     for sym in symbols:
         try:
-            df = fetch_klines_rest(sym)
+            df = None
+            for attempt in range(3):
+                df = fetch_klines_rest(sym)
+                if df is not None:
+                    break
+                time.sleep(1)  # пауза між запитами
             if df is not None and len(df) > 0:
                 symbol_data[sym] = df
+            else:
+                logger.warning("No data fetched for %s", sym)
+            time.sleep(0.3)  # **обов'язкова пауза** між запитами, щоб не перевищити ліміт
         except Exception as e:
             logger.exception("warmup_data error for %s: %s", sym, e)
 
