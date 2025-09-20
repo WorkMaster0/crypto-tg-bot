@@ -385,21 +385,27 @@ def start_websocket():
                 symbol_data[symbol] = df_new
             analyze_and_alert(symbol)
 
-    # Створюємо цикл asyncio у потоці
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        global twm
-        twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
-        twm.start()
-        symbols = get_all_usdt_symbols()
-        for sym in symbols:
-            twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
-            logger.info(f"✅ Started websocket for {sym}")
-        loop.run_forever()
-    except Exception as e:
-        logger.exception("start_websocket error: %s", e)
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            global twm
+            twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+            twm.start()
+            symbols = get_all_usdt_symbols()
+            for sym in symbols:
+                twm.start_kline_socket(callback=handle_kline, symbol=sym.lower(), interval='15m')
+                logger.info(f"✅ Started websocket for {sym}")
+            logger.info("WebSocket manager running")
+            loop.run_forever()
+        except Exception as e:
+            logger.exception("WebSocket error, will retry in 10s: %s", e)
+            try:
+                if twm:
+                    twm.stop()
+            except:
+                pass
+            time.sleep(10)
 
 # ---------------- SCANNER LOOP ----------------
 def scanner_loop():
