@@ -262,16 +262,23 @@ def get_all_usdt_symbols():
     try:
         url = "https://api.binance.com/api/v3/exchangeInfo"
         resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
         data = resp.json()
-        symbols = [
-            s["symbol"] for s in data["symbols"]
-            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
-        ]
-        logger.info("Fetched %d USDT symbols", len(symbols))
+        symbols = []
+        if "symbols" in data:
+            symbols = [
+                s["symbol"] for s in data["symbols"]
+                if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+            ]
+            logger.info("Fetched %d USDT symbols", len(symbols))
+        else:
+            logger.warning("Binance exchangeInfo returned no 'symbols' key")
         return symbols
+    except requests.HTTPError as e:
+        logger.error(f"HTTP error fetching USDT symbols: {e}")
     except Exception as e:
-        logger.exception("Error fetching USDT symbols: %s", e)
-        return []
+        logger.exception(f"Error fetching USDT symbols: {e}")
+    return []
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
