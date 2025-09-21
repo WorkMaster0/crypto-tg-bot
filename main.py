@@ -1,4 +1,4 @@
-# bot_ws_full.py — Pre-top бот з повним аналізом, графіками та WebSocket
+# main_render_ws.py — Pre-top бот + Flask для Render
 import os
 import json
 import logging
@@ -16,6 +16,7 @@ from scipy.signal import find_peaks
 import numpy as np
 import websocket
 import requests
+from flask import Flask, jsonify
 
 # ---------------- CONFIG ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -23,10 +24,10 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 CONF_THRESHOLD_MEDIUM = 0.60
-CONF_THRESHOLD_STRONG = 0.8
 
-STATE_FILE = "state_ws_full.json"
-LOG_FILE = "bot_ws_full.log"
+PORT = int(os.getenv("PORT", "10000"))
+STATE_FILE = "state_render_ws.json"
+LOG_FILE = "bot_render_ws.log"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -34,7 +35,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
-logger = logging.getLogger("pretop-bot-ws-full")
+logger = logging.getLogger("pretop-bot-render-ws")
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -108,7 +109,7 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
         logger.exception("apply_all_features error: %s", e)
     return df
 
-# ---------------- SIGNAL DETECTION ----------------
+# ---------------- SIGNAL ----------------
 def detect_signal(df: pd.DataFrame):
     if len(df)<2: return "WATCH",[],False,None,0.0
     last=df.iloc[-1]; prev=df.iloc[-2]; votes=[]; confidence=0.2
@@ -237,6 +238,12 @@ def start_ws(symbols):
     ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_message,on_error=on_error,on_close=on_close)
     ws.run_forever(ping_interval=20,ping_timeout=10)
 
+# ---------------- FLASK (для Render порту) ----------------
+flask_app=Flask(__name__)
+@flask_app.route("/")
+def home(): return jsonify({"status":"ok","time":str(datetime.now(timezone.utc))})
+def run_flask(): flask_app.run(host="0.0.0.0", port=PORT)
+
 # ---------------- START BOT ----------------
 def start_bot():
     symbols=get_all_usdt_symbols()
@@ -245,6 +252,9 @@ def start_bot():
     threading.Thread(target=start_ws,args=(symbols,),daemon=True).start()
 
 if __name__=="__main__":
-    logger.info("Starting FULL pre-top WebSocket bot")
+    logger.info("Starting FULL pre-top WebSocket bot + Flask for Render port")
+    # Flask для Render
+    threading.Thread(target=run_flask, daemon=True).start()
+    # WebSocket бот
     start_bot()
     while True: time.sleep(1)
