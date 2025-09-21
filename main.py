@@ -305,12 +305,11 @@ def telegram_webhook(token):
     update = request.get_json(force=True) or {}
     text = update.get("message", {}).get("text", "").lower().strip()
     if text.startswith("/scan"):
-        Thread(target=scan_top_symbols, daemon=True).start()
-        send_telegram("⚡ Manual scan started.")
-    return jsonify({"ok": True})
+    send_telegram("⚡ Manual scan started.")
+    Thread(target=scan_all_symbols, daemon=True).start()  # <- новий виклик
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
-    Thread(target=scan_top_symbols, daemon=True).start()
+    Thread(target=scan_all_symbols, daemon=True).start()  # <- новий виклик
     app.run(host="0.0.0.0", port=PORT)
