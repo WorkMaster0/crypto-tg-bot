@@ -135,36 +135,91 @@ def apply_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- SIGNAL ----------------
 def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else last
     votes = []
     confidence = 0.2
+
+    # EMA
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
     else:
         votes.append("ema_bear")
         confidence += 0.05
+
+    # MACD
     if last["MACD_hist"] > 0:
         votes.append("macd_up")
         confidence += 0.1
     else:
         votes.append("macd_down")
         confidence += 0.05
+
+    # RSI
     if last["RSI_14"] < 30:
         votes.append("rsi_oversold")
         confidence += 0.08
     elif last["RSI_14"] > 70:
         votes.append("rsi_overbought")
         confidence += 0.08
+
+    # ADX
+    if last.get("ADX",0) > 25:
+        votes.append("strong_trend")
+        confidence *= 1.1
+
+    # Свічкові патерни
+    body = last["close"] - last["open"]
+    rng = last["high"] - last["low"]
+    upper_shadow = last["high"] - max(last["close"], last["open"])
+    lower_shadow = min(last["close"], last["open"]) - last["low"]
+    candle_bonus = 1.0
+
+    if lower_shadow > 2 * abs(body) and body > 0:
+        votes.append("hammer_bull")
+        candle_bonus = 1.2
+    elif upper_shadow > 2 * abs(body) and body < 0:
+        votes.append("shooting_star")
+        candle_bonus = 1.2
+
+    if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
+        votes.append("bullish_engulfing")
+        candle_bonus = 1.25
+    elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
+        votes.append("bearish_engulfing")
+        candle_bonus = 1.25
+
+    if abs(body) < 0.1 * rng:
+        votes.append("doji")
+        candle_bonus = 1.1
+
+    confidence *= candle_bonus
+
+    # Fake breakout
+    if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
+        votes.append("fake_breakout_short")
+        confidence += 0.15
+    elif last["close"] < last["support"] * 1.005 and last["close"] > last["support"] * 0.99:
+        votes.append("fake_breakout_long")
+        confidence += 0.15
+
+    # Pre-top
+    pretop = False
+    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10])/df["close"].iloc[-10] > 0.1:
+        pretop = True
+        confidence += 0.1
+        votes.append("pretop")
+
+    # Action
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
         action = "SHORT"
     elif last["close"] <= last["support"] * 1.005:
         action = "LONG"
-    confidence = max(0, min(1, confidence))
-    pretop = False
-    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10])/df["close"].iloc[-10] > 0.1:
-        pretop = True
-        confidence += 0.1
+
+    # ✅ НЕ обрізаємо confidence до 1, а можна відображати як %
+    # confidence = max(0, min(1, confidence))  # <- видалити або закоментувати
+
     return action, votes, pretop, last, confidence
 
 # ---------------- PLOT ----------------
