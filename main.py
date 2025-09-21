@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import matplotlib.pyplot as plt
 import requests
-from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
 import numpy as np
@@ -75,11 +74,9 @@ def send_telegram(text: str, photo=None):
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
-# ---------------- WEBSOCKET MANAGER ----------------
+# ---------------- WEBSOCKET / REST MANAGER ----------------
 from websocket_manager import WebSocketKlineManager
-from threading import Thread
 
-# Список монет, які слухаємо через WebSocket
 ALL_USDT = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","MATICUSDT",
     "DOTUSDT","TRXUSDT","LTCUSDT","AVAXUSDT","SHIBUSDT","LINKUSDT","ATOMUSDT","XMRUSDT",
@@ -87,33 +84,49 @@ ALL_USDT = [
     "SANDUSDT","AXSUSDT","FTMUSDT","THETAUSDT","EGLDUSDT","MANAUSDT","FLOWUSDT","HBARUSDT",
     "ALGOUSDT","ZECUSDT","EOSUSDT","KSMUSDT","CELOUSDT","SUSHIUSDT","CHZUSDT","KAVAUSDT",
     "ZILUSDT","ANKRUSDT","RAYUSDT","GMTUSDT","UNIUSDT","APEUSDT","PEPEUSDT","OPUSDT",
-    "WIFUSDT","LINKUSDT","XTZUSDT","ALPHAUSDT","BALUSDT","COMPUSDT","CRVUSDT","SNXUSDT",
-    "RSRUSDT","LOKUSDT","GALUSDT","WLDUSDT","JASMYUSDT","ONEUSDT","ARBUSDT","ALICEUSDT",
-    "XECUSDT","FLMUSDT","CAKEUSDT","AXSUSDT","IMXUSDT","HOOKUSDT","MAGICUSDT","STGUSDT",
-    "FETUSDT","PEOPLEUSDT","ASTRUSDT","ENSUSDT","CTSIUSDT","GALAUSDT","RADUSDT","IOSTUSDT",
-    "QTUMUSDT","NPXSUSDT","DASHUSDT","ZRXUSDT","HNTUSDT","ENJUSDT","ICPUSDT","OPUSDT",
-    "TFUELUSDT","KLAYUSDT","QTUMUSDT","TWTUSDT","NKNUSDT","GLMRUSDT","ZENUSDT","STORJUSDT",
-    "ICXUSDT","XVGUSDT","FLOKIUSDT","BONEUSDT","TRBUSDT","C98USDT","MASKUSDT","1000SHIBUSDT",
-    "1000PEPEUSDT","IMXUSDT","AMBUSDT","CELOUSDT","VEGUSDT","QNTUSDT","RNDRUSDT","CHRUSDT",
-    "API3USDT","MTLUSDT","ALPUSDT","ANKRUSDT","LDOUSDT","AXLUSDT","FUNUSDT","OGUSDT",
-    "ORCUSDT","XAUTUSDT","ARUSDT","DYDXUSDT","RSRUSDT","RUNEUSDT","FLUXUSDT",
-    "AGIXUSDT","AGLDUSDT","PERPUSDT","STMXUSDT","MLNUSDT","NMRUSDT","LRCUSDT","MASKUSDT",
-    "COTIUSDT","ACHUSDT","CKBUSDT","ACEUSDT","TRUUSDT","IPSUSDT","QIUSDT","GALUSDT","GLMUSDT",
-    "BALUSDT","MDXUSDT","ARNXUSDT","NMRUSDT","ANKRUSDT","PORTOUSDT","MIRUSDT",
-    "ROSEUSDT","OXTUSDT","PERPUSDT","SPELLUSDT","STMXUSDT","STRAXUSDT",
-    "SUNUSDT","SYSUSDT","TAOUSDT","TLMUSDT","TLMUSDT","VLXUSDT","WAXPUSDT","WIFUSDT","XNOUSDT",
-    "XEMUSDT","XLMUSDT","ZRXUSDT"
+    "XTZUSDT","ALPHAUSDT","BALUSDT","COMPUSDT","CRVUSDT","SNXUSDT","RSRUSDT",
+    "LOKUSDT","GALUSDT","WLDUSDT","JASMYUSDT","ONEUSDT","ARBUSDT","ALICEUSDT","XECUSDT",
+    "FLMUSDT","CAKEUSDT","IMXUSDT","HOOKUSDT","MAGICUSDT","STGUSDT","FETUSDT",
+    "PEOPLEUSDT","ASTRUSDT","ENSUSDT","CTSIUSDT","GALAUSDT","RADUSDT","IOSTUSDT","QTUMUSDT",
+    "NPXSUSDT","DASHUSDT","ZRXUSDT","HNTUSDT","ENJUSDT","TFUELUSDT","KLAYUSDT","TWTUSDT",
+    "NKNUSDT","GLMRUSDT","ZENUSDT","STORJUSDT","ICXUSDT","XVGUSDT","FLOKIUSDT","BONEUSDT",
+    "TRBUSDT","C98USDT","MASKUSDT","1000SHIBUSDT","1000PEPEUSDT","AMBUSDT","VEGUSDT","QNTUSDT",
+    "RNDRUSDT","CHRUSDT","API3USDT","MTLUSDT","ALPUSDT","LDOUSDT","AXLUSDT","FUNUSDT",
+    "OGUSDT","ORCUSDT","XAUTUSDT","ARUSDT","DYDXUSDT","RUNEUSDT","FLUXUSDT","AGIXUSDT",
+    "AGLDUSDT","PERPUSDT","STMXUSDT","MLNUSDT","NMRUSDT","LRCUSDT","COTIUSDT","ACHUSDT",
+    "CKBUSDT","ACEUSDT","TRUUSDT","IPSUSDT","QIUSDT","GLMUSDT","ARNXUSDT","PORTOUSDT",
+    "MIRUSDT","ROSEUSDT","OXTUSDT","SPELLUSDT","STRAXUSDT","SUNUSDT","SYSUSDT","TAOUSDT",
+    "TLMUSDT","VLXUSDT","WAXPUSDT","XNOUSDT","XEMUSDT"
 ]
 
-# Ініціалізація WebSocket (батчами по 100 символів)
-ws_manager = WebSocketKlineManager(symbols=ALL_USDT, interval="15m", batch_size=100)
+BINANCE_REST_URL = "https://fapi.binance.com/fapi/v1/klines"
 
-# Запуск WebSocket у окремому потоці
+def fetch_klines_rest(symbol, interval="15m", limit=500):
+    try:
+        resp = requests.get(BINANCE_REST_URL, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=5)
+        data = resp.json()
+        df = pd.DataFrame(data, columns=[
+            "open_time","open","high","low","close","volume",
+            "close_time","quote_asset_volume","trades",
+            "taker_buy_base","taker_buy_quote","ignore"
+        ])
+        for col in ["open","high","low","close","volume"]:
+            df[col] = df[col].astype(float)
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+        df.set_index("open_time", inplace=True)
+        return df
+    except Exception as e:
+        logger.exception("REST fetch error for %s: %s", symbol, e)
+        return None
+
+ws_manager = WebSocketKlineManager(symbols=ALL_USDT, interval="15m")
 Thread(target=ws_manager.start, daemon=True).start()
 
-# Використовуємо цю функцію для отримання свічок
 def fetch_klines(symbol, limit=500):
-    return ws_manager.get_klines(symbol, limit)
+    df = ws_manager.get_klines(symbol, limit)
+    if df is None or len(df) < 10:
+        df = fetch_klines_rest(symbol, limit=limit)
+    return df
 
 # ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -139,64 +152,48 @@ def detect_signal(df: pd.DataFrame):
     prev = df.iloc[-2]
     votes = []
     confidence = 0.2
-
-    # EMA
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
     else:
         votes.append("ema_bear")
         confidence += 0.05
-
-    # MACD
     if last["MACD_hist"] > 0:
         votes.append("macd_up")
         confidence += 0.1
     else:
         votes.append("macd_down")
         confidence += 0.05
-
-    # RSI
     if last["RSI_14"] < 30:
         votes.append("rsi_oversold")
         confidence += 0.08
     elif last["RSI_14"] > 70:
         votes.append("rsi_overbought")
         confidence += 0.08
-
-    # ADX
     if last["ADX"] > 25:
         votes.append("strong_trend")
         confidence *= 1.1
-
-    # Свічкові патерни
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
     lower_shadow = min(last["close"], last["open"]) - last["low"]
     candle_bonus = 1.0
-
     if lower_shadow > 2 * abs(body) and body > 0:
         votes.append("hammer_bull")
         candle_bonus = 1.2
     elif upper_shadow > 2 * abs(body) and body < 0:
         votes.append("shooting_star")
         candle_bonus = 1.2
-
     if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
         votes.append("bullish_engulfing")
         candle_bonus = 1.25
     elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
         votes.append("bearish_engulfing")
         candle_bonus = 1.25
-
     if abs(body) < 0.1 * rng:
         votes.append("doji")
         candle_bonus = 1.1
-
     confidence *= candle_bonus
-
-    # Fake breakout
     fake_breakout = False
     if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
         votes.append("fake_breakout_short")
@@ -206,8 +203,6 @@ def detect_signal(df: pd.DataFrame):
         votes.append("fake_breakout_long")
         confidence += 0.15
         fake_breakout = True
-
-    # Pre-top
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
@@ -215,18 +210,14 @@ def detect_signal(df: pd.DataFrame):
             pretop = True
             votes.append("pretop")
             confidence += 0.1
-
-    # Action
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
         action = "SHORT"
     elif last["close"] <= last["support"] * 1.005:
         action = "LONG"
-
     confidence = max(0, min(1, confidence))
     if not (fake_breakout or pretop):
         action = "WATCH"
-
     return action, votes, pretop, last, confidence
 
 # ---------------- PLOT SIGNAL ----------------
@@ -249,12 +240,10 @@ def analyze_and_alert(symbol: str):
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
     prev_signal = state["signals"].get(symbol, "")
-
     logger.info(
         "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
         symbol, action, confidence, votes, pretop
     )
-
     if action != "WATCH" and confidence >= 0.6 and action != prev_signal:
         signal_reasons = []
         if "fake_breakout_short" in votes or "fake_breakout_long" in votes:
@@ -263,7 +252,6 @@ def analyze_and_alert(symbol: str):
             signal_reasons.append("Pre-Top")
         if not signal_reasons:
             signal_reasons = ["Other patterns"]
-
         msg = (
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
@@ -274,37 +262,28 @@ def analyze_and_alert(symbol: str):
             f"Patterns: {','.join(votes)}\n"
             f"Time: {last.name}\n"
         )
-
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
-
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
 # ---------------- MASTER SCAN ----------------
-# замість REST
 def scan_all_symbols():
-    symbols = list(ws_manager.data.keys())  # беремо символи з WebSocket
-    if not symbols:
-        logger.warning("No symbols loaded from WebSocket")
-        return
-
+    symbols = list(ws_manager.data.keys()) or ALL_USDT
     logger.info("Starting scan for %d symbols", len(symbols))
-
     def safe_analyze(sym):
         try:
             analyze_and_alert(sym)
         except Exception as e:
             logger.exception("Error analyzing symbol %s: %s", sym, e)
-
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
         list(exe.map(safe_analyze, symbols))
-
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
 
 # ---------------- FLASK ----------------
+from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 @app.route("/")
@@ -319,14 +298,11 @@ def home():
 def telegram_webhook(token):
     if token != TELEGRAM_TOKEN:
         return jsonify({"ok": False, "error": "invalid token"}), 403
-
     update = request.get_json(force=True) or {}
     text = update.get("message", {}).get("text", "").lower().strip()
-
     if text.startswith("/scan"):
         send_telegram("⚡ Manual scan started.")
         Thread(target=scan_all_symbols, daemon=True).start()
-
     return jsonify({"ok": True})
 
 # ---------------- MAIN ----------------
