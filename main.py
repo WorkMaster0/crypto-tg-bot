@@ -237,13 +237,13 @@ def analyze_and_alert(symbol: str):
     df = fetch_klines(symbol)
     if df is None or len(df) < 30:
         return
+
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
     prev_signal = state["signals"].get(symbol, {})
 
-    # Визначення стопу і тейку
-    stop_loss = None
-    take_profit = None
+    # Визначення стопу і тейку на основі рівнів
+    stop_loss, take_profit = None, None
     if action == "LONG":
         stop_loss = last["support"] * 0.995
         take_profit = last["resistance"] * 0.995
@@ -251,28 +251,26 @@ def analyze_and_alert(symbol: str):
         stop_loss = last["resistance"] * 1.005
         take_profit = last["support"] * 1.005
 
-    # ---------------- РОЗРАХУНОК % ВІДСТАНІ ----------------
-# Відстань стопу у відсотках
-if stop_loss:
-    if action == "LONG":
-        stop_pct = (last["close"] - stop_loss) / last["close"] * 100
-    else:  # SHORT
-        stop_pct = (stop_loss - last["close"]) / last["close"] * 100
-else:
-    stop_pct = 0.0
+    # Розрахунок відстані у %
+    if stop_loss:
+        if action == "LONG":
+            stop_pct = (last["close"] - stop_loss) / last["close"] * 100
+        else:  # SHORT
+            stop_pct = (stop_loss - last["close"]) / last["close"] * 100
+    else:
+        stop_pct = 0.0
 
-# Відстань тейку у відсотках
-if take_profit:
-    if action == "LONG":
-        tp_pct = (take_profit - last["close"]) / last["close"] * 100
-    else:  # SHORT
-        tp_pct = (last["close"] - take_profit) / last["close"] * 100
-else:
-    tp_pct = 0.0
-    
+    if take_profit:
+        if action == "LONG":
+            tp_pct = (take_profit - last["close"]) / last["close"] * 100
+        else:  # SHORT
+            tp_pct = (last["close"] - take_profit) / last["close"] * 100
+    else:
+        tp_pct = 0.0
+
     logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s stop=%.6f tp=%.6f",
-        symbol, action, confidence, votes, pretop, stop_loss or 0, take_profit or 0
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s stop=%.6f(%.2f%%) tp=%.6f(%.2f%%)",
+        symbol, action, confidence, votes, pretop, stop_loss or 0, stop_pct, take_profit or 0, tp_pct
     )
 
     if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal.get("action"):
@@ -304,6 +302,8 @@ else:
             "action": action,
             "stop": stop_loss,
             "tp": take_profit,
+            "stop_pct": stop_pct,
+            "tp_pct": tp_pct,
             "confidence": confidence,
             "last_price": last["close"],
             "votes": votes,
