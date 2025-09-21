@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
+import io
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -14,7 +15,6 @@ from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
 import numpy as np
-import io
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -78,9 +78,11 @@ def send_telegram(text: str, photo=None):
 # ---------------- WEBSOCKET MANAGER ----------------
 from websocket_manager import WebSocketKlineManager
 
-TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]
+# Запуск WebSocket для всіх USDT-символів
+TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]  # стартовий список
 ws_manager = WebSocketKlineManager(TOP_SYMBOLS, interval="15m")
 
+# Прогрів історії
 for sym in TOP_SYMBOLS:
     ws_manager.load_history(sym)
 
@@ -114,7 +116,6 @@ def detect_signal(df: pd.DataFrame):
     votes = []
     confidence = 0.2
 
-    # EMA
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
@@ -122,7 +123,6 @@ def detect_signal(df: pd.DataFrame):
         votes.append("ema_bear")
         confidence += 0.05
 
-    # MACD
     if last["MACD_hist"] > 0:
         votes.append("macd_up")
         confidence += 0.1
@@ -130,7 +130,6 @@ def detect_signal(df: pd.DataFrame):
         votes.append("macd_down")
         confidence += 0.05
 
-    # RSI
     if last["RSI_14"] < 30:
         votes.append("rsi_oversold")
         confidence += 0.08
@@ -138,12 +137,10 @@ def detect_signal(df: pd.DataFrame):
         votes.append("rsi_overbought")
         confidence += 0.08
 
-    # ADX
     if last["ADX"] > 25:
         votes.append("strong_trend")
         confidence *= 1.1
 
-    # Свічкові патерни
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
@@ -170,7 +167,6 @@ def detect_signal(df: pd.DataFrame):
 
     confidence *= candle_bonus
 
-    # Fake breakout
     fake_breakout = False
     if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
         votes.append("fake_breakout_short")
@@ -181,7 +177,6 @@ def detect_signal(df: pd.DataFrame):
         confidence += 0.15
         fake_breakout = True
 
-    # Pre-top
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
@@ -190,7 +185,6 @@ def detect_signal(df: pd.DataFrame):
             votes.append("pretop")
             confidence += 0.1
 
-    # Action
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
         action = "SHORT"
@@ -255,25 +249,16 @@ def analyze_and_alert(symbol: str):
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
-# ---------------- GET ALL USDT SYMBOLS ----------------
-def get_all_usdt_symbols():
-    try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        symbols = [
-            s["symbol"] for s in data["symbols"]
-            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
-        ]
-        logger.info("Fetched %d USDT symbols", len(symbols))
-        return symbols
-    except Exception as e:
-        logger.exception("Error fetching USDT symbols: %s", e)
-        return []
+# ---------------- GET USDT SYMBOLS через WEBSOCKET ----------------
+def get_all_usdt_symbols_ws():
+    symbols = ws_manager.get_all_symbols()
+    usdt_symbols = [s for s in symbols if s.endswith("USDT")]
+    logger.info("Fetched %d USDT symbols via WS", len(usdt_symbols))
+    return usdt_symbols
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
-    symbols = get_all_usdt_symbols()
+    symbols = get_all_usdt_symbols_ws()
     if not symbols:
         return
 
