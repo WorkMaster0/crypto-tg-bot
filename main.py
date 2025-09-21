@@ -241,14 +241,12 @@ def telegram_webhook(token):
 
 # ---------------- WEBHOOK ----------------
 def setup_webhook():
-    # приберемо можливе подвоєння
-    base_url = WEBHOOK_URL.rstrip("/")
-    url = f"{base_url}/telegram_webhook/{TELEGRAM_TOKEN}"
+    url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
     resp = requests.get(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
         params={"url": url}
     )
-    logger.info(f"Webhook set to {url}, resp: {resp.text}")
+    logger.info(f"Webhook set resp: {resp.text}")
 
 # ---------------- MAIN ----------------
 if __name__=="__main__":
