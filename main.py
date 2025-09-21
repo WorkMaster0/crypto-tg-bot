@@ -6,7 +6,6 @@ import re
 from datetime import datetime, timezone
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
-import io
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -14,7 +13,6 @@ import requests
 from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
-from scipy.signal import find_peaks
 import numpy as np
 
 # ---------------- LOGGING ----------------
@@ -28,10 +26,8 @@ logger = logging.getLogger("pretop-bot")
 # ---------------- CONFIG ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 PORT = int(os.getenv("PORT", "5000"))
 
-TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 EMA_SCAN_LIMIT = 500
 
@@ -81,19 +77,20 @@ def send_telegram(text: str, photo=None):
         logger.exception("send_telegram error: %s", e)
 
 # ---------------- WEBSOCKET MANAGER ----------------
-from websocket_manager import WebSocketKlineManager
+from websocket_manager import WebSocketKlineManager  # твоє визначення WebSocketKlineManager
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]
-ws_manager = WebSocketKlineManager(SYMBOLS, interval="15m")
+# Список початкових токенів для warmup
+TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]
+ws_manager = WebSocketKlineManager(TOP_SYMBOLS, interval="15m")
 
-# Load initial history
-for sym in SYMBOLS:
+# Завантаження історії
+for sym in TOP_SYMBOLS:
     ws_manager.load_history(sym)
 
-# Run WebSocket updates
+# Запуск WebSocket у фоновому потоці
 Thread(target=ws_manager.start, daemon=True).start()
 
-def fetch_klines(symbol, interval="15m", limit=EMA_SCAN_LIMIT):
+def fetch_klines(symbol, limit=EMA_SCAN_LIMIT):
     return ws_manager.get_klines(symbol, limit)
 
 # ---------------- FEATURE ENGINEERING ----------------
@@ -116,16 +113,12 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
-    """
-    Повертає: action, votes, pretop, last_row, confidence
-    Сигнал відправляється лише коли fake breakout або pretop.
-    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
     confidence = 0.2
 
-    # ----- EMA -----
+    # EMA
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
@@ -133,7 +126,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("ema_bear")
         confidence += 0.05
 
-    # ----- MACD -----
+    # MACD
     if last["MACD_hist"] > 0:
         votes.append("macd_up")
         confidence += 0.1
@@ -141,7 +134,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("macd_down")
         confidence += 0.05
 
-    # ----- RSI -----
+    # RSI
     if last["RSI_14"] < 30:
         votes.append("rsi_oversold")
         confidence += 0.08
@@ -149,12 +142,12 @@ def detect_signal(df: pd.DataFrame):
         votes.append("rsi_overbought")
         confidence += 0.08
 
-    # ----- ADX -----
+    # ADX
     if last["ADX"] > 25:
         votes.append("strong_trend")
         confidence *= 1.1
 
-    # ----- Свічкові патерни -----
+    # Свічкові патерни
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
@@ -181,7 +174,7 @@ def detect_signal(df: pd.DataFrame):
 
     confidence *= candle_bonus
 
-    # ----- Fake breakout -----
+    # Fake breakout
     fake_breakout = False
     if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
         votes.append("fake_breakout_short")
@@ -192,7 +185,7 @@ def detect_signal(df: pd.DataFrame):
         confidence += 0.15
         fake_breakout = True
 
-    # ----- Pre-top -----
+    # Pre-top
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
@@ -201,7 +194,7 @@ def detect_signal(df: pd.DataFrame):
             votes.append("pretop")
             confidence += 0.1
 
-    # ----- Action -----
+    # Action
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
         action = "SHORT"
@@ -210,7 +203,6 @@ def detect_signal(df: pd.DataFrame):
 
     confidence = max(0, min(1, confidence))
 
-    # Відправка сигналу тільки якщо є fake breakout або pretop
     if not (fake_breakout or pretop):
         action = "WATCH"
 
@@ -228,12 +220,10 @@ def analyze_and_alert(symbol: str):
 
     logger.info(
         "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-        symbol, action, confidence, [v for v in votes], pretop
+        symbol, action, confidence, votes, pretop
     )
 
-    # Відправка сигналу тільки при confidence >= 0.6 і наявності fake breakout або pretop
     if action != "WATCH" and confidence >= 0.6 and action != prev_signal:
-        # Формуємо зрозуміле повідомлення
         signal_reasons = []
         if "fake_breakout_short" in votes or "fake_breakout_long" in votes:
             signal_reasons.append("Fake Breakout")
@@ -253,23 +243,33 @@ def analyze_and_alert(symbol: str):
             f"Time: {last.name}\n"
         )
 
-        # Створюємо графік з підсвічуванням сигналів
+        # Тут має бути твоя функція plot_signal_candles
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
 
-        # Зберігаємо останній сигнал у state
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
+# ---------------- GET ALL USDT SYMBOLS ----------------
+def get_all_usdt_symbols():
+    try:
+        url = "https://api.binance.com/api/v3/exchangeInfo"
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        symbols = [
+            s["symbol"] for s in data["symbols"]
+            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+        ]
+        logger.info("Fetched %d USDT symbols", len(symbols))
+        return symbols
+    except Exception as e:
+        logger.exception("Error fetching USDT symbols: %s", e)
+        return []
+
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
-    """
-    Сканає всі USDT-пари (без чорного списку), аналізує і відправляє сигнали.
-    Використовує ThreadPoolExecutor для паралельної обробки.
-    """
     symbols = get_all_usdt_symbols()
     if not symbols:
-        logger.warning("No symbols found for scanning.")
         return
 
     logger.info("Starting scan for %d symbols", len(symbols))
@@ -302,14 +302,19 @@ def home():
 def telegram_webhook(token):
     if token != TELEGRAM_TOKEN:
         return jsonify({"ok": False, "error": "invalid token"}), 403
+
     update = request.get_json(force=True) or {}
     text = update.get("message", {}).get("text", "").lower().strip()
+
     if text.startswith("/scan"):
         send_telegram("⚡ Manual scan started.")
-        Thread(target=scan_all_symbols, daemon=True).start()  # <- новий виклик
+        Thread(target=scan_all_symbols, daemon=True).start()
+
+    return jsonify({"ok": True})
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
-    Thread(target=scan_all_symbols, daemon=True).start()  # <- новий виклик
+    # Прогріваємо топ токени
+    Thread(target=scan_all_symbols, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
