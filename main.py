@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ import requests
 from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
+import numpy as np
 import io
 
 # ---------------- LOGGING ----------------
@@ -37,13 +39,11 @@ if os.path.exists(STATE_FILE):
         signals_df = pd.read_parquet(STATE_FILE)
     except:
         signals_df = pd.DataFrame(columns=[
-            "symbol","time","action","confidence","price","votes","pretop",
-            "support","resistance","tp","sl"
+            "symbol","time","action","confidence","price","votes","pretop","support","resistance","tp","sl"
         ])
 else:
     signals_df = pd.DataFrame(columns=[
-        "symbol","time","action","confidence","price","votes","pretop",
-        "support","resistance","tp","sl"
+        "symbol","time","action","confidence","price","votes","pretop","support","resistance","tp","sl"
     ])
 
 def save_signals():
@@ -74,6 +74,7 @@ def send_telegram(text: str, photo=None):
 
 # ---------------- WEBSOCKET MANAGER ----------------
 from websocket_manager import WebSocketKlineManager
+from threading import Thread
 
 ALL_USDT = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","MATICUSDT",
@@ -216,7 +217,7 @@ def detect_signal(df: pd.DataFrame):
     if not (fake_breakout or pretop):
         action = "WATCH"
 
-    # Take profit / stop loss
+    # Take profit / stop loss на основі рівнів
     tp, sl = None, None
     if action == "LONG":
         tp = last["resistance"]
@@ -340,28 +341,19 @@ def telegram_webhook(token):
         send_telegram("⚡ Manual scan started.")
         Thread(target=scan_all_symbols, daemon=True).start()
     elif text.startswith("/history"):
+        # Повертаємо останні 10 сигналів
         last10 = signals_df.tail(10)
         msg = "\n".join([
             f"{row.symbol}: {row.action} @ {row.price:.4f} TP={row.tp:.4f} SL={row.sl:.4f}" for _, row in last10.iterrows()
         ])
         send_telegram("📜 Last 10 signals:\n" + msg)
     elif text.startswith("/top"):
-        def calc_winrate(group):
-            wins = 0
-            total = 0
-            for _, row in group.iterrows():
-                if pd.isna(row.tp) or pd.isna(row.sl):
-                    continue
-                total += 1
-                if row.action == "LONG" and row.price >= row.tp:
-                    wins += 1
-                elif row.action == "SHORT" and row.price <= row.tp:
-                    wins += 1
-            return wins / total if total > 0 else 0
-
-        top_symbols = signals_df.groupby("symbol").apply(calc_winrate).sort_values(ascending=False).head(10)
-        msg = "\n".join([f"{sym}: {winrate:.0%}" for sym, winrate in top_symbols.items()])
-        send_telegram("🏆 Top symbols by winrate:\n" + msg)
+        # Топ токенів по виграшам
+        top_symbols = signals_df.groupby("symbol").apply(
+            lambda x: (x[x["action"].notnull()].shape[0])
+        ).sort_values(ascending=False).head(10)
+        msg = "\n".join([f"{sym}: {cnt}" for sym, cnt in top_symbols.items()])
+        send_telegram("🏆 Top symbols by signals:\n" + msg)
 
     return jsonify({"ok": True})
 
