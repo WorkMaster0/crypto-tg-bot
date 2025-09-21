@@ -77,13 +77,15 @@ def send_telegram(text: str, photo=None):
 
 # ---------------- WEBSOCKET MANAGER ----------------
 from websocket_manager import WebSocketKlineManager
+from threading import Thread
 
-TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]
-ws_manager = WebSocketKlineManager(TOP_SYMBOLS, interval="15m")
+# Ініціалізація WebSocket для ВСІХ USDT символів
+ws_manager = WebSocketKlineManager(interval="15m")
 
-for sym in TOP_SYMBOLS:
-    ws_manager.load_history(sym)
+# Поступове завантаження історії всіх символів через REST, щоб не банили
+Thread(target=ws_manager.load_history_all, daemon=True).start()
 
+# Старт WebSocket
 Thread(target=ws_manager.start, daemon=True).start()
 
 def fetch_klines(symbol, limit=EMA_SCAN_LIMIT):
