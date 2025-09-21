@@ -226,27 +226,70 @@ app = Flask(__name__)
 def home():
     return jsonify({"status":"ok","time":str(datetime.now(timezone.utc)),"signals":len(state.get("signals",{}))})
 
-@app.route("/telegram_webhook/<token>", methods=["POST"])
-def telegram_webhook(token):
-    if token != TELEGRAM_TOKEN:
-        return jsonify({"ok":False,"error":"invalid token"}),403
-    update = request.get_json(force=True) or {}
-    msg = update.get("message")
-    if not msg: return jsonify({"ok":True})
-    text = msg.get("text","").lower().strip()
-    if text.startswith("/scan"):
-        Thread(target=scan_top_symbols, daemon=True).start()
-        send_telegram("⚡ Manual scan started.")
-    return jsonify({"ok":True})
+# Підтримуємо і /telegram_webhook, і /telegram_webhook/<anything...>
+@app.route("/telegram_webhook", defaults={"path": ""}, methods=["POST"])
+@app.route("/telegram_webhook/<path:path>", methods=["POST"])
+def telegram_webhook(path):
+    try:
+        # path може бути '', 'TOKEN', або 'TOKEN/telegram_webhook/TOKEN' і т.д.
+        token_in_path = ""
+        if path:
+            token_in_path = path.strip("/").split("/")[-1]
+
+        # Якщо в URL токен не знайдено або не співпадає — відмовляємо
+        if token_in_path != TELEGRAM_TOKEN:
+            logger.warning("Invalid token in request path: %s (expected %s)", token_in_path, TELEGRAM_TOKEN)
+            return jsonify({"ok": False, "error": "invalid token"}), 403
+
+        update = request.get_json(force=True) or {}
+        # лог корисних полів для дебагу
+        logger.debug("Telegram update keys: %s", list(update.keys()))
+        msg = update.get("message")
+        if not msg:
+            return jsonify({"ok": True})
+
+        text = msg.get("text", "").strip().lower()
+        # приклад обробки команд (залиши свою логіку)
+        if text.startswith("/scan"):
+            Thread(target=scan_top_symbols, daemon=True).start()
+            send_telegram("⚡ Manual scan started.")
+        elif text.startswith("/status"):
+            send_telegram(f"📝 Status: signals={len(state.get('signals',{}))}, last_scan={state.get('last_scan')}")
+        # ... інші команди як у тебе ...
+    except Exception as e:
+        logger.exception("telegram_webhook error: %s", e)
+
+    return jsonify({"ok": True})
 
 # ---------------- WEBHOOK ----------------
 def setup_webhook():
-    url = f"{WEBHOOK_URL}/telegram_webhook/{TELEGRAM_TOKEN}"
-    resp = requests.get(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
-        params={"url": url}
-    )
-    logger.info(f"Webhook set resp: {resp.text}")
+    if not TELEGRAM_TOKEN or not WEBHOOK_URL:
+        logger.error("❌ TELEGRAM_TOKEN or WEBHOOK_URL is missing! WEBHOOK_URL must be the base domain (no path).")
+        return
+
+    base = WEBHOOK_URL.rstrip("/")
+
+    # Якщо користувач випадково вказав вже повний шлях або токен — використаємо як є
+    if base.endswith(f"/telegram_webhook/{TELEGRAM_TOKEN}"):
+        final_url = base
+    elif base.endswith("/telegram_webhook"):
+        final_url = f"{base}/{TELEGRAM_TOKEN}"
+    elif "/telegram_webhook/" in base:
+        # має /telegram_webhook/<something> — вважаймо, що там вже правильний шлях
+        final_url = base
+    else:
+        final_url = f"{base}/telegram_webhook/{TELEGRAM_TOKEN}"
+
+    api_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+    try:
+        resp = requests.get(f"{api_base}/setWebhook", params={"url": final_url}, timeout=10)
+        info = requests.get(f"{api_base}/getWebhookInfo", timeout=10).json()
+        logger.info("Webhook set to: %s", final_url)
+        logger.info("setWebhook resp: %s", resp.text if resp is not None else "None")
+        logger.info("getWebhookInfo: %s", info)
+    except Exception as e:
+        logger.exception("Webhook setup error: %s", e)
 
 # ---------------- MAIN ----------------
 if __name__=="__main__":
