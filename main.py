@@ -257,33 +257,12 @@ def analyze_and_alert(symbol: str):
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
-# ---------------- GET ALL USDT SYMBOLS ----------------
-def get_all_usdt_symbols():
-    try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        symbols = []
-        if "symbols" in data:
-            symbols = [
-                s["symbol"] for s in data["symbols"]
-                if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
-            ]
-            logger.info("Fetched %d USDT symbols", len(symbols))
-        else:
-            logger.warning("Binance exchangeInfo returned no 'symbols' key")
-        return symbols
-    except requests.HTTPError as e:
-        logger.error(f"HTTP error fetching USDT symbols: {e}")
-    except Exception as e:
-        logger.exception(f"Error fetching USDT symbols: {e}")
-    return []
-
 # ---------------- MASTER SCAN ----------------
+# замість REST
 def scan_all_symbols():
-    symbols = get_all_usdt_symbols()
+    symbols = list(ws_manager.data.keys())  # беремо символи з WebSocket
     if not symbols:
+        logger.warning("No symbols loaded from WebSocket")
         return
 
     logger.info("Starting scan for %d symbols", len(symbols))
