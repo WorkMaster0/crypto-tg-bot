@@ -239,12 +239,24 @@ def analyze_and_alert(symbol: str):
         return
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
-    prev_signal = state["signals"].get(symbol, "")
+    prev_signal = state["signals"].get(symbol, {})
+
+    # Визначення стопу і тейку
+    stop_loss = None
+    take_profit = None
+    if action == "LONG":
+        stop_loss = last["support"] * 0.995
+        take_profit = last["resistance"] * 0.995
+    elif action == "SHORT":
+        stop_loss = last["resistance"] * 1.005
+        take_profit = last["support"] * 1.005
+
     logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-        symbol, action, confidence, votes, pretop
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s stop=%.6f tp=%.6f",
+        symbol, action, confidence, votes, pretop, stop_loss or 0, take_profit or 0
     )
-    if action != "WATCH" and confidence >= 0.6 and action != prev_signal:
+
+    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal.get("action"):
         signal_reasons = []
         if "fake_breakout_short" in votes or "fake_breakout_long" in votes:
             signal_reasons.append("Fake Breakout")
@@ -252,19 +264,35 @@ def analyze_and_alert(symbol: str):
             signal_reasons.append("Pre-Top")
         if not signal_reasons:
             signal_reasons = ["Other patterns"]
+
         msg = (
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
             f"Price: {last['close']:.6f}\n"
+            f"Support: {last['support']:.6f}\n"
+            f"Resistance: {last['resistance']:.6f}\n"
+            f"Stop-Loss: {stop_loss:.6f}\n"
+            f"Take-Profit: {take_profit:.6f}\n"
             f"Confidence: {confidence:.2f}\n"
             f"Reasons: {','.join(signal_reasons)}\n"
             f"Patterns: {','.join(votes)}\n"
             f"Time: {last.name}\n"
         )
+
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
-        state["signals"][symbol] = action
+
+        # Зберігаємо сигнал у стані
+        state["signals"][symbol] = {
+            "action": action,
+            "stop": stop_loss,
+            "tp": take_profit,
+            "confidence": confidence,
+            "last_price": last["close"],
+            "votes": votes,
+            "time": str(last.name)
+        }
         save_json_safe(STATE_FILE, state)
 
 # ---------------- MASTER SCAN ----------------
