@@ -4,18 +4,20 @@ import pandas as pd
 import websockets
 import logging
 import os
+from itertools import islice
 
 logger = logging.getLogger("ws-manager")
 
 class WebSocketKlineManager:
-    def __init__(self, symbols, interval="15m", state_dir="ws_data"):
+    def __init__(self, symbols, interval="15m", state_dir="ws_data", batch_size=50):
         self.symbols = [s.upper() for s in symbols]
         self.interval = interval
         self.state_dir = state_dir
+        self.batch_size = batch_size
         os.makedirs(state_dir, exist_ok=True)
         self.data = {}
 
-        # завантаження історії з диска
+        # Завантаження історії з диска
         for sym in self.symbols:
             path = os.path.join(state_dir, f"{sym}.parquet")
             if os.path.exists(path):
@@ -29,8 +31,8 @@ class WebSocketKlineManager:
             else:
                 self.data[sym] = pd.DataFrame(columns=["open","high","low","close","volume"])
 
-    async def _subscribe(self):
-        streams = "/".join([f"{s.lower()}@kline_{self.interval}" for s in self.symbols])
+    async def _subscribe_batch(self, batch_symbols):
+        streams = "/".join([f"{s.lower()}@kline_{self.interval}" for s in batch_symbols])
         url = f"wss://stream.binance.com:9443/stream?streams={streams}"
         while True:
             try:
@@ -65,9 +67,12 @@ class WebSocketKlineManager:
             logger.error(f"[DISK] Failed to save {symbol}: {e}")
 
     def start(self):
+        # Розбиваємо символи на батчі
+        batches = [self.symbols[i:i+self.batch_size] for i in range(0, len(self.symbols), self.batch_size)]
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._subscribe())
+        tasks = [self._subscribe_batch(batch) for batch in batches]
+        loop.run_until_complete(asyncio.gather(*tasks))
 
     def get_klines(self, symbol, limit=500):
         df = self.data.get(symbol.upper())
