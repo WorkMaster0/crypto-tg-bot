@@ -1,13 +1,6 @@
-# main_render_ws_safe.py — Pre-top бот + Flask для Render
-import os
-import json
-import logging
-import re
+# main_render_ws_full.py
+import os, json, logging, re, threading, time, io
 from datetime import datetime, timezone
-import threading
-import time
-import io
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import ta
@@ -16,28 +9,24 @@ from scipy.signal import find_peaks
 import numpy as np
 import websocket
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 # ---------------- CONFIG ----------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 CONF_THRESHOLD_MEDIUM = 0.60
 PORT = int(os.getenv("PORT", "10000"))
-STATE_FILE = "state_render_ws.json"
-LOG_FILE = "bot_render_ws_safe.log"
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("Telegram token and Chat ID must be set in environment variables!")
+STATE_FILE = "state_render_ws.json"
+LOG_FILE = "bot_render_ws.log"
 
 # ---------------- LOGGING ----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
-)
-logger = logging.getLogger("pretop-bot-render-ws-safe")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s",
+                    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
+logger = logging.getLogger("pretop-bot-render-ws")
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -68,22 +57,25 @@ def escape_md_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
 
 def send_telegram(text: str, photo=None):
-    """Відправка сигналу тільки через твій токен і Chat ID"""
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
     try:
-        logger.info("Sending Telegram: %s", text)
         if photo:
             files = {'photo': ('signal.png', photo, 'image/png')}
             data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
-            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                                 data=data, files=files, timeout=10)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=10)
         else:
             payload = {"chat_id": CHAT_ID, "text": escape_md_v2(text), "parse_mode": "MarkdownV2"}
-            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                 json=payload, timeout=10)
-        if resp.status_code != 200:
-            logger.warning("Telegram API response: %s - %s", resp.status_code, resp.text)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
+
+def set_telegram_webhook(url: str):
+    try:
+        resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
+        logger.info("Webhook set response: %s", resp.text)
+    except Exception as e:
+        logger.exception("Failed to set Telegram webhook: %s", e)
 
 # ---------------- MARKET DATA ----------------
 def get_all_usdt_symbols():
@@ -119,37 +111,25 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 def detect_signal(df: pd.DataFrame):
     if len(df)<2: return "WATCH",[],False,None,0.0
     last=df.iloc[-1]; votes=[]; confidence=0.2
-
-    # EMA
     if last["ema_8"]>last["ema_20"]: votes.append("ema_bull"); confidence+=0.1
     else: votes.append("ema_bear"); confidence+=0.05
-    # MACD
     if last["MACD_hist"]>0: votes.append("macd_up"); confidence+=0.1
     else: votes.append("macd_down"); confidence+=0.05
-    # RSI
     if last["RSI_14"]<30: votes.append("rsi_oversold"); confidence+=0.08
     elif last["RSI_14"]>70: votes.append("rsi_overbought"); confidence+=0.08
-    # ADX
     if last["ADX"]>25: votes.append("strong_trend"); confidence*=1.1
-
-    # Свічкові патерни
     body=last["close"]-last["open"]; rng=last["high"]-last["low"]
     upper_shadow=last["high"]-max(last["close"],last["open"])
     lower_shadow=min(last["close"],last["open"])-last["low"]; candle_bonus=1.0
-
     if lower_shadow>2*abs(body) and body>0: votes.append("hammer_bull"); candle_bonus=1.2
     elif upper_shadow>2*abs(body) and body<0: votes.append("shooting_star"); candle_bonus=1.2
     if abs(body)<0.1*rng: votes.append("doji"); candle_bonus=1.1
-
-    # Pre-top
     pretop=False
     if len(df)>=10 and (last["close"]-df["close"].iloc[-10])/df["close"].iloc[-10]>0.1:
         pretop=True; votes.append("pretop"); confidence+=0.1
-
     action="WATCH"
     if last["close"]>=last["resistance"]*0.995: action="SHORT"
     elif last["close"]<=last["support"]*1.005: action="LONG"
-
     confidence*=candle_bonus; confidence=max(0,min(1,confidence))
     return action,votes,pretop,last,confidence
 
@@ -188,18 +168,15 @@ def plot_signal(df,symbol,action,votes,pretop):
     top_supports=sorted(trough_vals)[:5]
     hlines=list(top_supports)+list(top_resistances)
     addplots=[]
-
     last=df.iloc[-1]
     if pretop:
         ydata=[np.nan]*(len(df)-3)+list(df['close'].iloc[-3:])
         addplots.append(mpf.make_addplot(ydata,type='scatter',markersize=120,marker='^',color='magenta'))
-
-    patterns={"hammer_bull":"lime","shooting_star":"orange","doji":"blue"}
+    patterns={"bullish_engulfing":"green","bearish_engulfing":"red","hammer_bull":"lime","shooting_star":"orange","doji":"blue"}
     for pat,color in patterns.items():
         if pat in votes:
             ydata=[np.nan]*(len(df)-1)+[last['close']]
             addplots.append(mpf.make_addplot(ydata,type='scatter',markersize=80,marker='o',color=color))
-
     mc=mpf.make_marketcolors(up='green',down='red',wick='black',edge='black',volume='blue')
     s=mpf.make_mpf_style(marketcolors=mc,gridstyle='--',gridcolor='gray',facecolor='white')
     buf=io.BytesIO()
@@ -213,7 +190,6 @@ def plot_signal(df,symbol,action,votes,pretop):
 
 # ---------------- WEBSOCKET ----------------
 symbol_dfs={}; lock=threading.Lock()
-
 def on_message(ws,msg):
     data=json.loads(msg); k=data.get("k"); s=data.get("s")
     if not k: return
@@ -247,6 +223,11 @@ def start_ws(symbols):
 flask_app=Flask(__name__)
 @flask_app.route("/")
 def home(): return jsonify({"status":"ok","time":str(datetime.now(timezone.utc))})
+@flask_app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    data = request.get_json()
+    logger.info("Webhook POST received: %s", data)
+    return jsonify({"status":"ok"})
 def run_flask(): flask_app.run(host="0.0.0.0", port=PORT)
 
 # ---------------- START BOT ----------------
@@ -257,7 +238,13 @@ def start_bot():
     threading.Thread(target=start_ws,args=(symbols,),daemon=True).start()
 
 if __name__=="__main__":
-    logger.info("Starting FULL pre-top WebSocket bot + Flask for Render port (SAFE)")
+    logger.info("Starting FULL pre-top WebSocket bot + Flask for Render port")
+    # Flask
     threading.Thread(target=run_flask, daemon=True).start()
+    # Telegram webhook
+    if TELEGRAM_TOKEN:
+        webhook_url = f"https://YOUR_RENDER_APP_URL/telegram_webhook/{TELEGRAM_TOKEN}"
+        set_telegram_webhook(webhook_url)
+    # Start bot
     start_bot()
     while True: time.sleep(1)
