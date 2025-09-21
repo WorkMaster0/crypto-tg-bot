@@ -223,7 +223,7 @@ def detect_signal(df: pd.DataFrame):
 # ---------------- PLOT SIGNAL ----------------
 def plot_signal_candles(df, symbol, action, votes, pretop):
     fig, ax = mpf.plot(
-        df.tail(50), type='candle', style='yahoo',
+        df.tail(500), type='candle', style='yahoo',
         title=f"{symbol} - {action}", returnfig=True
     )
     buf = io.BytesIO()
