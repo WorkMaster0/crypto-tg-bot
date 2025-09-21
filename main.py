@@ -30,7 +30,7 @@ PORT = int(os.getenv("PORT", "5000"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 EMA_SCAN_LIMIT = 500
 STATE_FILE = "state.json"
-CONF_THRESHOLD_MEDIUM = 0.50
+CONF_THRESHOLD_MEDIUM = 0.40
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
