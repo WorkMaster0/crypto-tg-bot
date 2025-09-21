@@ -30,7 +30,7 @@ PORT = int(os.getenv("PORT", "5000"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 EMA_SCAN_LIMIT = 500
 STATE_FILE = "state.json"
-CONF_THRESHOLD_MEDIUM = 0.40
+CONF_THRESHOLD_MEDIUM = 0.55
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -78,7 +78,7 @@ def send_telegram(text: str, photo=None):
 from websocket_manager import WebSocketKlineManager
 
 ALL_USDT = [
-    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","MATICUSDT",
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT",
     "DOTUSDT","TRXUSDT","LTCUSDT","AVAXUSDT","SHIBUSDT","LINKUSDT","ATOMUSDT","XMRUSDT",
     "ETCUSDT","XLMUSDT","APTUSDT","NEARUSDT","FILUSDT","ICPUSDT","GRTUSDT","AAVEUSDT",
     "SANDUSDT","AXSUSDT","FTMUSDT","THETAUSDT","EGLDUSDT","MANAUSDT","FLOWUSDT","HBARUSDT",
@@ -88,15 +88,15 @@ ALL_USDT = [
     "LOKUSDT","GALUSDT","WLDUSDT","JASMYUSDT","ONEUSDT","ARBUSDT","ALICEUSDT","XECUSDT",
     "FLMUSDT","CAKEUSDT","IMXUSDT","HOOKUSDT","MAGICUSDT","STGUSDT","FETUSDT",
     "PEOPLEUSDT","ASTRUSDT","ENSUSDT","CTSIUSDT","GALAUSDT","RADUSDT","IOSTUSDT","QTUMUSDT",
-    "NPXSUSDT","DASHUSDT","ZRXUSDT","HNTUSDT","ENJUSDT","TFUELUSDT","KLAYUSDT","TWTUSDT",
+    "NPXSUSDT","DASHUSDT","ZRXUSDT","HNTUSDT","ENJUSDT","TFUELUSDT","TWTUSDT",
     "NKNUSDT","GLMRUSDT","ZENUSDT","STORJUSDT","ICXUSDT","XVGUSDT","FLOKIUSDT","BONEUSDT",
     "TRBUSDT","C98USDT","MASKUSDT","1000SHIBUSDT","1000PEPEUSDT","AMBUSDT","VEGUSDT","QNTUSDT",
     "RNDRUSDT","CHRUSDT","API3USDT","MTLUSDT","ALPUSDT","LDOUSDT","AXLUSDT","FUNUSDT",
-    "OGUSDT","ORCUSDT","XAUTUSDT","ARUSDT","DYDXUSDT","RUNEUSDT","FLUXUSDT","AGIXUSDT",
-    "AGLDUSDT","PERPUSDT","STMXUSDT","MLNUSDT","NMRUSDT","LRCUSDT","COTIUSDT","ACHUSDT",
-    "CKBUSDT","ACEUSDT","TRUUSDT","IPSUSDT","QIUSDT","GLMUSDT","ARNXUSDT","PORTOUSDT",
-    "MIRUSDT","ROSEUSDT","OXTUSDT","SPELLUSDT","STRAXUSDT","SUNUSDT","SYSUSDT","TAOUSDT",
-    "TLMUSDT","VLXUSDT","WAXPUSDT","XNOUSDT","XEMUSDT"
+    "OGUSDT","ORCUSDT","XAUTUSDT","ARUSDT","DYDXUSDT","RUNEUSDT","FLUXUSDT",
+    "AGLDUSDT","PERPUSDT","MLNUSDT","NMRUSDT","LRCUSDT","COTIUSDT","ACHUSDT",
+    "CKBUSDT","ACEUSDT","TRUUSDT","IPSUSDT","QIUSDT","GLMUSDT","ARNXUSDT",
+    "MIRUSDT","ROSEUSDT","OXTUSDT","SPELLUSDT","SUNUSDT","SYSUSDT","TAOUSDT",
+    "TLMUSDT","VLXUSDT","WAXPUSDT","XNOUSDT"
 ]
 
 BINANCE_REST_URL = "https://fapi.binance.com/fapi/v1/klines"
@@ -270,14 +270,11 @@ def analyze_and_alert(symbol: str):
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
             f"Price: {last['close']:.6f}\n"
-            f"Support: {last['support']:.6f}\n"
-            f"Resistance: {last['resistance']:.6f}\n"
             f"Stop-Loss: {stop_loss:.6f}\n"
             f"Take-Profit: {take_profit:.6f}\n"
             f"Confidence: {confidence:.2f}\n"
             f"Reasons: {','.join(signal_reasons)}\n"
             f"Patterns: {','.join(votes)}\n"
-            f"Time: {last.name}\n"
         )
 
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
@@ -291,7 +288,6 @@ def analyze_and_alert(symbol: str):
             "confidence": confidence,
             "last_price": last["close"],
             "votes": votes,
-            "time": str(last.name)
         }
         save_json_safe(STATE_FILE, state)
 
