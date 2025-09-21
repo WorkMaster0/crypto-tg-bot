@@ -1,4 +1,4 @@
-# bot_ws_only.py — Pre-top бот без Flask/Gunicorn
+# bot_ws_full.py — Pre-top бот з повним аналізом, графіками та WebSocket
 import os
 import json
 import logging
@@ -22,10 +22,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
-
-STATE_FILE = "state.json"
-LOG_FILE = "bot_ws_only.log"
 CONF_THRESHOLD_MEDIUM = 0.60
+CONF_THRESHOLD_STRONG = 0.8
+
+STATE_FILE = "state_ws_full.json"
+LOG_FILE = "bot_ws_full.log"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -33,7 +34,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
-logger = logging.getLogger("pretop-bot-ws-only")
+logger = logging.getLogger("pretop-bot-ws-full")
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -82,9 +83,9 @@ def get_all_usdt_symbols():
     try:
         url = "https://api.binance.com/api/v3/exchangeInfo"
         ex = requests.get(url, timeout=10).json()
-        symbols = [s["symbol"] for s in ex["symbols"] if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
-        blacklist = ["BUSD","USDC","FDUSD","TUSD","DAI","EUR","GBP","AUD"]
-        filtered = [s for s in symbols if not any(b in s for b in blacklist)]
+        symbols = [s["symbol"] for s in ex["symbols"] if s["quoteAsset"]=="USDT" and s["status"]=="TRADING"]
+        blacklist=["BUSD","USDC","FDUSD","TUSD","DAI","EUR","GBP","AUD"]
+        filtered=[s for s in symbols if not any(b in s for b in blacklist)]
         return filtered[:TOP_LIMIT]
     except Exception as e:
         logger.exception("get_all_usdt_symbols error: %s", e)
@@ -107,19 +108,24 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
         logger.exception("apply_all_features error: %s", e)
     return df
 
-# ---------------- SIGNAL ----------------
+# ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
-    if len(df) < 2: return "WATCH", [], False, None, 0.0
-    last = df.iloc[-1]; prev = df.iloc[-2]; votes=[]; confidence=0.2
+    if len(df)<2: return "WATCH",[],False,None,0.0
+    last=df.iloc[-1]; prev=df.iloc[-2]; votes=[]; confidence=0.2
 
-    if last["ema_8"] > last["ema_20"]: votes.append("ema_bull"); confidence+=0.1
+    # EMA
+    if last["ema_8"]>last["ema_20"]: votes.append("ema_bull"); confidence+=0.1
     else: votes.append("ema_bear"); confidence+=0.05
+    # MACD
     if last["MACD_hist"]>0: votes.append("macd_up"); confidence+=0.1
     else: votes.append("macd_down"); confidence+=0.05
+    # RSI
     if last["RSI_14"]<30: votes.append("rsi_oversold"); confidence+=0.08
     elif last["RSI_14"]>70: votes.append("rsi_overbought"); confidence+=0.08
+    # ADX
     if last["ADX"]>25: votes.append("strong_trend"); confidence*=1.1
 
+    # Свічкові патерни
     body=last["close"]-last["open"]; rng=last["high"]-last["low"]
     upper_shadow=last["high"]-max(last["close"],last["open"])
     lower_shadow=min(last["close"],last["open"])-last["low"]; candle_bonus=1.0
@@ -128,8 +134,10 @@ def detect_signal(df: pd.DataFrame):
     elif upper_shadow>2*abs(body) and body<0: votes.append("shooting_star"); candle_bonus=1.2
     if abs(body)<0.1*rng: votes.append("doji"); candle_bonus=1.1
 
+    # Pre-top
     pretop=False
-    if len(df)>=10 and (last["close"]-df["close"].iloc[-10])/df["close"].iloc[-10]>0.1: pretop=True; votes.append("pretop"); confidence+=0.1
+    if len(df)>=10 and (last["close"]-df["close"].iloc[-10])/df["close"].iloc[-10]>0.1:
+        pretop=True; votes.append("pretop"); confidence+=0.1
 
     action="WATCH"
     if last["close"]>=last["resistance"]*0.995: action="SHORT"
@@ -138,11 +146,70 @@ def detect_signal(df: pd.DataFrame):
     confidence*=candle_bonus; confidence=max(0,min(1,confidence))
     return action,votes,pretop,last,confidence
 
+# ---------------- BACKTEST WINRATE ----------------
+def backtest_winrate(df: pd.DataFrame):
+    df=apply_all_features(df)
+    results=[]
+    for i in range(1,len(df)):
+        sub=df.iloc[:i+1]
+        action,votes,pretop,last,conf=detect_signal(sub)
+        if action in ["LONG","SHORT"]:
+            entry=last["close"]
+            support=last["support"]; resistance=last["resistance"]
+            win=False; lose=False
+            if action=="LONG":
+                win=(df["high"].iloc[i:]>=resistance).any()
+                lose=(df["low"].iloc[i:]<=entry-0.5*(resistance-entry)).any()
+            else:
+                win=(df["low"].iloc[i:]<=support).any()
+                lose=(df["high"].iloc[i:]>=entry+0.5*(entry-support)).any()
+            results.append((action,win,lose))
+    total=len(results)
+    wins=sum(1 for _,w,l in results if w)
+    return wins/total if total>0 else 0, results
+
+# ---------------- PLOT ----------------
+def plot_signal(df,symbol,action,votes,pretop):
+    df_plot=df.copy()[['open','high','low','close','volume']]
+    df_plot.index.name="Date"
+    closes=df['close'].values
+    peaks,_=find_peaks(closes,distance=5)
+    peak_vals=closes[peaks]
+    top_resistances=sorted(peak_vals, reverse=True)[:5]
+    troughs,_=find_peaks(-closes,distance=5)
+    trough_vals=closes[troughs]
+    top_supports=sorted(trough_vals)[:5]
+    hlines=list(top_supports)+list(top_resistances)
+    addplots=[]
+
+    last=df.iloc[-1]
+    if pretop:
+        ydata=[np.nan]*(len(df)-3)+list(df['close'].iloc[-3:])
+        addplots.append(mpf.make_addplot(ydata,type='scatter',markersize=120,marker='^',color='magenta'))
+
+    patterns={"bullish_engulfing":"green","bearish_engulfing":"red","hammer_bull":"lime","shooting_star":"orange","doji":"blue"}
+    for pat,color in patterns.items():
+        if pat in votes:
+            ydata=[np.nan]*(len(df)-1)+[last['close']]
+            addplots.append(mpf.make_addplot(ydata,type='scatter',markersize=80,marker='o',color=color))
+
+    mc=mpf.make_marketcolors(up='green',down='red',wick='black',edge='black',volume='blue')
+    s=mpf.make_mpf_style(marketcolors=mc,gridstyle='--',gridcolor='gray',facecolor='white')
+    buf=io.BytesIO()
+    mpf.plot(df_plot,type='candle',style=s,volume=True,addplot=addplots,
+             hlines=dict(hlines=hlines,colors=['gray'],linestyle='dashed'),
+             title=f"{symbol} — {action} — {','.join(votes)}",
+             ylabel='Price',ylabel_lower='Volume',
+             savefig=dict(fname=buf,dpi=100,bbox_inches='tight'))
+    buf.seek(0)
+    return buf
+
 # ---------------- WEBSOCKET ----------------
-symbol_dfs = {}; lock=threading.Lock()
+symbol_dfs={}; lock=threading.Lock()
+
 def on_message(ws,msg):
     import json
-    data=json.loads(msg); k=data.get("k"); s=data.get("s"); 
+    data=json.loads(msg); k=data.get("k"); s=data.get("s")
     if not k: return
     candle_closed=k["x"]; open_,high,low,close,vol=float(k["o"]),float(k["h"]),float(k["l"]),float(k["c"]),float(k["v"])
     ts=pd.to_datetime(k["t"],unit="ms",utc=True)
@@ -154,7 +221,9 @@ def on_message(ws,msg):
         action,votes,pretop,last,conf=detect_signal(df_features)
         prev=state["signals"].get(s,"")
         if pretop or (action!="WATCH" and conf>=CONF_THRESHOLD_MEDIUM and action!=prev):
-            send_telegram(f"⚡ {s} {action} price={last['close']:.6f} conf={conf:.2f} pretop={pretop}")
+            winrate,_=backtest_winrate(df)
+            buf=plot_signal(df,s,action,votes,pretop)
+            send_telegram(f"⚡ {s} {action} price={last['close']:.6f} conf={conf:.2f} pretop={pretop} winrate={winrate*100:.1f}%", photo=buf)
             state["signals"][s]=action; state["last_update"]=str(datetime.now(timezone.utc)); save_json_safe(STATE_FILE,state)
 
 def on_error(ws,err): logger.error("WebSocket error: %s",err)
@@ -176,6 +245,6 @@ def start_bot():
     threading.Thread(target=start_ws,args=(symbols,),daemon=True).start()
 
 if __name__=="__main__":
-    logger.info("Starting pre-top WebSocket bot (no Flask/Gunicorn)")
+    logger.info("Starting FULL pre-top WebSocket bot")
     start_bot()
     while True: time.sleep(1)
