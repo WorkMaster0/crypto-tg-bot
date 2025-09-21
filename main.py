@@ -116,11 +116,16 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
+    """
+    Повертає: action, votes, pretop, last_row, confidence
+    Сигнал відправляється лише коли fake breakout або pretop.
+    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
     confidence = 0.2
 
+    # ----- EMA -----
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
@@ -128,6 +133,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("ema_bear")
         confidence += 0.05
 
+    # ----- MACD -----
     if last["MACD_hist"] > 0:
         votes.append("macd_up")
         confidence += 0.1
@@ -135,6 +141,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("macd_down")
         confidence += 0.05
 
+    # ----- RSI -----
     if last["RSI_14"] < 30:
         votes.append("rsi_oversold")
         confidence += 0.08
@@ -142,11 +149,12 @@ def detect_signal(df: pd.DataFrame):
         votes.append("rsi_overbought")
         confidence += 0.08
 
+    # ----- ADX -----
     if last["ADX"] > 25:
         votes.append("strong_trend")
         confidence *= 1.1
 
-    # Свічкові патерни
+    # ----- Свічкові патерни -----
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
@@ -173,15 +181,27 @@ def detect_signal(df: pd.DataFrame):
 
     confidence *= candle_bonus
 
-    # Pre-top
+    # ----- Fake breakout -----
+    fake_breakout = False
+    if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
+        votes.append("fake_breakout_short")
+        confidence += 0.15
+        fake_breakout = True
+    elif last["close"] < last["support"] * 1.005 and last["close"] > last["support"] * 0.99:
+        votes.append("fake_breakout_long")
+        confidence += 0.15
+        fake_breakout = True
+
+    # ----- Pre-top -----
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
         if (recent - last10) / last10 > 0.1:
             pretop = True
-            confidence += 0.1
             votes.append("pretop")
+            confidence += 0.1
 
+    # ----- Action -----
     action = "WATCH"
     if last["close"] >= last["resistance"] * 0.995:
         action = "SHORT"
@@ -189,6 +209,11 @@ def detect_signal(df: pd.DataFrame):
         action = "LONG"
 
     confidence = max(0, min(1, confidence))
+
+    # Відправка сигналу тільки якщо є fake breakout або pretop
+    if not (fake_breakout or pretop):
+        action = "WATCH"
+
     return action, votes, pretop, last, confidence
 
 # ---------------- ANALYZE SYMBOL ----------------
@@ -196,28 +221,43 @@ def analyze_and_alert(symbol: str):
     df = fetch_klines(symbol)
     if df is None or len(df) < 30:
         return
+
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
     prev_signal = state["signals"].get(symbol, "")
 
-    logger.info("Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
-                symbol, action, confidence, [v for v in votes], pretop)
+    logger.info(
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s",
+        symbol, action, confidence, [v for v in votes], pretop
+    )
 
-    if pretop:
-        send_telegram(f"⚡ Pre-top detected for {symbol}, price={last['close']:.6f}")
+    # Відправка сигналу тільки при confidence >= 0.6 і наявності fake breakout або pretop
+    if action != "WATCH" and confidence >= 0.6 and action != prev_signal:
+        # Формуємо зрозуміле повідомлення
+        signal_reasons = []
+        if "fake_breakout_short" in votes or "fake_breakout_long" in votes:
+            signal_reasons.append("Fake Breakout")
+        if pretop:
+            signal_reasons.append("Pre-Top")
+        if not signal_reasons:
+            signal_reasons = ["Other patterns"]
 
-    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal:
         msg = (
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
             f"Price: {last['close']:.6f}\n"
             f"Confidence: {confidence:.2f}\n"
+            f"Reasons: {','.join(signal_reasons)}\n"
             f"Patterns: {','.join(votes)}\n"
-            f"Pre-top: {pretop}\n"
             f"Time: {last.name}\n"
         )
-        send_telegram(msg)
+
+        # Створюємо графік з підсвічуванням сигналів
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
+        send_telegram(msg, photo=photo_buf)
+
+        # Зберігаємо останній сигнал у state
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
