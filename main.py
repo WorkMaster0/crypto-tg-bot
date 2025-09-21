@@ -79,16 +79,22 @@ def send_telegram(text: str, photo=None):
 from websocket_manager import WebSocketKlineManager
 from threading import Thread
 
-# Ініціалізація WebSocket для ВСІХ USDT символів
-ws_manager = WebSocketKlineManager(interval="15m")
+# Список монет, які слухаємо через WebSocket
+ALL_USDT = [
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","MATICUSDT",
+    "DOTUSDT","TRXUSDT","LTCUSDT","AVAXUSDT","SHIBUSDT","LINKUSDT","ATOMUSDT","XMRUSDT",
+    "ETCUSDT","XLMUSDT","APTUSDT","NEARUSDT","FILUSDT","ICPUSDT","GRTUSDT","AAVEUSDT",
+    "SANDUSDT","AXSUSDT","FTMUSDT","THETAUSDT","EGLDUSDT","MANAUSDT","FLOWUSDT","HBARUSDT",
+]
 
-# Поступове завантаження історії всіх символів через REST, щоб не банили
-Thread(target=ws_manager.load_history_all, daemon=True).start()
+# Ініціалізація WebSocket (батчами по 100 символів)
+ws_manager = WebSocketKlineManager(symbols=ALL_USDT, interval="15m", batch_size=100)
 
-# Старт WebSocket
+# Запуск WebSocket у окремому потоці
 Thread(target=ws_manager.start, daemon=True).start()
 
-def fetch_klines(symbol, limit=EMA_SCAN_LIMIT):
+# Використовуємо цю функцію для отримання свічок
+def fetch_klines(symbol, limit=500):
     return ws_manager.get_klines(symbol, limit)
 
 # ---------------- FEATURE ENGINEERING ----------------
