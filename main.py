@@ -1,4 +1,4 @@
-# main_render_ws.py — Pre-top бот + Flask для Render
+# main_render_ws_safe.py — Pre-top бот + Flask для Render
 import os
 import json
 import logging
@@ -19,15 +19,17 @@ import requests
 from flask import Flask, jsonify
 
 # ---------------- CONFIG ----------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
 TOP_LIMIT = int(os.getenv("TOP_LIMIT", "100"))
 EMA_SCAN_LIMIT = int(os.getenv("EMA_SCAN_LIMIT", "500"))
 CONF_THRESHOLD_MEDIUM = 0.60
-
 PORT = int(os.getenv("PORT", "10000"))
 STATE_FILE = "state_render_ws.json"
-LOG_FILE = "bot_render_ws.log"
+LOG_FILE = "bot_render_ws_safe.log"
+
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise ValueError("Telegram token and Chat ID must be set in environment variables!")
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -35,7 +37,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
-logger = logging.getLogger("pretop-bot-render-ws")
+logger = logging.getLogger("pretop-bot-render-ws-safe")
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -66,16 +68,20 @@ def escape_md_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
 
 def send_telegram(text: str, photo=None):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
+    """Відправка сигналу тільки через твій токен і Chat ID"""
     try:
+        logger.info("Sending Telegram: %s", text)
         if photo:
             files = {'photo': ('signal.png', photo, 'image/png')}
             data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=10)
+            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                                 data=data, files=files, timeout=10)
         else:
             payload = {"chat_id": CHAT_ID, "text": escape_md_v2(text), "parse_mode": "MarkdownV2"}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
+            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                 json=payload, timeout=10)
+        if resp.status_code != 200:
+            logger.warning("Telegram API response: %s - %s", resp.status_code, resp.text)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
@@ -112,7 +118,7 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------- SIGNAL ----------------
 def detect_signal(df: pd.DataFrame):
     if len(df)<2: return "WATCH",[],False,None,0.0
-    last=df.iloc[-1]; prev=df.iloc[-2]; votes=[]; confidence=0.2
+    last=df.iloc[-1]; votes=[]; confidence=0.2
 
     # EMA
     if last["ema_8"]>last["ema_20"]: votes.append("ema_bull"); confidence+=0.1
@@ -188,7 +194,7 @@ def plot_signal(df,symbol,action,votes,pretop):
         ydata=[np.nan]*(len(df)-3)+list(df['close'].iloc[-3:])
         addplots.append(mpf.make_addplot(ydata,type='scatter',markersize=120,marker='^',color='magenta'))
 
-    patterns={"bullish_engulfing":"green","bearish_engulfing":"red","hammer_bull":"lime","shooting_star":"orange","doji":"blue"}
+    patterns={"hammer_bull":"lime","shooting_star":"orange","doji":"blue"}
     for pat,color in patterns.items():
         if pat in votes:
             ydata=[np.nan]*(len(df)-1)+[last['close']]
@@ -209,7 +215,6 @@ def plot_signal(df,symbol,action,votes,pretop):
 symbol_dfs={}; lock=threading.Lock()
 
 def on_message(ws,msg):
-    import json
     data=json.loads(msg); k=data.get("k"); s=data.get("s")
     if not k: return
     candle_closed=k["x"]; open_,high,low,close,vol=float(k["o"]),float(k["h"]),float(k["l"]),float(k["c"]),float(k["v"])
@@ -238,7 +243,7 @@ def start_ws(symbols):
     ws=websocket.WebSocketApp(url,on_open=on_open,on_message=on_message,on_error=on_error,on_close=on_close)
     ws.run_forever(ping_interval=20,ping_timeout=10)
 
-# ---------------- FLASK (для Render порту) ----------------
+# ---------------- FLASK ----------------
 flask_app=Flask(__name__)
 @flask_app.route("/")
 def home(): return jsonify({"status":"ok","time":str(datetime.now(timezone.utc))})
@@ -252,9 +257,7 @@ def start_bot():
     threading.Thread(target=start_ws,args=(symbols,),daemon=True).start()
 
 if __name__=="__main__":
-    logger.info("Starting FULL pre-top WebSocket bot + Flask for Render port")
-    # Flask для Render
+    logger.info("Starting FULL pre-top WebSocket bot + Flask for Render port (SAFE)")
     threading.Thread(target=run_flask, daemon=True).start()
-    # WebSocket бот
     start_bot()
     while True: time.sleep(1)
