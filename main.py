@@ -1,4 +1,4 @@
-# main.py — Покращений Pre-top бот з патернами та фільтрацією
+# main.py — Pre-top бот з графіками, Telegram і backtest winrate
 import os
 import time
 import json
@@ -7,13 +7,16 @@ import re
 from datetime import datetime, timezone
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
+import io
 
 import pandas as pd
-import numpy as np
+import matplotlib.pyplot as plt
 import requests
 from flask import Flask, request, jsonify
-from apscheduler.schedulers.background import BackgroundScheduler
 import ta
+import mplfinance as mpf
+from scipy.signal import find_peaks
+import numpy as np
 
 # ---------------- BINANCE CLIENT ----------------
 try:
@@ -38,8 +41,8 @@ PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 STATE_FILE = "state.json"
 LOG_FILE = "bot.log"
 
-CONF_THRESHOLD_MEDIUM = 0.43
-CONF_THRESHOLD_STRONG = 0.58
+CONF_THRESHOLD_MEDIUM = 0.60
+CONF_THRESHOLD_STRONG = 0.80
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -51,7 +54,13 @@ logger = logging.getLogger("pretop-bot")
 
 # ---------------- BINANCE ----------------
 if BINANCE_PY_AVAILABLE and BINANCE_API_KEY and BINANCE_API_SECRET:
-    client = BinanceClient(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+    from requests import Session
+    session = Session()
+    client = BinanceClient(
+        api_key=BINANCE_API_KEY,
+        api_secret=BINANCE_API_SECRET,
+        requests_params={"timeout": 30}  # <- тут ставимо 30 секунд
+    )
 else:
     client = None
     logger.warning("Binance client unavailable or API keys missing")
@@ -71,6 +80,7 @@ def load_json_safe(path, default):
 
 def save_json_safe(path, data):
     try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -86,19 +96,22 @@ MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
 def escape_md_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
 
-def send_telegram(text: str):
+def send_telegram(text: str, photo=None):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": escape_md_v2(text),
-            "parse_mode": "MarkdownV2",
-            "disable_web_page_preview": True
-        }
-        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
-        if r.status_code != 200:
-            logger.error("Telegram send failed: %s %s", r.status_code, r.text)
+        if photo:
+            files = {'photo': ('signal.png', photo, 'image/png')}
+            data = {'chat_id': CHAT_ID, 'caption': escape_md_v2(text), 'parse_mode': 'MarkdownV2'}
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=10)
+        else:
+            payload = {
+                "chat_id": CHAT_ID,
+                "text": escape_md_v2(text),
+                "parse_mode": "MarkdownV2",
+                "disable_web_page_preview": True
+            }
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
@@ -113,18 +126,17 @@ def set_telegram_webhook(webhook_url: str):
 
 # ---------------- MARKET DATA ----------------
 def get_all_usdt_symbols():
-    """Отримати всі пари USDT, виключаючи стейбли та фондові токени"""
     if not client:
         return []
     try:
         ex = client.get_exchange_info()
         symbols = [
             s["symbol"] for s in ex["symbols"]
-if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
         ]
         blacklist = [
-            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD",
-            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG"
+            "BUSD", "USDC", "FDUSD", "TUSD", "DAI", "EUR", "GBP", "AUD", "STRAX", "GNS", "ALCX",
+            "BTCST", "COIN", "AAPL", "TSLA", "MSFT", "META", "GOOG", "USD1", "BTTC", "ARDR", "DF", "XNO"
         ]
         filtered = [s for s in symbols if not any(b in s for b in blacklist)]
         return filtered
@@ -175,9 +187,8 @@ def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
-    confidence = 0.2  # базовий рівень
+    confidence = 0.2
 
-    # === Трендові індикатори ===
     if last["ema_8"] > last["ema_20"]:
         votes.append("ema_bull")
         confidence += 0.1
@@ -203,7 +214,7 @@ def detect_signal(df: pd.DataFrame):
         votes.append("strong_trend")
         confidence *= 1.1
 
-    # === Свічкові патерни ===
+    # Свічкові патерни
     body = last["close"] - last["open"]
     rng = last["high"] - last["low"]
     upper_shadow = last["high"] - max(last["close"], last["open"])
@@ -228,24 +239,9 @@ def detect_signal(df: pd.DataFrame):
         votes.append("doji")
         candle_bonus = 1.1
 
-    if (
-prev["close"] < prev["open"]
-        and abs(body) > abs(prev["close"] - prev["open"])
-        and last["close"] > prev["open"]
-    ):
-        votes.append("morning_star")
-        candle_bonus = 1.3
-    elif (
-        prev["close"] > prev["open"]
-        and abs(body) > abs(prev["close"] - prev["open"])
-        and last["close"] < prev["open"]
-    ):
-        votes.append("evening_star")
-        candle_bonus = 1.3
-
     confidence *= candle_bonus
 
-    # === Сквіз (fake breakout) ===
+    # Fake breakout
     if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
         votes.append("fake_breakout_short")
         confidence += 0.15
@@ -253,7 +249,7 @@ prev["close"] < prev["open"]
         votes.append("fake_breakout_long")
         confidence += 0.15
 
-    # === Pre-top ===
+    # Pre-top
     pretop = False
     if len(df) >= 10:
         recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
@@ -270,6 +266,140 @@ prev["close"] < prev["open"]
 
     confidence = max(0, min(1, confidence))
     return action, votes, pretop, last, confidence
+
+# ---------------- BACKTEST WINRATE ----------------
+def backtest_winrate(df: pd.DataFrame, n_levels=5):
+    df = apply_all_features(df)
+    results = []
+
+    for i in range(1, len(df)):
+        sub_df = df.iloc[:i+1]
+        action, votes, pretop, last, conf = detect_signal(sub_df)
+        if action in ["LONG", "SHORT"]:
+            support = last["support"]
+            resistance = last["resistance"]
+            entry = last["close"]
+            win = False
+            lose = False
+            if action == "LONG":
+                win = (df["high"].iloc[i:] >= resistance).any()
+                lose = (df["low"].iloc[i:] <= entry - 0.5*(resistance-entry)).any()
+            else:  # SHORT
+                win = (df["low"].iloc[i:] <= support).any()
+                lose = (df["high"].iloc[i:] >= entry + 0.5*(entry-support)).any()
+            results.append((action, win, lose))
+
+    total_signals = len(results)
+    wins = sum(1 for _, w, l in results if w)
+    losses = sum(1 for _, w, l in results if l)
+    winrate = wins / total_signals if total_signals > 0 else 0
+    return winrate, results
+
+# ---------------- PLOT HISTORY ----------------
+def plot_history(df, symbol, n_levels=5):
+    df_plot = df.copy()[['open','high','low','close','volume']]
+    df_plot.index.name = "Date"
+
+    closes = df['close'].values
+    peaks, _ = find_peaks(closes, distance=5)
+    peak_vals = closes[peaks]
+    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
+
+    troughs, _ = find_peaks(-closes, distance=5)
+    trough_vals = closes[troughs]
+    top_supports = sorted(trough_vals)[:n_levels]
+
+    hlines = list(top_supports) + list(top_resistances)
+
+    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style=s,
+        volume=True,
+        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+        title=f"{symbol} — Signal History",
+        ylabel='Price',
+        ylabel_lower='Volume',
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+    )
+    buf.seek(0)
+    return buf
+
+# ---------------- PLOT SIGNAL CANDLES ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop, n_levels=5):
+    df_plot = df.copy()[['open','high','low','close','volume']]
+    df_plot.index.name = "Date"
+
+    closes = df['close'].values
+    peaks, _ = find_peaks(closes, distance=5)
+    peak_vals = closes[peaks]
+    top_resistances = sorted(peak_vals, reverse=True)[:n_levels]
+
+    troughs, _ = find_peaks(-closes, distance=5)
+    trough_vals = closes[troughs]
+    top_supports = sorted(trough_vals)[:n_levels]
+
+    hlines = list(top_supports) + list(top_resistances)
+    addplots = []
+
+    last = df.iloc[-1]
+
+    # --- Pre-top highlight ---
+    if pretop:
+        ydata = [np.nan]*(len(df)-3) + list(df['close'].iloc[-3:])
+        addplots.append(
+            mpf.make_addplot(ydata, type='scatter', markersize=120, marker='^', color='magenta')
+        )
+
+    # --- Pattern highlights ---
+    patterns = {
+        "bullish_engulfing": "green",
+        "bearish_engulfing": "red",
+        "hammer_bull": "lime",
+        "shooting_star": "orange",
+        "doji": "blue"
+    }
+    for pat, color in patterns.items():
+        if pat in votes:
+            ydata = [np.nan]*(len(df)-1) + [last['close']]
+            addplots.append(
+                mpf.make_addplot(ydata, type='scatter', markersize=80, marker='o', color=color)
+            )
+
+    mc = mpf.make_marketcolors(up='green', down='red', wick='black', edge='black', volume='blue')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='gray', facecolor='white')
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style=s,
+        volume=True,
+        addplot=addplots,
+        hlines=dict(hlines=hlines, colors=['gray'], linestyle='dashed'),
+        title=f"{symbol} — {action} — {','.join([v for v in votes])}",
+        ylabel='Price',
+        ylabel_lower='Volume',
+        savefig=dict(fname=buf, dpi=100, bbox_inches='tight')
+    )
+    buf.seek(0)
+    return buf
+
+# ---------------- PLOT TOP5 ----------------
+def get_top5_symbols(symbols):
+    winrates = {}
+    for sym in symbols:
+        df = fetch_klines(sym)
+        if df is None or len(df) < 30:
+            continue
+        wr, _ = backtest_winrate(df)
+        winrates[sym] = wr
+    sorted_wr = sorted(winrates.items(), key=lambda x: x[1], reverse=True)
+    return sorted_wr[:5]
 
 # ---------------- ANALYZE SYMBOL ----------------
 def analyze_and_alert(symbol: str):
@@ -299,7 +429,8 @@ def analyze_and_alert(symbol: str):
             f"Pre-top: {pretop}\n"
             f"Time: {last.name}\n"
         )
-        send_telegram(msg)
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
+        send_telegram(msg, photo=photo_buf)
         state["signals"][symbol] = action
         save_json_safe(STATE_FILE, state)
 
@@ -318,47 +449,92 @@ def scan_top_symbols():
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
 
-# ---------------- SCHEDULER ----------------
-scheduler = BackgroundScheduler()
-scheduler.add_job(scan_top_symbols, "interval", minutes=max(1, SCAN_INTERVAL_MINUTES),
-                  id="scan_job", next_run_time=datetime.now())
-scheduler.start()
-logger.info("Scheduler started with interval %d minutes", SCAN_INTERVAL_MINUTES)
-
 # ---------------- FLASK ROUTES ----------------
+app = Flask(__name__)
+logger = logging.getLogger("pretop-bot")
+
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "time": str(datetime.now(timezone.utc)), "signals": len(state.get("signals", {}))})
+    return jsonify({
+        "status": "ok",
+        "time": str(datetime.now(timezone.utc)),
+        "signals": len(state.get("signals", {}))
+    })
 
-@app.route(f"/telegram_webhook/<token>", methods=["POST", "GET"])
+# 🔹 Змінено маршрут на прийом токена у URL
+@app.route("/telegram_webhook/<token>", methods=["POST"])
 def telegram_webhook(token):
-    if token != TELEGRAM_TOKEN:
-        return jsonify({"ok": False, "reason": "invalid token"}), 403
-    if request.method == "POST":
-        update = request.get_json(force=True)
-        if "message" in update:
-            msg = update["message"]
-            text = msg.get("text", "").lower()
-            if text.startswith("/scan"):
-Thread(target=scan_top_symbols, daemon=True).start()
-                send_telegram("Manual scan started.")
-            elif text.startswith("/status"):
-                send_telegram(f"Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}")
-            elif text.startswith("/top"):
-                pretop_tokens = [s for s in state.get("signals", {})]
-                if pretop_tokens:
-                    send_telegram("Pre-top tokens:\n" + "\n".join(pretop_tokens))
+    try:
+        # Можна перевірити токен на відповідність TELEGRAM_TOKEN, якщо хочеш
+        if token != TELEGRAM_TOKEN:
+            logger.warning("Received webhook with invalid token: %s", token)
+            return jsonify({"ok": False, "error": "invalid token"}), 403
+
+        update = request.get_json(force=True) or {}
+        logger.info("Telegram update: %s", update)
+
+        msg = update.get("message")
+        if not msg:
+            return jsonify({"ok": True})
+
+        text = msg.get("text", "").lower().strip()
+
+        if text.startswith("/scan"):
+            send_telegram("⚡ Manual scan started.")
+            Thread(target=scan_top_symbols, daemon=True).start()
+
+        elif text.startswith("/status"):
+            send_telegram(
+                f"📝 Status:\nSignals={len(state.get('signals', {}))}\nLast scan={state.get('last_scan')}"
+            )
+
+        elif text.startswith("/top"):
+            symbols = get_all_usdt_symbols()
+            top5 = get_top5_symbols(symbols)
+            msg_text = "🏆 Top5 tokens by winrate:\n" + "\n".join(
+                [f"{s[0]}: {s[1]*100:.1f}%" for s in top5]
+            )
+            send_telegram(msg_text)
+
+        elif text.startswith("/history"):
+            parts = text.split()
+            if len(parts) >= 2:
+                symbol = parts[1].upper()
+                df = fetch_klines(symbol)
+                if df is not None and len(df) >= 30:
+                    buf = plot_history(df, symbol)
+                    send_telegram(f"📈 History for {symbol}", photo=buf)
                 else:
-                    send_telegram("No pre-top tokens detected yet.")
+                    send_telegram(f"❌ No data for {symbol}")
+
+    except Exception as e:
+        logger.exception("telegram_webhook error: %s", e)
     return jsonify({"ok": True})
 
-# ---------------- AUTO REGISTER WEBHOOK ----------------
-def auto_register_webhook():
-    if WEBHOOK_URL and TELEGRAM_TOKEN:
-        logger.info("Registering Telegram webhook: %s", WEBHOOK_URL)
-        set_telegram_webhook(WEBHOOK_URL)
+# ---------------- TELEGRAM WEBHOOK SETUP ----------------
+def setup_webhook():
+    if not TELEGRAM_TOKEN or not WEBHOOK_URL:
+        logger.error("❌ TELEGRAM_TOKEN or WEBHOOK_URL is missing!")
+        return
 
-Thread(target=auto_register_webhook, daemon=True).start()
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+    try:
+        # Видаляємо старий вебхук
+        resp = requests.get(f"{base_url}/deleteWebhook")
+        logger.info("deleteWebhook resp: %s", resp.text)
+
+        # 🔹 Ставимо новий вебхук на /telegram_webhook
+        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"   # <- Ось тут зміна
+        resp = requests.get(f"{base_url}/setWebhook?url={webhook_url}")
+        logger.info("setWebhook resp: %s", resp.text)
+
+        # Перевіряємо
+        resp = requests.get(f"{base_url}/getWebhookInfo")
+        logger.info("getWebhookInfo resp: %s", resp.text)
+
+    except Exception as e:
+        logger.exception("Webhook setup error: %s", e)
 
 # ---------------- WARMUP ----------------
 def warmup_and_first_scan():
@@ -370,6 +546,10 @@ def warmup_and_first_scan():
 Thread(target=warmup_and_first_scan, daemon=True).start()
 
 # ---------------- MAIN ----------------
-if name == "__main__":
+if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
+
+    setup_webhook()  # 🔹 автоматично ставимо вебхук
+    Thread(target=warmup_and_first_scan, daemon=True).start()
+
     app.run(host="0.0.0.0", port=PORT)
