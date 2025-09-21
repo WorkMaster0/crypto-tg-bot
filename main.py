@@ -305,8 +305,8 @@ def telegram_webhook(token):
     update = request.get_json(force=True) or {}
     text = update.get("message", {}).get("text", "").lower().strip()
     if text.startswith("/scan"):
-    send_telegram("⚡ Manual scan started.")
-    Thread(target=scan_all_symbols, daemon=True).start()  # <- новий виклик
+        send_telegram("⚡ Manual scan started.")
+        Thread(target=scan_all_symbols, daemon=True).start()  # <- новий виклик
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
