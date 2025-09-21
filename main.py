@@ -251,6 +251,25 @@ def analyze_and_alert(symbol: str):
         stop_loss = last["resistance"] * 1.005
         take_profit = last["support"] * 1.005
 
+    # ---------------- РОЗРАХУНОК % ВІДСТАНІ ----------------
+# Відстань стопу у відсотках
+if stop_loss:
+    if action == "LONG":
+        stop_pct = (last["close"] - stop_loss) / last["close"] * 100
+    else:  # SHORT
+        stop_pct = (stop_loss - last["close"]) / last["close"] * 100
+else:
+    stop_pct = 0.0
+
+# Відстань тейку у відсотках
+if take_profit:
+    if action == "LONG":
+        tp_pct = (take_profit - last["close"]) / last["close"] * 100
+    else:  # SHORT
+        tp_pct = (last["close"] - take_profit) / last["close"] * 100
+else:
+    tp_pct = 0.0
+    
     logger.info(
         "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s stop=%.6f tp=%.6f",
         symbol, action, confidence, votes, pretop, stop_loss or 0, take_profit or 0
@@ -270,8 +289,8 @@ def analyze_and_alert(symbol: str):
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
             f"Price: {last['close']:.6f}\n"
-            f"Stop-Loss: {stop_loss:.6f}\n"
-            f"Take-Profit: {take_profit:.6f}\n"
+            f"Stop-Loss: {stop_loss:.6f} ({stop_pct:.2f}%)\n"
+            f"Take-Profit: {take_profit:.6f} ({tp_pct:.2f}%)\n"
             f"Confidence: {confidence:.2f}\n"
             f"Reasons: {','.join(signal_reasons)}\n"
             f"Patterns: {','.join(votes)}\n"
