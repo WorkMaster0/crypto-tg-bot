@@ -14,6 +14,7 @@ from flask import Flask, request, jsonify
 import ta
 import mplfinance as mpf
 import numpy as np
+import io
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -27,10 +28,8 @@ logger = logging.getLogger("pretop-bot")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 PORT = int(os.getenv("PORT", "5000"))
-
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 EMA_SCAN_LIMIT = 500
-
 STATE_FILE = "state.json"
 CONF_THRESHOLD_MEDIUM = 0.60
 
@@ -77,17 +76,14 @@ def send_telegram(text: str, photo=None):
         logger.exception("send_telegram error: %s", e)
 
 # ---------------- WEBSOCKET MANAGER ----------------
-from websocket_manager import WebSocketKlineManager  # твоє визначення WebSocketKlineManager
+from websocket_manager import WebSocketKlineManager
 
-# Список початкових токенів для warmup
 TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]
 ws_manager = WebSocketKlineManager(TOP_SYMBOLS, interval="15m")
 
-# Завантаження історії
 for sym in TOP_SYMBOLS:
     ws_manager.load_history(sym)
 
-# Запуск WebSocket у фоновому потоці
 Thread(target=ws_manager.start, daemon=True).start()
 
 def fetch_klines(symbol, limit=EMA_SCAN_LIMIT):
@@ -202,18 +198,28 @@ def detect_signal(df: pd.DataFrame):
         action = "LONG"
 
     confidence = max(0, min(1, confidence))
-
     if not (fake_breakout or pretop):
         action = "WATCH"
 
     return action, votes, pretop, last, confidence
+
+# ---------------- PLOT SIGNAL ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop):
+    fig, ax = mpf.plot(
+        df.tail(50), type='candle', style='yahoo',
+        title=f"{symbol} - {action}", returnfig=True
+    )
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
 # ---------------- ANALYZE SYMBOL ----------------
 def analyze_and_alert(symbol: str):
     df = fetch_klines(symbol)
     if df is None or len(df) < 30:
         return
-
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
     prev_signal = state["signals"].get(symbol, "")
@@ -243,7 +249,6 @@ def analyze_and_alert(symbol: str):
             f"Time: {last.name}\n"
         )
 
-        # Тут має бути твоя функція plot_signal_candles
         photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
         send_telegram(msg, photo=photo_buf)
 
@@ -315,6 +320,5 @@ def telegram_webhook(token):
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     logger.info("Starting pre-top detector bot")
-    # Прогріваємо топ токени
     Thread(target=scan_all_symbols, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
