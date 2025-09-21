@@ -262,10 +262,27 @@ def analyze_and_alert(symbol: str):
         save_json_safe(STATE_FILE, state)
 
 # ---------------- MASTER SCAN ----------------
-def scan_top_symbols():
-    logger.info("Starting scan for %d symbols", len(SYMBOLS))
+def scan_all_symbols():
+    """
+    Сканає всі USDT-пари (без чорного списку), аналізує і відправляє сигнали.
+    Використовує ThreadPoolExecutor для паралельної обробки.
+    """
+    symbols = get_all_usdt_symbols()
+    if not symbols:
+        logger.warning("No symbols found for scanning.")
+        return
+
+    logger.info("Starting scan for %d symbols", len(symbols))
+
+    def safe_analyze(sym):
+        try:
+            analyze_and_alert(sym)
+        except Exception as e:
+            logger.exception("Error analyzing symbol %s: %s", sym, e)
+
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        list(exe.map(analyze_and_alert, SYMBOLS))
+        list(exe.map(safe_analyze, symbols))
+
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
