@@ -48,7 +48,12 @@ def save_json_safe(path, data):
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2, default=str)
-        os.replace(tmp, path)
+
+        if os.path.exists(tmp):  # <-- перевірка
+            os.replace(tmp, path)
+        else:
+            logger.error("Temp file %s not created, skipping save", tmp)
+
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
