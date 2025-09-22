@@ -332,8 +332,8 @@ def analyze_and_alert(symbol: str):
 # ---------------- FETCH TOP SYMBOLS ----------------
 def fetch_top_symbols(limit=300):
     try:
-        # Отримуємо всі 24h тикери
-        tickers = binance_client.ticker_24hr()  # <-- правильний метод
+        # Беремо всі USDT-пари ф'ючерсів
+        tickers = binance_client.futures_ticker()  # Для USDT-M ф'ючерсів
         usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
         sorted_pairs = sorted(
             usdt_pairs,
