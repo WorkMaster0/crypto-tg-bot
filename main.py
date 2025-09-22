@@ -237,7 +237,21 @@ def detect_signal(df: pd.DataFrame):
 
 # ---------- NEW plot_signal_candles ----------
 def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, entry=None):
+    # залишаємо тільки останні 200 свічок
     df_plot = df.tail(200).copy()
+
+    # приводимо назви колонок у правильний формат
+    df_plot = df_plot.rename(columns={
+        'open': 'Open',
+        'high': 'High',
+        'low': 'Low',
+        'close': 'Close',
+        'volume': 'Volume'
+    })
+
+    # переконуємось що індекс це datetime
+    if not isinstance(df_plot.index, pd.DatetimeIndex):
+        df_plot.index = pd.to_datetime(df_plot.index)
 
     addplots = []
 
@@ -245,9 +259,9 @@ def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, ent
         addplots.append(mpf.make_addplot([sl]*len(df_plot), linestyle="--", width=1.0, color="red"))
     if tp is not None:
         addplots.append(mpf.make_addplot([tp]*len(df_plot), linestyle="--", width=1.0, color="green"))
-    if "support" in df_plot.columns and "resistance" in df_plot.columns:
-        addplots.append(mpf.make_addplot([df_plot["support"].iloc[-1]]*len(df_plot), linestyle=":", width=0.8, color="blue"))
-        addplots.append(mpf.make_addplot([df_plot["resistance"].iloc[-1]]*len(df_plot), linestyle=":", width=0.8, color="blue"))
+    if "support" in df.columns and "resistance" in df.columns:
+        addplots.append(mpf.make_addplot([df["support"].iloc[-1]]*len(df_plot), linestyle=":", width=0.8, color="blue"))
+        addplots.append(mpf.make_addplot([df["resistance"].iloc[-1]]*len(df_plot), linestyle=":", width=0.8, color="blue"))
     if entry is not None:
         addplots.append(mpf.make_addplot(
             [entry]*len(df_plot),
