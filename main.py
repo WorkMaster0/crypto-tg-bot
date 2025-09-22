@@ -129,7 +129,7 @@ def fetch_klines(symbol, limit=500):
     return df
 
 # ---------------- ENHANCED FEATURE ENGINEERING ----------------
-def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
+def apply_all_features_enhanced(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # EMA
     df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
@@ -171,7 +171,7 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------- ENHANCED SIGNAL DETECTION ----------------
-def detect_signal(df: pd.DataFrame):
+def detect_signal_enhanced(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
@@ -258,7 +258,7 @@ def detect_signal(df: pd.DataFrame):
 
 
 # ---------------- ENHANCED PLOT ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, entry=None):
+def plot_signal_candles_enhanced(df, symbol, action, votes, pretop, tp=None, sl=None, entry=None):
     addplots = []
     if tp: addplots.append(mpf.make_addplot([tp]*len(df), color='green'))
     if sl: addplots.append(mpf.make_addplot([sl]*len(df), color='red'))
@@ -275,7 +275,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, ent
     return buf
 
 # ---------- NEW analyze_and_alert ----------
-def analyze_and_alert(symbol: str):
+def analyze_and_alert_enhanced(symbol: str):
     """
     Повний аналіз з покращеними індикаторами, лімітним entry, TP/SL та RR.
     """
