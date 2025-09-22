@@ -164,7 +164,7 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
     if tp3: addplots.append(mpf.make_addplot([tp3]*len(df), color='darkgreen', linestyle="--"))
     if sl: addplots.append(mpf.make_addplot([sl]*len(df), color='red', linestyle="--"))
     if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue', linestyle="--"))
-    fig, ax = mpf.plot(df.tail(120), type='candle', style='yahoo', title=f"{symbol} - {action}", addplot=addplots, returnfig=True)
+    fig, ax = mpf.plot(df.tail(200), type='candle', style='yahoo', title=f"{symbol} - {action}", addplot=addplots, returnfig=True)
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
@@ -174,9 +174,9 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
 # ---------------- ANALYZE ----------------
 def analyze_and_alert(symbol):
     df = fetch_klines(symbol, limit=200)
-    if df is None:
-        logger.info("Symbol=%s: Not enough data", symbol)
-        return
+    if df is None or len(df) < 10:
+    logger.info("Symbol=%s: Not enough data", symbol)
+    return
 
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
