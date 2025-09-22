@@ -292,8 +292,7 @@ def analyze_and_alert(symbol: str):
             "rr1": rr1, "rr2": rr2, "rr3": rr3, "confidence": confidence,
             "time": str(last.name), "last_price": float(last["close"]), "votes": votes
         }
-        save_json_safe(STATE_FILE, state)ion as e:
-        logger.exception("Error in analyze_and_alert(%s): %s", symbol, e)
+        save_json_safe(STATE_FILE, state)
 
 # ---------------- PLOT UTILITY ----------------
 def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=None, entry=None):
