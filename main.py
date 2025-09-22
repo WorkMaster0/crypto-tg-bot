@@ -199,6 +199,15 @@ def detect_signal(df: pd.DataFrame):
     elif last["RSI_14"] > 70 or last["RSI_7"] > 80:
         votes.append("rsi_overbought"); confidence += 0.08
 
+    # Divergence detection
+    if len(df) >= 5:
+        price_diff = last["close"] - prev["close"]
+        rsi_diff = last["RSI_14"] - prev["RSI_14"]
+        if price_diff > 0 and rsi_diff < 0:
+            votes.append("bearish_divergence"); confidence *= 1.2
+        elif price_diff < 0 and rsi_diff > 0:
+            votes.append("bullish_divergence"); confidence *= 1.2
+
     # ADX with direction
     if last["ADX"] > 25:
         votes.append("strong_trend")
@@ -217,6 +226,10 @@ def detect_signal(df: pd.DataFrame):
     # Volume spike
     if last["vol_spike"]:
         votes.append("volume_spike"); confidence += 0.05
+
+    # Volume confirmation
+    if last["vol_spike"] and ("LONG" or "SHORT"):
+        votes.append("volume_confirmation"); confidence *= 1.1
 
     # Candlestick patterns
     body = last["close"] - last["open"]
@@ -253,6 +266,18 @@ def detect_signal(df: pd.DataFrame):
     if not (pretop or near_support or near_resistance):
         action = "WATCH"
 
+    # Fake breakout
+    if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]:
+        votes.append("fake_breakout_short"); confidence *= 1.2
+    if prev["close"] < prev["support"] and last["close"] > last["support"]:
+        votes.append("fake_breakout_long"); confidence *= 1.2
+
+    # Support/Resistance Flip
+    if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]:
+        votes.append("resistance_flip_support"); confidence *= 1.15
+    if prev["close"] > prev["support"] and last["close"] < last["support"]:
+        votes.append("support_flip_resistance"); confidence *= 1.15
+
     confidence = max(0.0, min(1.0, confidence))
     return action, votes, pretop, last, confidence
 
@@ -277,7 +302,7 @@ def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, ent
 # ---------- NEW analyze_and_alert ----------
 def analyze_and_alert(symbol: str):
     """
-    Повний аналіз з покращеними індикаторами, лімітним entry, TP/SL та RR.
+    Повний аналіз з покращеними індикаторами, TP/SL, RR та multi-timeframe alignment.
     """
     # Беремо 200 свічок для аналізу
     df = fetch_klines(symbol, limit=200)
@@ -286,12 +311,40 @@ def analyze_and_alert(symbol: str):
 
     df = apply_all_features(df)  # Покращені фічі
 
+    # Multi-timeframe (1h)
+    df_h1 = fetch_klines_rest(symbol, interval="1h", limit=200)
+    higher_tf_votes = []
+    if df_h1 is not None and len(df_h1) > 50:
+        df_h1 = apply_all_features(df_h1)
+        last_h1 = df_h1.iloc[-1]
+        trend_h1 = None
+        if last_h1["ema_8"] > last_h1["ema_20"] > last_h1["ema_50"]:
+            trend_h1 = "up"
+        elif last_h1["ema_8"] < last_h1["ema_20"] < last_h1["ema_50"]:
+            trend_h1 = "down"
+
+        if trend_h1 == "up":
+            higher_tf_votes.append("higher_tf_up")
+        elif trend_h1 == "down":
+            higher_tf_votes.append("higher_tf_down")
+
+    # Сигнали з локального ТФ
     action, votes, pretop, last, confidence = detect_signal(df)
+
+    # Врахування тренду вищого ТФ
+    if higher_tf_votes:
+        votes.extend(higher_tf_votes)
+        if "higher_tf_up" in higher_tf_votes and action == "LONG":
+            confidence *= 1.2
+        elif "higher_tf_down" in higher_tf_votes and action == "SHORT":
+            confidence *= 1.2
+        else:
+            confidence *= 0.8
+
     prev_signal = state.get("signals", {}).get(symbol, {})
 
     # Визначаємо entry / TP / SL
     entry = None; stop_loss = None; take_profit = None
-
     if action == "LONG":
         entry = last["support"] * 1.001
         stop_loss = last["support"] * 0.99
@@ -321,6 +374,14 @@ def analyze_and_alert(symbol: str):
             reasons.append("Pre-Top")
         if "fake_breakout_long" in votes or "fake_breakout_short" in votes:
             reasons.append("Fake Breakout")
+        if "bullish_divergence" in votes or "bearish_divergence" in votes:
+            reasons.append("Divergence")
+        if "resistance_flip_support" in votes or "support_flip_resistance" in votes:
+            reasons.append("S/R Flip")
+        if "volume_confirmation" in votes:
+            reasons.append("Volume Confirm")
+        if "higher_tf_up" in votes or "higher_tf_down" in votes:
+            reasons.append("Higher TF Alignment")
         if not reasons:
             reasons = ["Pattern mix"]
 
