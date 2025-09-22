@@ -1,5 +1,4 @@
 import os
-import time
 import json
 import logging
 import re
@@ -8,11 +7,10 @@ from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
-import matplotlib.pyplot as plt
 import requests
 import ta
 import mplfinance as mpf
-import numpy as np
+import matplotlib.pyplot as plt
 import io
 
 # ---------------- LOGGING ----------------
@@ -26,11 +24,9 @@ logger = logging.getLogger("pretop-bot")
 # ---------------- CONFIG ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-PORT = int(os.getenv("PORT", "5000"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
-EMA_SCAN_LIMIT = 500
 STATE_FILE = "state.json"
-CONF_THRESHOLD_MEDIUM = 0.55
+CONF_THRESHOLD_MEDIUM = 0.3
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -48,7 +44,10 @@ def save_json_safe(path, data):
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2, default=str)
-        os.replace(tmp, path)
+        if os.path.exists(tmp):
+            os.replace(tmp, path)
+        else:
+            logger.error("Temp file %s not created, skipping save", tmp)
     except Exception as e:
         logger.exception("save_json_safe error %s: %s", path, e)
 
@@ -56,7 +55,6 @@ state = load_json_safe(STATE_FILE, {"signals": {}, "last_scan": None})
 
 # ---------------- TELEGRAM ----------------
 MARKDOWNV2_ESCAPE = r"_*[]()~`>#+-=|{}.!"
-
 def escape_md_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWNV2_ESCAPE)}])", r"\\\1", str(text))
 
@@ -74,76 +72,40 @@ def send_telegram(text: str, photo=None):
     except Exception as e:
         logger.exception("send_telegram error: %s", e)
 
-# ---------------- WEBSOCKET / REST MANAGER ----------------
-from websocket_manager import WebSocketKlineManager
+# ---------------- GATE.IO API ----------------
+GATE_IO_API_URL = "https://api.gateio.ws/api2/1/candlestick2"
 
-ALL_USDT = [
-    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT",
-    "DOTUSDT","TRXUSDT","LTCUSDT","AVAXUSDT","SHIBUSDT","LINKUSDT","ATOMUSDT","XMRUSDT",
-    "ETCUSDT","XLMUSDT","APTUSDT","NEARUSDT","FILUSDT","ICPUSDT","GRTUSDT","AAVEUSDT",
-    "SANDUSDT","AXSUSDT","FTMUSDT","THETAUSDT","EGLDUSDT","MANAUSDT","FLOWUSDT","HBARUSDT",
-    "ALGOUSDT","ZECUSDT","EOSUSDT","KSMUSDT","CELOUSDT","SUSHIUSDT","CHZUSDT","KAVAUSDT",
-    "ZILUSDT","ANKRUSDT","RAYUSDT","GMTUSDT","UNIUSDT","APEUSDT","PEPEUSDT","OPUSDT",
-    "XTZUSDT","ALPHAUSDT","BALUSDT","COMPUSDT","CRVUSDT","SNXUSDT","RSRUSDT",
-    "LOKUSDT","GALUSDT","WLDUSDT","JASMYUSDT","ONEUSDT","ARBUSDT","ALICEUSDT","XECUSDT",
-    "FLMUSDT","CAKEUSDT","IMXUSDT","HOOKUSDT","MAGICUSDT","STGUSDT","FETUSDT",
-    "PEOPLEUSDT","ASTRUSDT","ENSUSDT","CTSIUSDT","GALAUSDT","RADUSDT","IOSTUSDT","QTUMUSDT",
-    "NPXSUSDT","DASHUSDT","ZRXUSDT","HNTUSDT","ENJUSDT","TFUELUSDT","TWTUSDT",
-    "NKNUSDT","GLMRUSDT","ZENUSDT","STORJUSDT","ICXUSDT","XVGUSDT","FLOKIUSDT","BONEUSDT",
-    "TRBUSDT","C98USDT","MASKUSDT","1000SHIBUSDT","1000PEPEUSDT","AMBUSDT","VEGUSDT","QNTUSDT",
-    "RNDRUSDT","CHRUSDT","API3USDT","MTLUSDT","ALPUSDT","LDOUSDT","AXLUSDT","FUNUSDT",
-    "OGUSDT","ORCUSDT","XAUTUSDT","ARUSDT","DYDXUSDT","RUNEUSDT","FLUXUSDT",
-    "AGLDUSDT","PERPUSDT","MLNUSDT","NMRUSDT","LRCUSDT","COTIUSDT","ACHUSDT",
-    "CKBUSDT","ACEUSDT","TRUUSDT","IPSUSDT","QIUSDT","GLMUSDT","ARNXUSDT",
-    "MIRUSDT","ROSEUSDT","OXTUSDT","SPELLUSDT","SUNUSDT","SYSUSDT","TAOUSDT",
-    "TLMUSDT","VLXUSDT","WAXPUSDT","XNOUSDT"
+ALL_SYMBOLS = [
+    "BTC_USDT","ETH_USDT","ADA_USDT","SOL_USDT","DOT_USDT","XRP_USDT","LTC_USDT",
+    "TRX_USDT","DOGE_USDT","AVAX_USDT","MATIC_USDT"
 ]
 
-BINANCE_REST_URL = "https://fapi.binance.com/fapi/v1/klines"
-
-def fetch_klines_rest(symbol, interval="15m", limit=500):
+def fetch_klines(symbol, interval="15m", limit=200):
     try:
-        resp = requests.get(BINANCE_REST_URL, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=5)
+        resp = requests.get(GATE_IO_API_URL, params={"currency_pair": symbol, "type": interval, "range": limit}, timeout=5)
         data = resp.json()
-        df = pd.DataFrame(data, columns=[
-            "open_time","open","high","low","close","volume",
-            "close_time","quote_asset_volume","trades",
-            "taker_buy_base","taker_buy_quote","ignore"
-        ])
-        for col in ["open","high","low","close","volume"]:
-            df[col] = df[col].astype(float)
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-        df.set_index("open_time", inplace=True)
+        if not data or len(data) < 20:
+            return None
+        df = pd.DataFrame(data, columns=["timestamp","low","high","open","close","volume"])
+        df[["low","high","open","close","volume"]] = df[["low","high","open","close","volume"]].astype(float)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+        df.set_index("timestamp", inplace=True)
         return df
     except Exception as e:
-        logger.exception("REST fetch error for %s: %s", symbol, e)
+        logger.exception("fetch_klines error %s: %s", symbol, e)
         return None
 
-ws_manager = WebSocketKlineManager(symbols=ALL_USDT, interval="15m")
-Thread(target=ws_manager.start, daemon=True).start()
-
-def fetch_klines(symbol, limit=500):
-    df = ws_manager.get_klines(symbol, limit)
-    if df is None or len(df) < 10:
-        df = fetch_klines_rest(symbol, limit=limit)
-    return df
-
-# ---------------- FEATURE ENGINEERING ----------------
+# ---------------- FEATURES ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
-    df["ema_20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
-    df["RSI_14"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
-    macd = ta.trend.MACD(df["close"])
-    df["MACD"] = macd.macd()
-    df["MACD_signal"] = macd.macd_signal()
-    df["MACD_hist"] = macd.macd_diff()
-    adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], 14)
-    df["ADX"] = adx.adx()
-    df["ADX_pos"] = adx.adx_pos()
-    df["ADX_neg"] = adx.adx_neg()
     df["support"] = df["low"].rolling(20).min()
     df["resistance"] = df["high"].rolling(20).max()
+    df["vol_ma20"] = df["volume"].rolling(20).mean()
+    df["vol_spike"] = df["volume"] > 1.5 * df["vol_ma20"]
+    df["body"] = df["close"] - df["open"]
+    df["range"] = df["high"] - df["low"]
+    df["upper_shadow"] = df["high"] - df[["close","open"]].max(axis=1)
+    df["lower_shadow"] = df[["close","open"]].min(axis=1) - df["low"]
     return df
 
 # ---------------- SIGNAL DETECTION ----------------
@@ -151,176 +113,124 @@ def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
-    confidence = 0.2
-    if last["ema_8"] > last["ema_20"]:
-        votes.append("ema_bull")
-        confidence += 0.1
-    else:
-        votes.append("ema_bear")
-        confidence += 0.05
-    if last["MACD_hist"] > 0:
-        votes.append("macd_up")
-        confidence += 0.1
-    else:
-        votes.append("macd_down")
-        confidence += 0.05
-    if last["RSI_14"] < 30:
-        votes.append("rsi_oversold")
-        confidence += 0.08
-    elif last["RSI_14"] > 70:
-        votes.append("rsi_overbought")
-        confidence += 0.08
-    if last["ADX"] > 25:
-        votes.append("strong_trend")
-        confidence *= 1.1
-    body = last["close"] - last["open"]
-    rng = last["high"] - last["low"]
-    upper_shadow = last["high"] - max(last["close"], last["open"])
-    lower_shadow = min(last["close"], last["open"]) - last["low"]
-    candle_bonus = 1.0
-    if lower_shadow > 2 * abs(body) and body > 0:
+    confidence = 0.3
+
+    # Hammer / Shooting star
+    if last["lower_shadow"] > 2*abs(last["body"]) and last["body"] > 0:
         votes.append("hammer_bull")
-        candle_bonus = 1.2
-    elif upper_shadow > 2 * abs(body) and body < 0:
+        confidence *= 1.5 if last["close"] <= last["support"]*1.02 else 1.2
+    elif last["upper_shadow"] > 2*abs(last["body"]) and last["body"] < 0:
         votes.append("shooting_star")
-        candle_bonus = 1.2
-    if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
+        confidence *= 1.5 if last["close"] >= last["resistance"]*0.98 else 1.2
+
+    # Engulfing
+    if last["body"] > 0 and prev["body"] < 0 and last["close"] > prev["open"] and last["open"] < prev["close"]:
         votes.append("bullish_engulfing")
-        candle_bonus = 1.25
-    elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
+        confidence *= 1.25
+    elif last["body"] < 0 and prev["body"] > 0 and last["close"] < prev["open"] and last["open"] > prev["close"]:
         votes.append("bearish_engulfing")
-        candle_bonus = 1.25
-    if abs(body) < 0.1 * rng:
-        votes.append("doji")
-        candle_bonus = 1.1
-    confidence *= candle_bonus
-    fake_breakout = False
-    if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
-        votes.append("fake_breakout_short")
-        confidence += 0.15
-        fake_breakout = True
-    elif last["close"] < last["support"] * 1.005 and last["close"] > last["support"] * 0.99:
-        votes.append("fake_breakout_long")
-        confidence += 0.15
-        fake_breakout = True
+        confidence *= 1.25
+
+    if last["vol_spike"]:
+        votes.append("volume_spike")
+        confidence *= 1.15
+
+    # Fake breakout / flip
+    if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]: votes.append("fake_breakout_short"); confidence*=1.2
+    if prev["close"] < prev["support"] and last["close"] > last["support"]: votes.append("fake_breakout_long"); confidence*=1.2
+    if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]: votes.append("resistance_flip_support"); confidence*=1.15
+    if prev["close"] > prev["support"] and last["close"] < last["support"]: votes.append("support_flip_resistance"); confidence*=1.15
+
+    # Pre-top
     pretop = False
-    if len(df) >= 10:
-        recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
-        if (recent - last10) / last10 > 0.1:
-            pretop = True
-            votes.append("pretop")
-            confidence += 0.1
-    action = "WATCH"
-    if last["close"] >= last["resistance"] * 0.995:
-        action = "SHORT"
-    elif last["close"] <= last["support"] * 1.005:
-        action = "LONG"
-    confidence = max(0, min(1, confidence))
-    if not (fake_breakout or pretop):
-        action = "WATCH"
+    if len(df)>=10 and (last["close"]-df["close"].iloc[-10])/df["close"].iloc[-10] > 0.1:
+        pretop = True
+        votes.append("pretop")
+        confidence += 0.1
+
+    # Action
+    action="WATCH"
+    if last["close"] >= last["resistance"]*0.98: action="SHORT"
+    elif last["close"] <= last["support"]*1.02: action="LONG"
+
+    confidence = max(0.0, min(1.0, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------------- PLOT SIGNAL ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop):
-    fig, ax = mpf.plot(
-        df.tail(50), type='candle', style='yahoo',
-        title=f"{symbol} - {action}", returnfig=True
-    )
+# ---------------- PLOT ----------------
+def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=None, entry=None):
+    addplots=[]
+    if tp1: addplots.append(mpf.make_addplot([tp1]*len(df), color='green', linestyle="--"))
+    if tp2: addplots.append(mpf.make_addplot([tp2]*len(df), color='lime', linestyle="--"))
+    if tp3: addplots.append(mpf.make_addplot([tp3]*len(df), color='darkgreen', linestyle="--"))
+    if sl: addplots.append(mpf.make_addplot([sl]*len(df), color='red', linestyle="--"))
+    if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue', linestyle="--"))
+    fig, ax = mpf.plot(df.tail(120), type='candle', style='yahoo', title=f"{symbol} - {action}", addplot=addplots, returnfig=True)
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
     plt.close(fig)
     return buf
 
-# ---------------- ANALYZE SYMBOL ----------------
-def analyze_and_alert(symbol: str):
-    df = fetch_klines(symbol)
-    if df is None or len(df) < 30:
+# ---------------- ANALYZE ----------------
+def analyze_and_alert(symbol):
+    df = fetch_klines(symbol, limit=200)
+    if df is None:
+        logger.info("Symbol=%s: Not enough data", symbol)
         return
 
     df = apply_all_features(df)
     action, votes, pretop, last, confidence = detect_signal(df)
-    prev_signal = state["signals"].get(symbol, {})
+    if action=="WATCH": return
 
-    # Визначення стопу і тейку на основі рівнів
-    stop_loss, take_profit = None, None
-    if action == "LONG":
-        stop_loss = last["support"] * 0.995
-        take_profit = last["resistance"] * 0.995
-    elif action == "SHORT":
-        stop_loss = last["resistance"] * 1.005
-        take_profit = last["support"] * 1.005
-
-    # Розрахунок відстані у %
-    if stop_loss:
-        if action == "LONG":
-            stop_pct = (last["close"] - stop_loss) / last["close"] * 100
-        else:  # SHORT
-            stop_pct = (stop_loss - last["close"]) / last["close"] * 100
+    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range().iloc[-1]
+    if action=="LONG":
+        entry = last["support"]*1.001
+        stop_loss = last["support"]*0.99
+        tp1 = entry+atr; tp2=entry+2*atr; tp3=last["resistance"]
     else:
-        stop_pct = 0.0
+        entry = last["resistance"]*0.999
+        stop_loss = last["resistance"]*1.01
+        tp1 = entry-atr; tp2=entry-2*atr; tp3=last["support"]
 
-    if take_profit:
-        if action == "LONG":
-            tp_pct = (take_profit - last["close"]) / last["close"] * 100
-        else:  # SHORT
-            tp_pct = (last["close"] - take_profit) / last["close"] * 100
-    else:
-        tp_pct = 0.0
+    rr1 = (tp1-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp1)/(stop_loss-entry)
+    if rr1 < 2: return
+    rr2 = (tp2-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp2)/(stop_loss-entry)
+    rr3 = (tp3-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp3)/(stop_loss-entry)
 
-    logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s stop=%.6f(%.2f%%) tp=%.6f(%.2f%%)",
-        symbol, action, confidence, votes, pretop, stop_loss or 0, stop_pct, take_profit or 0, tp_pct
+    msg = (
+        f"⚡ TRADE SIGNAL\n"
+        f"Symbol: {symbol}\n"
+        f"Action: {action}\n"
+        f"🔹 Entry: {entry:.6f}\n"
+        f"🛑 Stop-Loss: {stop_loss:.6f}\n"
+        f"✅ TP1: {tp1:.6f} (RR {rr1:.2f})\n"
+        f"✅✅ TP2: {tp2:.6f} (RR {rr2:.2f})\n"
+        f"🏁 TP3: {tp3:.6f} (RR {rr3:.2f})\n"
+        f"Confidence: {confidence:.2f}\n"
+        f"Patterns: {', '.join(votes)}\n"
     )
 
-    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal.get("action"):
-        signal_reasons = []
-        if "fake_breakout_short" in votes or "fake_breakout_long" in votes:
-            signal_reasons.append("Fake Breakout")
-        if pretop:
-            signal_reasons.append("Pre-Top")
-        if not signal_reasons:
-            signal_reasons = ["Other patterns"]
+    photo_buf = plot_signal_candles(df, symbol, action, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
+    send_telegram(msg, photo=photo_buf)
 
-        msg = (
-            f"⚡ TRADE SIGNAL\n"
-            f"Symbol: {symbol}\n"
-            f"Action: {action}\n"
-            f"Price: {last['close']:.6f}\n"
-            f"Stop-Loss: {stop_loss:.6f} ({stop_pct:.2f}%)\n"
-            f"Take-Profit: {take_profit:.6f} ({tp_pct:.2f}%)\n"
-            f"Confidence: {confidence:.2f}\n"
-            f"Reasons: {','.join(signal_reasons)}\n"
-            f"Patterns: {','.join(votes)}\n"
-        )
-
-        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop)
-        send_telegram(msg, photo=photo_buf)
-
-        # Зберігаємо сигнал у стані
-        state["signals"][symbol] = {
-            "action": action,
-            "stop": stop_loss,
-            "tp": take_profit,
-            "stop_pct": stop_pct,
-            "tp_pct": tp_pct,
-            "confidence": confidence,
-            "last_price": last["close"],
-            "votes": votes,
-        }
-        save_json_safe(STATE_FILE, state)
+    state.setdefault("signals", {})[symbol] = {
+        "action": action, "entry": entry, "sl": stop_loss,
+        "tp1": tp1, "tp2": tp2, "tp3": tp3,
+        "rr1": rr1, "rr2": rr2, "rr3": rr3,
+        "confidence": confidence, "time": str(last.name), "votes": votes
+    }
+    save_json_safe(STATE_FILE, state)
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
-    symbols = list(ws_manager.data.keys()) or ALL_USDT
-    logger.info("Starting scan for %d symbols", len(symbols))
+    logger.info("Starting scan for %d symbols", len(ALL_SYMBOLS))
     def safe_analyze(sym):
         try:
             analyze_and_alert(sym)
         except Exception as e:
             logger.exception("Error analyzing symbol %s: %s", sym, e)
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
-        list(exe.map(safe_analyze, symbols))
+        list(exe.map(safe_analyze, ALL_SYMBOLS))
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
@@ -350,6 +260,6 @@ def telegram_webhook(token):
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
-    logger.info("Starting pre-top detector bot")
+    logger.info("Starting pre-top detector bot for Gate.io")
     Thread(target=scan_all_symbols, daemon=True).start()
-    app.run(host="0.0.0.0", port=PORT)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
