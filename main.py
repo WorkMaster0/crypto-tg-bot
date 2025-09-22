@@ -153,147 +153,135 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def get_symbol_market_cap(symbol: str) -> float:
+    """
+    Отримує капіталізацію токена з CoinGecko.
+    Якщо немає даних -> повертає 0.
+    """
+    try:
+        # Прибираємо "USDT" і зводимо до нижнього регістру
+        base = symbol.replace("USDT", "").lower()
+
+        url = f"https://api.coingecko.com/api/v3/coins/{base}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return 0.0
+
+        data = resp.json()
+        return data.get("market_data", {}).get("market_cap", {}).get("usd", 0.0)
+    except Exception as e:
+        logger.warning("Cannot fetch market cap for %s: %s", symbol, e)
+        return 0.0
 
 # ---------------- PATTERN-BASED SIGNAL DETECTION ----------------
-def detect_signal(df: pd.DataFrame):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    votes = []
-
-    # --- Базова confidence ---
-    confidence = 0.7
-
-    # --- Свічкові патерни ---
-    if last["lower_shadow"] > 2 * abs(last["body"]) and last["body"] > 0:
-        votes.append("hammer_bull")
-        confidence += 0.1
-    elif last["upper_shadow"] > 2 * abs(last["body"]) and last["body"] < 0:
-        votes.append("shooting_star")
-        confidence += 0.1
-
-    if last["body"] > 0 and prev["body"] < 0 and last["close"] > prev["open"] and last["open"] < prev["close"]:
-        votes.append("bullish_engulfing")
-        confidence += 0.1
-    elif last["body"] < 0 and prev["body"] > 0 and last["close"] < prev["open"] and last["open"] > prev["close"]:
-        votes.append("bearish_engulfing")
-        confidence += 0.1
-
-    # --- Volume confirmation ---
-    if last["vol_spike"]:
-        votes.append("volume_spike")
-        confidence += 0.05
-
-    # --- Fake breakout detection ---
-    if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]:
-        votes.append("fake_breakout_short")
-        confidence += 0.05
-    if prev["close"] < prev["support"] and last["close"] > last["support"]:
-        votes.append("fake_breakout_long")
-        confidence += 0.05
-
-    # --- Support/Resistance Flip ---
-    if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]:
-        votes.append("resistance_flip_support")
-        confidence += 0.05
-    if prev["close"] > prev["support"] and last["close"] < last["support"]:
-        votes.append("support_flip_resistance")
-        confidence += 0.05
-
-    # --- Pre-top ---
-    pretop = False
-    if len(df) >= 10:
-        if (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
-            pretop = True
-            votes.append("pretop")
-            confidence += 0.1
-
-    # --- Дія відносно рівнів ---
-    action = "WATCH"
-    near_resistance = last["close"] >= last["resistance"] * 0.98
-    near_support = last["close"] <= last["support"] * 1.02
-
-    if near_resistance:
-        action = "SHORT"
-    elif near_support:
-        action = "LONG"
-
-    if not (pretop or near_support or near_resistance):
-        action = "WATCH"
-
-    confidence = max(0.0, min(1.0, confidence))
-    return action, votes, pretop, last, confidence
-
-
-# ---------------- MAIN ANALYZE FUNCTION ----------------
 def analyze_and_alert(symbol: str):
-    df = fetch_klines(symbol, limit=200)
-    if df is None or len(df) < 40:
-        return
+    try:
+        # --- Перевірка капіталізації ---
+        market_cap = get_symbol_market_cap(symbol)
+        if market_cap < 5_000_000:
+            logger.info("Skipping %s due to low market cap: %.2f", symbol, market_cap)
+            return
 
-    df = apply_all_features(df)
+        # --- Завантажуємо дані ---
+        df = fetch_klines(symbol, interval="15m", limit=200)
+        if df is None or len(df) < 50:
+            logger.info("Symbol=%s: Not enough data", symbol)
+            return
 
-    action, votes, pretop, last, confidence = detect_signal(df)
+        # --- Базові метрики ---
+        df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+        atr = df["ATR"].iloc[-1]
 
-    # Entry / SL / TP
-    entry = stop_loss = tp1 = tp2 = tp3 = None
-    if action == "LONG":
-        entry = last["support"] * 1.001
-        stop_loss = last["support"] * 0.99
-        tp1 = entry + (last["resistance"] - entry) * 0.33
-        tp2 = entry + (last["resistance"] - entry) * 0.66
-        tp3 = last["resistance"]
-    elif action == "SHORT":
-        entry = last["resistance"] * 0.999
-        stop_loss = last["resistance"] * 1.01
-        tp1 = entry - (entry - last["support"]) * 0.33
-        tp2 = entry - (entry - last["support"]) * 0.66
-        tp3 = last["support"]
+        close = df["close"].iloc[-1]
+        prev_close = df["close"].iloc[-2]
 
-    if action == "WATCH":
-        return
+        # --- Визначаємо патерни ---
+        patterns = []
 
-    # R/R
-    rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
-    rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
-    rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
+        if ta.cdl_hammer(df["open"], df["high"], df["low"], df["close"]).iloc[-1] != 0:
+            patterns.append("🔨 Hammer")
 
-    logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
-        symbol, action, confidence, votes, pretop, rr1, rr2, rr3
-    )
+        if ta.cdl_shootingstar(df["open"], df["high"], df["low"], df["close"]).iloc[-1] != 0:
+            patterns.append("🌠 Shooting Star")
 
-    # --- Фільтр: мінімум RR >= 2 ---
-    if confidence >= CONF_THRESHOLD_MEDIUM and max(rr1, rr2, rr3) >= 2.0:
-        reasons = []
-        if "pretop" in votes: reasons.append("Pre-Top")
-        if "fake_breakout_long" in votes or "fake_breakout_short" in votes: reasons.append("Fake Breakout")
-        if "resistance_flip_support" in votes or "support_flip_resistance" in votes: reasons.append("S/R Flip")
-        if "volume_spike" in votes: reasons.append("Volume Spike")
-        if not reasons: reasons = ["Candle/Pattern Mix"]
+        if ta.cdl_doji(df["open"], df["high"], df["low"], df["close"]).iloc[-1] != 0:
+            patterns.append("✒ Doji")
 
+        if ta.cdl_engulfing(df["open"], df["high"], df["low"], df["close"]).iloc[-1] > 0:
+            patterns.append("🟢 Bullish Engulfing")
+
+        if ta.cdl_engulfing(df["open"], df["high"], df["low"], df["close"]).iloc[-1] < 0:
+            patterns.append("🔴 Bearish Engulfing")
+
+        if ta.cdl_morningstar(df["open"], df["high"], df["low"], df["close"]).iloc[-1] != 0:
+            patterns.append("🌅 Morning Star")
+
+        if ta.cdl_eveningstar(df["open"], df["high"], df["low"], df["close"]).iloc[-1] != 0:
+            patterns.append("🌆 Evening Star")
+
+        if ta.cdl_hangingman(df["open"], df["high"], df["low"], df["close"]).iloc[-1] != 0:
+            patterns.append("🪓 Hanging Man")
+
+        if ta.cdl_harami(df["open"], df["high"], df["low"], df["close"]).iloc[-1] > 0:
+            patterns.append("🟢 Bullish Harami")
+
+        if ta.cdl_harami(df["open"], df["high"], df["low"], df["close"]).iloc[-1] < 0:
+            patterns.append("🔴 Bearish Harami")
+
+        # Якщо немає патернів — вихід
+        if not patterns:
+            return
+
+        # --- Визначаємо дію ---
+        if "Bullish" in " ".join(patterns) or "Hammer" in " ".join(patterns) or "Morning" in " ".join(patterns):
+            action = "BUY"
+        elif "Bearish" in " ".join(patterns) or "Shooting" in " ".join(patterns) or "Evening" in " ".join(patterns):
+            action = "SELL"
+        else:
+            action = "WATCH"
+
+        if action == "WATCH":
+            return
+
+        # --- Розрахунок рівнів ---
+        stop_loss = close - atr if action == "BUY" else close + atr
+        tp1 = close + 2 * atr if action == "BUY" else close - 2 * atr
+        tp2 = close + 3 * atr if action == "BUY" else close - 3 * atr
+        tp3 = close + 5 * atr if action == "BUY" else close - 5 * atr
+
+        # --- Фільтр RR ---
+        rr1 = abs((tp1 - close) / (close - stop_loss))
+        if rr1 < 2:
+            logger.info("Skipping %s due to low RR1=%.2f", symbol, rr1)
+            return
+
+        # --- Confidence ---
+        confidence = 50 + len(patterns) * 10
+        if action == "BUY" and close > prev_close:
+            confidence += 10
+        if action == "SELL" and close < prev_close:
+            confidence += 10
+        confidence = min(confidence, 95)
+
+        # --- Повідомлення ---
         msg = (
-            f"⚡ TRADE SIGNAL\n"
-            f"Symbol: {symbol}\n"
-            f"Action: {action}\n"
-            f"Entry: {entry:.6f}\n"
-            f"Stop-Loss: {stop_loss:.6f}\n"
-            f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
-            f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
-            f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
-            f"Confidence: {confidence:.2f}\n"
-            f"Reasons: {', '.join(reasons)}\n"
-            f"Patterns: {', '.join(votes)}\n"
+            f"📊 {symbol}\n"
+            f"💡 Action: {('🟢 BUY' if action == 'BUY' else '🔴 SELL')}\n"
+            f"📈 Confidence: {confidence:.1f}%\n"
+            f"🪙 Market Cap: {market_cap:,.0f} $\n"
+            f"🎯 Targets:\n"
+            f"   1️⃣ {tp1:.4f}\n"
+            f"   2️⃣ {tp2:.4f}\n"
+            f"   3️⃣ {tp3:.4f}\n"
+            f"🛑 Stop: {stop_loss:.4f}\n"
+            f"📌 Patterns: {', '.join(patterns)}"
         )
 
-        photo_buf = plot_signal_candles(df, symbol, action, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
-        send_telegram(msg, photo=photo_buf)
+        send_telegram_message(msg)
+        logger.info("Signal sent for %s (conf=%.1f, rr1=%.2f)", symbol, confidence, rr1)
 
-        state.setdefault("signals", {})[symbol] = {
-            "action": action, "entry": entry, "sl": stop_loss, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-            "rr1": rr1, "rr2": rr2, "rr3": rr3, "confidence": confidence,
-            "time": str(last.name), "last_price": float(last["close"]), "votes": votes
-        }
-        save_json_safe(STATE_FILE, state)
+    except Exception as e:
+        logger.exception("Error in analyze_and_alert(%s): %s", symbol, e)
 
 # ---------------- PLOT UTILITY ----------------
 def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=None, entry=None):
