@@ -278,6 +278,11 @@ def analyze_and_alert(symbol: str):
     rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
     rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
 
+    # --- Фільтр по RR на першому тейку ---
+    if rr1 < 2.0:
+        logger.info("Skip %s: RR1=%.2f < 2.0", symbol, rr1)
+        return
+
     # Логування
     logger.info(
         "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
