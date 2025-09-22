@@ -296,40 +296,16 @@ def detect_signal(df: pd.DataFrame):
 
 
 # ---------------- ENHANCED PLOT ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop, tps=None, sl=None, entry=None):
-    """
-    Малює графік з 3 TP, SL та Entry.
-    tps: список з до 3-х тейків [tp1, tp2, tp3]
-    """
+def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, entry=None):
     addplots = []
+    if tp: addplots.append(mpf.make_addplot([tp]*len(df), color='green'))
+    if sl: addplots.append(mpf.make_addplot([sl]*len(df), color='red'))
+    if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue'))
 
-    # Entry
-    if entry:
-        addplots.append(mpf.make_addplot([entry] * len(df), color='blue', linestyle='--'))
-
-    # Stop-loss
-    if sl:
-        addplots.append(mpf.make_addplot([sl] * len(df), color='red', linestyle='--'))
-
-    # Take-profits
-    if tps:
-        colors = ["green", "lime", "darkgreen"]
-        for i, tp in enumerate(tps[:3]):  # максимум 3 тейки
-            if tp:
-                addplots.append(
-                    mpf.make_addplot([tp] * len(df), color=colors[i], linestyle='-.')
-                )
-
-    # Малюємо графік
     fig, ax = mpf.plot(
-        df.tail(200),
-        type='candle',
-        style='yahoo',
-        title=f"{symbol} - {action}",
-        addplot=addplots,
-        returnfig=True
+        df.tail(200), type='candle', style='yahoo',
+        title=f"{symbol} - {action}", addplot=addplots, returnfig=True
     )
-
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
