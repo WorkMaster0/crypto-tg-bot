@@ -141,69 +141,94 @@ def fetch_klines(symbol, limit=500):
         df = fetch_klines_rest(symbol, limit=limit)
     return df
 
-# ---------------- PATTERN-BASED FEATURE ENGINEERING ----------------
+# ---------------- FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    # Support/Resistance (динамічні рівні за останні 20 свічок)
+    
+    # Support/Resistance
     df["support"] = df["low"].rolling(20).min()
     df["resistance"] = df["high"].rolling(20).max()
-
+    
     # Volume analysis
     df["vol_ma20"] = df["volume"].rolling(20).mean()
     df["vol_spike"] = df["volume"] > 1.5 * df["vol_ma20"]
-
+    
     # Candle structure
     df["body"] = df["close"] - df["open"]
     df["range"] = df["high"] - df["low"]
     df["upper_shadow"] = df["high"] - df[["close", "open"]].max(axis=1)
     df["lower_shadow"] = df[["close", "open"]].min(axis=1) - df["low"]
-
+    
     return df
 
 
-# ---------------- PATTERN-BASED SIGNAL DETECTION ----------------
+# ---------------- SIGNAL DETECTION WITH CONTEXT ----------------
 def detect_signal(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
-    confidence = 0.3  # базова впевненість
+    confidence = 0.3
 
-    # --- Свічкові патерни ---
+    # --- Candle patterns with context weighting ---
+    # Hammer near support
     if last["lower_shadow"] > 2 * abs(last["body"]) and last["body"] > 0:
-        votes.append("hammer_bull"); confidence *= 1.2
+        votes.append("hammer_bull")
+        if last["close"] <= last["support"] * 1.02:
+            confidence *= 1.5  # stronger near support
+        else:
+            confidence *= 1.2
+
+    # Shooting star near resistance
     elif last["upper_shadow"] > 2 * abs(last["body"]) and last["body"] < 0:
-        votes.append("shooting_star"); confidence *= 1.2
+        votes.append("shooting_star")
+        if last["close"] >= last["resistance"] * 0.98:
+            confidence *= 1.5
+        else:
+            confidence *= 1.2
 
+    # Engulfing patterns
     if last["body"] > 0 and prev["body"] < 0 and last["close"] > prev["open"] and last["open"] < prev["close"]:
-        votes.append("bullish_engulfing"); confidence *= 1.25
+        votes.append("bullish_engulfing")
+        if last["close"] <= last["support"] * 1.02:
+            confidence *= 1.4
+        else:
+            confidence *= 1.25
     elif last["body"] < 0 and prev["body"] > 0 and last["close"] < prev["open"] and last["open"] > prev["close"]:
-        votes.append("bearish_engulfing"); confidence *= 1.25
+        votes.append("bearish_engulfing")
+        if last["close"] >= last["resistance"] * 0.98:
+            confidence *= 1.4
+        else:
+            confidence *= 1.25
 
-    # --- Volume confirmation ---
+    # --- Volume spike confirmation ---
     if last["vol_spike"]:
-        votes.append("volume_spike"); confidence *= 1.15
+        votes.append("volume_spike")
+        confidence *= 1.15
 
-    # --- Fake breakout detection ---
+    # --- Fake breakout ---
     if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]:
-        votes.append("fake_breakout_short"); confidence *= 1.2
+        votes.append("fake_breakout_short")
+        confidence *= 1.2
     if prev["close"] < prev["support"] and last["close"] > last["support"]:
-        votes.append("fake_breakout_long"); confidence *= 1.2
+        votes.append("fake_breakout_long")
+        confidence *= 1.2
 
-    # --- Support/Resistance Flip ---
+    # --- S/R flip ---
     if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]:
-        votes.append("resistance_flip_support"); confidence *= 1.15
+        votes.append("resistance_flip_support")
+        confidence *= 1.15
     if prev["close"] > prev["support"] and last["close"] < last["support"]:
-        votes.append("support_flip_resistance"); confidence *= 1.15
+        votes.append("support_flip_resistance")
+        confidence *= 1.15
 
-    # --- Pre-top (перегрів) ---
+    # --- Pre-top (trend exhaustion) ---
     pretop = False
-    if len(df) >= 10:
-        if (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
-            pretop = True
-            votes.append("pretop"); confidence += 0.1
+    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
+        pretop = True
+        votes.append("pretop")
+        confidence += 0.1
 
-    # --- Дія відносно рівнів ---
+    # --- Action relative to S/R ---
     action = "WATCH"
     near_resistance = last["close"] >= last["resistance"] * 0.98
     near_support = last["close"] <= last["support"] * 1.02
@@ -212,9 +237,6 @@ def detect_signal(df: pd.DataFrame):
         action = "SHORT"
     elif near_support:
         action = "LONG"
-
-    if not (pretop or near_support or near_resistance):
-        action = "WATCH"
 
     confidence = max(0.0, min(1.0, confidence))
     return action, votes, pretop, last, confidence
@@ -230,7 +252,7 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
     if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue', linestyle="--"))
 
     fig, ax = mpf.plot(
-        df.tail(200), type='candle', style='yahoo',
+        df.tail(120), type='candle', style='yahoo',
         title=f"{symbol} - {action}", addplot=addplots, returnfig=True
     )
     buf = io.BytesIO()
@@ -241,56 +263,35 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
 
 
 # ---------------- MAIN ANALYZE FUNCTION ----------------
-# ---------------- MAIN ANALYZE FUNCTION ----------------
 def analyze_and_alert(symbol: str):
-    """
-    Аналіз сигналів з динамічними TP, контекстною вагою патернів,
-    trend exhaustion, multi-TF, RR та рейтингом сигналів.
-    """
-    # Беремо 200 свічок
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
+        logger.info("Symbol=%s: Not enough data", symbol)
         return
 
     df = apply_all_features(df)
+    action, votes, pretop, last, confidence = detect_signal(df)
 
-    # Multi-timeframe (1h)
+    if action == "WATCH":
+        logger.info("Symbol=%s: No actionable signal", symbol)
+        return
+
+    # Multi-timeframe 1h
     df_h1 = fetch_klines_rest(symbol, interval="1h", limit=200)
-    higher_tf_votes = []
     if df_h1 is not None and len(df_h1) > 50:
         df_h1 = apply_all_features(df_h1)
         last_h1 = df_h1.iloc[-1]
-        if last_h1["close"] > last_h1["close"].rolling(8).mean().iloc[-1]:
-            higher_tf_votes.append("higher_tf_up")
+        if last_h1["close"] > last_h1["support"] and action=="LONG":
+            confidence *= 1.2
+            votes.append("higher_tf_support")
+        elif last_h1["close"] < last_h1["resistance"] and action=="SHORT":
+            confidence *= 1.2
+            votes.append("higher_tf_resistance")
         else:
-            higher_tf_votes.append("higher_tf_down")
+            confidence *= 0.85
 
-    # Сигнали з локального ТФ
-    action, votes, pretop, last, confidence = detect_signal(df)
-
-    # Врахування тренду вищого ТФ (градієнт)
-    if higher_tf_votes:
-        if "higher_tf_up" in higher_tf_votes:
-            confidence *= 1.3 if action=="LONG" else 0.7
-        elif "higher_tf_down" in higher_tf_votes:
-            confidence *= 1.3 if action=="SHORT" else 0.7
-
-    # Контекстна вага патернів
-    if "hammer_bull" in votes and last["close"] <= last["support"]*1.02:
-        confidence *= 1.5
-    if "shooting_star" in votes and last["close"] >= last["resistance"]*0.98:
-        confidence *= 1.5
-
-    # Обʼєднування S/R та обʼєму
-    if last["close"] > last["resistance"] and last["volume"] > 2*last["vol_ma20"]:
-        confidence *= 1.3
-    if last["close"] < last["support"] and last["volume"] > 2*last["vol_ma20"]:
-        confidence *= 1.3
-
-    # Entry / SL / TP (динамічні TP через ATR)
+    # Entry/SL/TP via ATR
     atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range().iloc[-1]
-    entry = stop_loss = tp1 = tp2 = tp3 = None
-
     if action == "LONG":
         entry = last["support"]*1.001
         stop_loss = last["support"]*0.99
@@ -304,33 +305,20 @@ def analyze_and_alert(symbol: str):
         tp2 = entry - 2*atr
         tp3 = last["support"]
 
-    if action == "WATCH" or entry is None:
-        return
-
-    # RR
     rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
+    if rr1 < 2:
+        logger.info("Symbol=%s: RR1 too low (%.2f)", symbol, rr1)
+        return
     rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
     rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
 
-    # Trend exhaustion
-    if pretop and last["vol_spike"] and last["close"] > last["open"]:
-        confidence *= 0.9  # обережно біля перегріву
-
-    # Рейтинг сигналу
-    pattern_weight = min(1.0, len(votes)/5)  # нормалізація
-    score = confidence * rr1 * pattern_weight
-    SCORE_THRESHOLD = 0.5
-    if score < SCORE_THRESHOLD:
-        logger.info(f"Symbol={symbol} skipped, low score={score:.2f}")
-        return
-
     # Логування
     logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f score=%.2f",
-        symbol, action, confidence, votes, pretop, rr1, rr2, rr3, score
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
+        symbol, action, confidence, votes, pretop, rr1, rr2, rr3
     )
 
-    # Смайли для Telegram
+    # Telegram smilies
     emoji_entry = "🔹"
     emoji_sl = "🛑"
     emoji_tp1 = "✅"
@@ -350,11 +338,11 @@ def analyze_and_alert(symbol: str):
         f"Patterns: {', '.join(votes)}\n"
     )
 
-    # Малюємо графік
+    # Plot
     photo_buf = plot_signal_candles(df, symbol, action, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
     send_telegram(msg, photo=photo_buf)
 
-    # Зберігаємо стан
+    # Save state
     state.setdefault("signals", {})[symbol] = {
         "action": action,
         "entry": entry,
@@ -366,33 +354,11 @@ def analyze_and_alert(symbol: str):
         "rr2": rr2,
         "rr3": rr3,
         "confidence": confidence,
-        "score": score,
         "time": str(last.name),
         "last_price": float(last["close"]),
         "votes": votes
     }
     save_json_safe(STATE_FILE, state)
-
-
-# ---------------- Графік ----------------
-def plot_signal_candles(df, symbol, action, votes, pretop, tp1=None, tp2=None, tp3=None, sl=None, entry=None):
-    addplots = []
-    n = len(df)
-    if tp1: addplots.append(mpf.make_addplot([tp1]*n, color='green'))
-    if tp2: addplots.append(mpf.make_addplot([tp2]*n, color='lime'))
-    if tp3: addplots.append(mpf.make_addplot([tp3]*n, color='darkgreen'))
-    if sl: addplots.append(mpf.make_addplot([sl]*n, color='red'))
-    if entry: addplots.append(mpf.make_addplot([entry]*n, color='blue'))
-
-    fig, ax = mpf.plot(
-        df.tail(200), type='candle', style='yahoo',
-        title=f"{symbol} - {action}", addplot=addplots, returnfig=True
-    )
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
