@@ -252,7 +252,7 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
     if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue', linestyle="--"))
 
     fig, ax = mpf.plot(
-        df.tail(120), type='candle', style='yahoo',
+        df.tail(200), type='candle', style='yahoo',
         title=f"{symbol} - {action}", addplot=addplots, returnfig=True
     )
     buf = io.BytesIO()
