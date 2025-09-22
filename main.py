@@ -329,18 +329,26 @@ def fetch_top_symbols(limit=300):
     url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     try:
         resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
         data = resp.json()
+        if not isinstance(data, list):
+            logger.warning("Unexpected data format from Binance: %s", type(data))
+            return []
+
         # Відбираємо USDT-пари
-        usdt_pairs = [d for d in data if d['symbol'].endswith("USDT")]
+        usdt_pairs = [d for d in data if isinstance(d, dict) and d.get('symbol', '').endswith("USDT")]
+
         # Сортуємо за абсолютною зміною в %
         sorted_pairs = sorted(
             usdt_pairs, 
-            key=lambda x: abs(float(x["priceChangePercent"])), 
+            key=lambda x: abs(float(x.get("priceChangePercent", 0))), 
             reverse=True
         )
+
         top_symbols = [d["symbol"] for d in sorted_pairs[:limit]]
         logger.info("Top %d symbols fetched: %s", limit, top_symbols[:10])
         return top_symbols
+
     except Exception as e:
         logger.exception("Error fetching top symbols: %s", e)
         return []
