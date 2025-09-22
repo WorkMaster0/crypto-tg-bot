@@ -185,17 +185,66 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- ENHANCED SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
-    """
-    Оцінка сигналу на основі свічкових патернів, support/resistance,
-    flip та volume confirmation.
-    Повертає: action, votes, pretop, last_row, confidence
-    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
     confidence = 0.2
 
-    # ---------------- Candlestick Patterns ----------------
+    # EMA trend
+    if last["ema_8"] > last["ema_20"] > last["ema_50"]:
+        votes.append("ema_strong_up"); confidence += 0.15
+    elif last["ema_8"] < last["ema_20"] < last["ema_50"]:
+        votes.append("ema_strong_down"); confidence += 0.15
+    else:
+        votes.append("ema_sideways"); confidence += 0.05
+
+    # MACD
+    if last["MACD_cross_up"]:
+        votes.append("macd_cross_up"); confidence += 0.12
+    elif last["MACD_cross_down"]:
+        votes.append("macd_cross_down"); confidence += 0.12
+    else:
+        confidence += 0.05 if last["MACD_hist"] > 0 else 0.03
+
+    # RSI
+    if last["RSI_14"] < 30 or last["RSI_7"] < 20:
+        votes.append("rsi_oversold"); confidence += 0.08
+    elif last["RSI_14"] > 70 or last["RSI_7"] > 80:
+        votes.append("rsi_overbought"); confidence += 0.08
+
+    # Divergence detection
+    if len(df) >= 5:
+        price_diff = last["close"] - prev["close"]
+        rsi_diff = last["RSI_14"] - prev["RSI_14"]
+        if price_diff > 0 and rsi_diff < 0:
+            votes.append("bearish_divergence"); confidence *= 1.2
+        elif price_diff < 0 and rsi_diff > 0:
+            votes.append("bullish_divergence"); confidence *= 1.2
+
+    # ADX with direction
+    if last["ADX"] > 25:
+        votes.append("strong_trend")
+        confidence *= 1.1
+        if last["ADX_pos"] > last["ADX_neg"]:
+            votes.append("trend_up")
+        else:
+            votes.append("trend_down")
+
+    # Bollinger
+    if last["close"] > last["BB_high"]:
+        votes.append("bb_upper"); confidence += 0.05
+    elif last["close"] < last["BB_low"]:
+        votes.append("bb_lower"); confidence += 0.05
+
+    # Volume spike
+    if last["vol_spike"]:
+        votes.append("volume_spike"); confidence += 0.05
+
+    # Volume confirmation
+    if last["vol_spike"] and ("LONG" or "SHORT"):
+        votes.append("volume_confirmation"); confidence *= 1.1
+
+    # Candlestick patterns
     body = last["close"] - last["open"]
     rng = max(1e-9, last["high"] - last["low"])
     upper_shadow = last["high"] - max(last["close"], last["open"])
@@ -211,115 +260,163 @@ def detect_signal(df: pd.DataFrame):
     elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
         votes.append("bearish_engulfing"); confidence *= 1.25
 
-    if abs(body) < 0.1 * rng:
-        votes.append("doji"); confidence *= 1.1
+    # Pre-top detection
+    pretop = False
+    if len(df) >= 10:
+        if (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
+            pretop = True; votes.append("pretop"); confidence += 0.10
 
-    # ---------------- Support/Resistance Flip ----------------
-    flip_long = last["close"] > last["support"] and prev["close"] < prev["support"]
-    flip_short = last["close"] < last["resistance"] and prev["close"] > prev["resistance"]
-
-    # ---------------- Volume Confirmation ----------------
-    vol_confirm = last.get("vol_spike", False)
-
-    # ---------------- Action Determination ----------------
+    # Action based on support/resistance
     action = "WATCH"
     near_resistance = last["close"] >= last["resistance"] * 0.98
     near_support = last["close"] <= last["support"] * 1.02
 
-    if (near_support or flip_long) and any(p in votes for p in ["hammer_bull","bullish_engulfing","doji"]) and vol_confirm:
-        action = "LONG"; confidence += 0.15
-    elif (near_resistance or flip_short) and any(p in votes for p in ["shooting_star","bearish_engulfing","doji"]) and vol_confirm:
-        action = "SHORT"; confidence += 0.15
+    if near_resistance:
+        action = "SHORT"
+    elif near_support:
+        action = "LONG"
 
-    # ---------------- Pre-Top Detection ----------------
-    pretop = False
-    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
-        pretop = True
-        votes.append("pretop")
-        confidence += 0.10
+    if not (pretop or near_support or near_resistance):
+        action = "WATCH"
+
+    # Fake breakout
+    if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]:
+        votes.append("fake_breakout_short"); confidence *= 1.2
+    if prev["close"] < prev["support"] and last["close"] > last["support"]:
+        votes.append("fake_breakout_long"); confidence *= 1.2
+
+    # Support/Resistance Flip
+    if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]:
+        votes.append("resistance_flip_support"); confidence *= 1.15
+    if prev["close"] > prev["support"] and last["close"] < last["support"]:
+        votes.append("support_flip_resistance"); confidence *= 1.15
 
     confidence = max(0.0, min(1.0, confidence))
-
     return action, votes, pretop, last, confidence
 
-
+#----------analyze-------
 def analyze_and_alert(symbol: str):
     """
-    Аналіз сигналу на основі свічок, support/resistance та volume.
-    Три тейки, стоп, entry, RR та відправка на Telegram.
+    Повний аналіз з покращеними індикаторами, TP/SL, RR та multi-timeframe alignment.
     """
+    # Беремо 200 свічок для аналізу
     df = fetch_klines(symbol, limit=200)
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 40:
         return
 
-    df = df.copy()
-    
-    # ---------------- Feature Engineering ----------------
-    df["support"] = df["low"].rolling(20).min()
-    df["resistance"] = df["high"].rolling(20).max()
-    df["vol_ma20"] = df["volume"].rolling(20).mean()
-    df["vol_spike"] = df["volume"] > 1.5 * df["vol_ma20"]
+    df = apply_all_features(df)  # Покращені фічі
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    # Multi-timeframe (1h)
+    df_h1 = fetch_klines_rest(symbol, interval="1h", limit=200)
+    higher_tf_votes = []
+    if df_h1 is not None and len(df_h1) > 50:
+        df_h1 = apply_all_features(df_h1)
+        last_h1 = df_h1.iloc[-1]
+        trend_h1 = None
+        if last_h1["ema_8"] > last_h1["ema_20"] > last_h1["ema_50"]:
+            trend_h1 = "up"
+        elif last_h1["ema_8"] < last_h1["ema_20"] < last_h1["ema_50"]:
+            trend_h1 = "down"
 
-    # ---------------- Candlestick Patterns ----------------
-    votes = []
-    confidence = 0.2
-    body = last["close"] - last["open"]
-    rng = max(1e-9, last["high"] - last["low"])
-    upper_shadow = last["high"] - max(last["close"], last["open"])
-    lower_shadow = min(last["close"], last["open"]) - last["low"]
+        if trend_h1 == "up":
+            higher_tf_votes.append("higher_tf_up")
+        elif trend_h1 == "down":
+            higher_tf_votes.append("higher_tf_down")
 
-    if lower_shadow > 2 * abs(body) and body > 0:
-        votes.append("hammer_bull"); confidence *= 1.2
-    elif upper_shadow > 2 * abs(body) and body < 0:
-        votes.append("shooting_star"); confidence *= 1.2
+    # Сигнали з локального ТФ
+    action, votes, pretop, last, confidence = detect_signal(df)
 
-    if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
-        votes.append("bullish_engulfing"); confidence *= 1.25
-    elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
-        votes.append("bearish_engulfing"); confidence *= 1.25
+    # Врахування тренду вищого ТФ
+    if higher_tf_votes:
+        votes.extend(higher_tf_votes)
+        if "higher_tf_up" in higher_tf_votes and action == "LONG":
+            confidence *= 1.2
+        elif "higher_tf_down" in higher_tf_votes and action == "SHORT":
+            confidence *= 1.2
+        else:
+            confidence *= 0.8
 
-    if abs(body) < 0.1 * rng:
-        votes.append("doji"); confidence *= 1.1
+    prev_signal = state.get("signals", {}).get(symbol, {})
 
-    # ---------------- Support/Resistance Flip ----------------
-    flip_long = last["close"] > last["support"] and prev["close"] < prev["support"]
-    flip_short = last["close"] < last["resistance"] and prev["close"] > prev["resistance"]
-
-    # ---------------- Action Determination ----------------
-    action = "WATCH"
-    near_resistance = last["close"] >= last["resistance"] * 0.98
-    near_support = last["close"] <= last["support"] * 1.02
-
-    if (near_support or flip_long) and any(p in votes for p in ["hammer_bull","bullish_engulfing","doji"]) and last["vol_spike"]:
-        action = "LONG"; confidence += 0.15
-    elif (near_resistance or flip_short) and any(p in votes for p in ["shooting_star","bearish_engulfing","doji"]) and last["vol_spike"]:
-        action = "SHORT"; confidence += 0.15
-
-    confidence = max(0.0, min(1.0, confidence))
-    if action == "WATCH" or confidence < CONF_THRESHOLD_MEDIUM:
-        return  # сигнал не відправляємо
-
-    # ---------------- Entry / Stop-Loss / Take-Profits ----------------
+    # Визначаємо entry / TP / SL
+    entry = None; stop_loss = None; take_profit = None
     if action == "LONG":
         entry = last["support"] * 1.001
         stop_loss = last["support"] * 0.99
-        tp1 = entry + (last["resistance"] - entry) * 0.33
-        tp2 = entry + (last["resistance"] - entry) * 0.66
-        tp3 = last["resistance"]
-    else:
+        take_profit = last["resistance"] * 0.997
+    elif action == "SHORT":
         entry = last["resistance"] * 0.999
         stop_loss = last["resistance"] * 1.01
-        tp1 = entry - (entry - last["support"]) * 0.33
-        tp2 = entry - (entry - last["support"]) * 0.66
-        tp3 = last["support"]
+        take_profit = last["support"] * 1.003
 
-    # Risk/Reward
-    rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
-    rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
-    rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
+    # Відстані у %
+    dist_entry_from_now_pct = (entry / last["close"] - 1.0) * 100.0 if entry else None
+    dist_tp_pct = (take_profit / entry - 1.0) * 100.0 if entry and take_profit else None
+    dist_sl_pct = (stop_loss / entry - 1.0) * 100.0 if entry and stop_loss else None
+
+    # RR
+    rr = (abs(take_profit - entry) / abs(entry - stop_loss)) if entry and stop_loss and take_profit else 0.0
+
+    logger.info(
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR=%.2f",
+        symbol, action, confidence, votes, pretop, rr
+    )
+
+    # Відправка сигналу, якщо confidence >= порогу і новий сигнал
+    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal.get("action"):
+        reasons = []
+        if "pretop" in votes:
+            reasons.append("Pre-Top")
+        if "fake_breakout_long" in votes or "fake_breakout_short" in votes:
+            reasons.append("Fake Breakout")
+        if "bullish_divergence" in votes or "bearish_divergence" in votes:
+            reasons.append("Divergence")
+        if "resistance_flip_support" in votes or "support_flip_resistance" in votes:
+            reasons.append("S/R Flip")
+        if "volume_confirmation" in votes:
+            reasons.append("Volume Confirm")
+        if "higher_tf_up" in votes or "higher_tf_down" in votes:
+            reasons.append("Higher TF Alignment")
+        if not reasons:
+            reasons = ["Pattern mix"]
+
+        entry_str = f"{entry:.6f}" if entry else "—"
+        sl_str = f"{stop_loss:.6f}" if stop_loss else "—"
+        tp_str = f"{take_profit:.6f}" if take_profit else "—"
+        dist_now = f"{dist_entry_from_now_pct:+.2f}%" if dist_entry_from_now_pct else "—"
+        dist_to_tp = f"{dist_tp_pct:+.2f}%" if dist_tp_pct else "—"
+        dist_to_sl = f"{dist_sl_pct:+.2f}%" if dist_sl_pct else "—"
+
+        msg = (
+            f"⚡ TRADE SIGNAL\n"
+            f"Symbol: {symbol}\n"
+            f"Action: {action}\n"
+            f"Limit Entry: {entry_str} (now Δ {dist_now})\n"
+            f"Stop-Loss: {sl_str} (entry Δ {dist_to_sl})\n"
+            f"Take-Profit: {tp_str} (entry Δ {dist_to_tp})\n"
+            f"Risk/Reward: {rr:.2f}\n"
+            f"Confidence: {confidence:.2f}\n"
+            f"Reasons: {', '.join(reasons)}\n"
+            f"Patterns: {', '.join(votes)}\n"
+        )
+
+        # Графік з TP/SL/ENTRY
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop, tp=take_profit, sl=stop_loss, entry=entry)
+        send_telegram(msg, photo=photo_buf)
+
+        # Зберігаємо сигнал у стані
+        state.setdefault("signals", {})[symbol] = {
+            "action": action,
+            "entry": entry,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "rr": rr,
+            "confidence": confidence,
+            "time": str(last.name),
+            "last_price": float(last["close"]),
+            "votes": votes
+        }
+        save_json_safe(STATE_FILE, state)
 
     # ---------------- Message ----------------
     msg = (
