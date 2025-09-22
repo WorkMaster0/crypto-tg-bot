@@ -284,9 +284,9 @@ def analyze_and_alert(symbol: str):
     if df is None or len(df) < 40:
         return
 
-    df = apply_all_features_enhanced(df)  # Покращені фічі
+    df = apply_all_features(df)  # Покращені фічі
 
-    action, votes, pretop, last, confidence = detect_signal_enhanced(df)
+    action, votes, pretop, last, confidence = detect_signal(df)
     prev_signal = state.get("signals", {}).get(symbol, {})
 
     # Визначаємо entry / TP / SL
@@ -345,7 +345,7 @@ def analyze_and_alert(symbol: str):
         )
 
         # Графік з TP/SL/ENTRY
-        photo_buf = plot_signal_candles_enhanced(df, symbol, action, votes, pretop, tp=take_profit, sl=stop_loss, entry=entry)
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop, tp=take_profit, sl=stop_loss, entry=entry)
         send_telegram(msg, photo=photo_buf)
 
         # Зберігаємо сигнал у стані
