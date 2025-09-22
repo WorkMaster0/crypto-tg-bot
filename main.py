@@ -153,22 +153,71 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def get_symbol_market_cap(symbol: str) -> float:
-    """
-    Отримує капіталізацію токена з CoinGecko.
-    Якщо немає даних -> повертає 0.
-    """
+# ---------------- MARKET CAP HELPER ----------------
+COINGECKO_API = "https://api.coingecko.com/api/v3"
+COINGECKO_MAP_FILE = "coingecko_map.json"
+
+# Завантаження кастомної мапи
+if os.path.exists(COINGECKO_MAP_FILE):
+    with open(COINGECKO_MAP_FILE, "r") as f:
+        COINGECKO_MAP = json.load(f)
+else:
+    COINGECKO_MAP = {
+        "WOOUSDT": "woo-network",
+        "SUNUSDT": "sun-token",
+        "MEMEUSDT": "memecoin",
+        "LINEAUSDT": "linea",
+        "PORTALUSDT": "portal",
+        "BRETTUSDT": "based-brett",
+        "TOWNSUSDT": "town-star",
+        "AI16ZUSDT": "ai16z",
+    }
+
+def save_map():
     try:
-        # Прибираємо "USDT" і зводимо до нижнього регістру
-        base = symbol.replace("USDT", "").lower()
+        with open(COINGECKO_MAP_FILE, "w") as f:
+            json.dump(COINGECKO_MAP, f, indent=2)
+    except Exception as e:
+        logger.warning("Cannot save COINGECKO_MAP: %s", e)
 
-        url = f"https://api.coingecko.com/api/v3/coins/{base}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return 0.0
-
+def search_coingecko_id(symbol: str) -> str | None:
+    """Пошук правильного id для монети через CoinGecko search API"""
+    try:
+        coin = symbol.replace("USDT", "").lower()
+        resp = requests.get(f"{COINGECKO_API}/search", params={"query": coin}, timeout=10)
+        resp.raise_for_status()
         data = resp.json()
-        return data.get("market_data", {}).get("market_cap", {}).get("usd", 0.0)
+        if "coins" in data and data["coins"]:
+            # беремо перший результат
+            return data["coins"][0]["id"]
+    except Exception as e:
+        logger.warning("Search failed for %s: %s", symbol, e)
+    return None
+
+def get_symbol_market_cap(symbol: str) -> float:
+    try:
+        # 1. Дивимось у мапу
+        coin_id = COINGECKO_MAP.get(symbol)
+        if not coin_id:
+            # 2. Авто-пошук
+            coin_id = search_coingecko_id(symbol)
+            if coin_id:
+                COINGECKO_MAP[symbol] = coin_id
+                save_map()
+            else:
+                return 0.0
+
+        # 3. Беремо дані з CoinGecko
+        resp = requests.get(
+            f"{COINGECKO_API}/coins/markets",
+            params={"vs_currency": "usd", "ids": coin_id},
+            timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            return 0.0
+        return float(data[0].get("market_cap", 0.0))
     except Exception as e:
         logger.warning("Cannot fetch market cap for %s: %s", symbol, e)
         return 0.0
