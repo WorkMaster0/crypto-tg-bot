@@ -295,16 +295,35 @@ def detect_signal(df: pd.DataFrame):
     return action, votes, pretop, last, confidence
 
 #----------analyze-------
+def plot_signal_candles(df, symbol, action, votes, pretop, tp1=None, tp2=None, tp3=None, sl=None, entry=None):
+    addplots = []
+    if tp1: addplots.append(mpf.make_addplot([tp1]*len(df), color='green'))
+    if tp2: addplots.append(mpf.make_addplot([tp2]*len(df), color='lime'))
+    if tp3: addplots.append(mpf.make_addplot([tp3]*len(df), color='darkgreen'))
+    if sl: addplots.append(mpf.make_addplot([sl]*len(df), color='red'))
+    if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue'))
+
+    fig, ax = mpf.plot(
+        df.tail(200), type='candle', style='yahoo',
+        title=f"{symbol} - {action}", addplot=addplots, returnfig=True
+    )
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
 def analyze_and_alert(symbol: str):
     """
-    Повний аналіз з покращеними індикаторами, TP/SL, RR та multi-timeframe alignment.
+    Повний аналіз сигналів: TP/SL, RR, патерни, вищий ТФ, графік із трьома тейками.
     """
-    # Беремо 200 свічок для аналізу
+    # Беремо 200 свічок
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
 
-    df = apply_all_features(df)  # Покращені фічі
+    df = apply_all_features(df)
 
     # Multi-timeframe (1h)
     df_h1 = fetch_klines_rest(symbol, interval="1h", limit=200)
@@ -312,15 +331,9 @@ def analyze_and_alert(symbol: str):
     if df_h1 is not None and len(df_h1) > 50:
         df_h1 = apply_all_features(df_h1)
         last_h1 = df_h1.iloc[-1]
-        trend_h1 = None
         if last_h1["ema_8"] > last_h1["ema_20"] > last_h1["ema_50"]:
-            trend_h1 = "up"
-        elif last_h1["ema_8"] < last_h1["ema_20"] < last_h1["ema_50"]:
-            trend_h1 = "down"
-
-        if trend_h1 == "up":
             higher_tf_votes.append("higher_tf_up")
-        elif trend_h1 == "down":
+        elif last_h1["ema_8"] < last_h1["ema_20"] < last_h1["ema_50"]:
             higher_tf_votes.append("higher_tf_down")
 
     # Сигнали з локального ТФ
@@ -336,34 +349,34 @@ def analyze_and_alert(symbol: str):
         else:
             confidence *= 0.8
 
-    prev_signal = state.get("signals", {}).get(symbol, {})
-
-    # Визначаємо entry / TP / SL
-    entry = None; stop_loss = None; take_profit = None
+    # Entry / SL / TP
+    entry = None; stop_loss = None; tp1 = None; tp2 = None; tp3 = None
     if action == "LONG":
         entry = last["support"] * 1.001
         stop_loss = last["support"] * 0.99
-        take_profit = last["resistance"] * 0.997
+        tp1 = entry + (last["resistance"] - entry) * 0.33
+        tp2 = entry + (last["resistance"] - entry) * 0.66
+        tp3 = last["resistance"]
     elif action == "SHORT":
         entry = last["resistance"] * 0.999
         stop_loss = last["resistance"] * 1.01
-        take_profit = last["support"] * 1.003
+        tp1 = entry - (entry - last["support"]) * 0.33
+        tp2 = entry - (entry - last["support"]) * 0.66
+        tp3 = last["support"]
 
-    # Відстані у %
-    dist_entry_from_now_pct = (entry / last["close"] - 1.0) * 100.0 if entry else None
-    dist_tp_pct = (take_profit / entry - 1.0) * 100.0 if entry and take_profit else None
-    dist_sl_pct = (stop_loss / entry - 1.0) * 100.0 if entry and stop_loss else None
+    # R/R
+    rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
+    rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
+    rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
 
-    # RR
-    rr = (abs(take_profit - entry) / abs(entry - stop_loss)) if entry and stop_loss and take_profit else 0.0
-
+    # Логування
     logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR=%.2f",
-        symbol, action, confidence, votes, pretop, rr
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
+        symbol, action, confidence, votes, pretop, rr1, rr2, rr3
     )
 
-    # Відправка сигналу, якщо confidence >= порогу і новий сигнал
-    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal.get("action"):
+    # Фільтр сигналів (поріг по confidence)
+    if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM:
         reasons = []
         if "pretop" in votes:
             reasons.append("Pre-Top")
@@ -380,145 +393,44 @@ def analyze_and_alert(symbol: str):
         if not reasons:
             reasons = ["Pattern mix"]
 
-        entry_str = f"{entry:.6f}" if entry else "—"
-        sl_str = f"{stop_loss:.6f}" if stop_loss else "—"
-        tp_str = f"{take_profit:.6f}" if take_profit else "—"
-        dist_now = f"{dist_entry_from_now_pct:+.2f}%" if dist_entry_from_now_pct else "—"
-        dist_to_tp = f"{dist_tp_pct:+.2f}%" if dist_tp_pct else "—"
-        dist_to_sl = f"{dist_sl_pct:+.2f}%" if dist_sl_pct else "—"
-
         msg = (
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
-            f"Limit Entry: {entry_str} (now Δ {dist_now})\n"
-            f"Stop-Loss: {sl_str} (entry Δ {dist_to_sl})\n"
-            f"Take-Profit: {tp_str} (entry Δ {dist_to_tp})\n"
-            f"Risk/Reward: {rr:.2f}\n"
+            f"Entry: {entry:.6f}\n"
+            f"Stop-Loss: {stop_loss:.6f}\n"
+            f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
+            f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
+            f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
             f"Confidence: {confidence:.2f}\n"
             f"Reasons: {', '.join(reasons)}\n"
             f"Patterns: {', '.join(votes)}\n"
         )
 
-        # Графік з TP/SL/ENTRY
-        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop, tp=take_profit, sl=stop_loss, entry=entry)
+        # Малюємо графік
+        photo_buf = plot_signal_candles(
+            df, symbol, action, votes, pretop,
+            tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry
+        )
         send_telegram(msg, photo=photo_buf)
 
-        # Зберігаємо сигнал у стані
+        # Зберігаємо стан
         state.setdefault("signals", {})[symbol] = {
             "action": action,
             "entry": entry,
             "sl": stop_loss,
-            "tp": take_profit,
-            "rr": rr,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr1": rr1,
+            "rr2": rr2,
+            "rr3": rr3,
             "confidence": confidence,
             "time": str(last.name),
             "last_price": float(last["close"]),
             "votes": votes
         }
         save_json_safe(STATE_FILE, state)
-
-    # ---------------- Message ----------------
-    msg = (
-        f"⚡ TRADE SIGNAL\n"
-        f"Symbol: {symbol}\n"
-        f"Action: {action}\n"
-        f"Entry: {entry:.6f}\n"
-        f"Stop-Loss: {stop_loss:.6f}\n"
-        f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
-        f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
-        f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
-        f"Confidence: {confidence:.2f}\n"
-        f"Patterns: {', '.join(votes)}\n"
-    )
-
-    # ---------------- Plot with 3 TPs ----------------
-    addplots = [
-        mpf.make_addplot([tp1]*len(df), color='green'),
-        mpf.make_addplot([tp2]*len(df), color='lime'),
-        mpf.make_addplot([tp3]*len(df), color='darkgreen'),
-        mpf.make_addplot([stop_loss]*len(df), color='red'),
-        mpf.make_addplot([entry]*len(df), color='blue')
-    ]
-    fig, ax = mpf.plot(df.tail(200), type='candle', style='yahoo', title=f"{symbol} - {action}", addplot=addplots, returnfig=True)
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-
-    # ---------------- Send to Telegram ----------------
-    send_telegram(msg, photo=buf)
-
-    # ---------------- Save state ----------------
-    state.setdefault("signals", {})[symbol] = {
-        "action": action,
-        "entry": entry,
-        "sl": stop_loss,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "rr1": rr1,
-        "rr2": rr2,
-        "rr3": rr3,
-        "confidence": confidence,
-        "time": str(last.name),
-        "last_price": float(last["close"]),
-        "votes": votes
-    }
-    save_json_safe(STATE_FILE, state)
-
-    # ---------------- Message ----------------
-    msg = (
-        f"⚡ TRADE SIGNAL\n"
-        f"Symbol: {symbol}\n"
-        f"Action: {action}\n"
-        f"Entry: {entry:.6f}\n"
-        f"Stop-Loss: {stop_loss:.6f}\n"
-        f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
-        f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
-        f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
-        f"Confidence: {confidence:.2f}\n"
-        f"Patterns: {', '.join(votes)}\n"
-    )
-
-    # ---------------- Plot ----------------
-    addplots = [
-        mpf.make_addplot([tp1]*len(df), color='green'),
-        mpf.make_addplot([tp2]*len(df), color='lime'),
-        mpf.make_addplot([tp3]*len(df), color='darkgreen'),
-        mpf.make_addplot([stop_loss]*len(df), color='red'),
-        mpf.make_addplot([entry]*len(df), color='blue')
-    ]
-
-    fig, ax = mpf.plot(
-        df.tail(200), type='candle', style='yahoo',
-        title=f"{symbol} - {action}", addplot=addplots, returnfig=True
-    )
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-
-    # ---------------- Send Telegram ----------------
-    send_telegram(msg, photo=buf)
-
-    # ---------------- Save state ----------------
-    state.setdefault("signals", {})[symbol] = {
-        "action": action,
-        "entry": entry,
-        "sl": stop_loss,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "rr1": rr1,
-        "rr2": rr2,
-        "rr3": rr3,
-        "confidence": confidence,
-        "time": str(last.name),
-        "last_price": float(last["close"]),
-        "votes": votes
-    }
-    save_json_safe(STATE_FILE, state)
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
