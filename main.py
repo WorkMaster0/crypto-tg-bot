@@ -153,86 +153,12 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# ---------------- MARKET CAP HELPER ----------------
-COINGECKO_API = "https://api.coingecko.com/api/v3"
-COINGECKO_MAP_FILE = "coingecko_map.json"
-
-# Завантаження кастомної мапи
-if os.path.exists(COINGECKO_MAP_FILE):
-    with open(COINGECKO_MAP_FILE, "r") as f:
-        COINGECKO_MAP = json.load(f)
-else:
-    COINGECKO_MAP = {
-        "WOOUSDT": "woo-network",
-        "SUNUSDT": "sun-token",
-        "MEMEUSDT": "memecoin",
-        "LINEAUSDT": "linea",
-        "PORTALUSDT": "portal",
-        "BRETTUSDT": "based-brett",
-        "TOWNSUSDT": "town-star",
-        "AI16ZUSDT": "ai16z",
-    }
-
-def save_map():
-    try:
-        with open(COINGECKO_MAP_FILE, "w") as f:
-            json.dump(COINGECKO_MAP, f, indent=2)
-    except Exception as e:
-        logger.warning("Cannot save COINGECKO_MAP: %s", e)
-
-def search_coingecko_id(symbol: str) -> str | None:
-    """Пошук правильного id для монети через CoinGecko search API"""
-    try:
-        coin = symbol.replace("USDT", "").lower()
-        resp = requests.get(f"{COINGECKO_API}/search", params={"query": coin}, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if "coins" in data and data["coins"]:
-            # беремо перший результат
-            return data["coins"][0]["id"]
-    except Exception as e:
-        logger.warning("Search failed for %s: %s", symbol, e)
-    return None
-
-def get_symbol_market_cap(symbol: str) -> float:
-    try:
-        # 1. Дивимось у мапу
-        coin_id = COINGECKO_MAP.get(symbol)
-        if not coin_id:
-            # 2. Авто-пошук
-            coin_id = search_coingecko_id(symbol)
-            if coin_id:
-                COINGECKO_MAP[symbol] = coin_id
-                save_map()
-            else:
-                return 0.0
-
-        # 3. Беремо дані з CoinGecko
-        resp = requests.get(
-            f"{COINGECKO_API}/coins/markets",
-            params={"vs_currency": "usd", "ids": coin_id},
-            timeout=10
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data:
-            return 0.0
-        return float(data[0].get("market_cap", 0.0))
-    except Exception as e:
-        logger.warning("Cannot fetch market cap for %s: %s", symbol, e)
-        return 0.0
-
 # ---------------- PATTERN-BASED SIGNAL DETECTION ----------------
 def analyze_and_alert(symbol: str):
     try:
-        # --- Перевірка капіталізації ---
-        market_cap = get_symbol_market_cap(symbol)
-        if market_cap < 5_000_000:
-            logger.info("Skipping %s due to low market cap: %.2f", symbol, market_cap)
-            return
 
         # --- Завантажуємо дані ---
-        df = fetch_klines(symbol, limit=200)
+        df = fetch_klines(symbol, intervals=15, limit=200)
         if df is None or len(df) < 50:
             logger.info("Symbol=%s: Not enough data", symbol)
             return
