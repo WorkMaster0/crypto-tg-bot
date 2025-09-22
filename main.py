@@ -15,6 +15,8 @@ import mplfinance as mpf
 import numpy as np
 import io
 
+from binance.client import Client
+
 # ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +33,9 @@ PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "6"))
 EMA_SCAN_LIMIT = 500
 STATE_FILE = "state.json"
 CONF_THRESHOLD_MEDIUM = 0.55
+
+# ---------------- BINANCE CLIENT ----------------
+binance_client = Client(api_key="", api_secret="")
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -324,61 +329,33 @@ def analyze_and_alert(symbol: str):
         }
         save_json_safe(STATE_FILE, state)
 
-# ---------------- DYNAMIC TOP SYMBOLS ----------------
+# ---------------- FETCH TOP SYMBOLS ----------------
 def fetch_top_symbols(limit=300):
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/117.0.0.0 Safari/537.36"
-    }
     try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, list):
-            logger.warning("Unexpected data format from Binance: %s", type(data))
-            return []
-
-        # Відбираємо USDT-пари
-        usdt_pairs = [d for d in data if isinstance(d, dict) and d.get('symbol', '').endswith("USDT")]
-
-        # Сортуємо за абсолютною зміною в %
-        sorted_pairs = sorted(
-            usdt_pairs, 
-            key=lambda x: abs(float(x.get("priceChangePercent", 0))), 
-            reverse=True
-        )
-
+        tickers = binance_client.get_ticker_24hr()
+        usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: abs(float(x.get("priceChangePercent", 0))), reverse=True)
         top_symbols = [d["symbol"] for d in sorted_pairs[:limit]]
         logger.info("Top %d symbols fetched: %s", limit, top_symbols[:10])
         return top_symbols
-
     except Exception as e:
         logger.exception("Error fetching top symbols: %s", e)
         return []
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
-    # Динамічно отримуємо топ-300 монет по зміні %
     symbols = fetch_top_symbols(limit=300)
     if not symbols:
         logger.warning("No symbols fetched, falling back to ALL_USDT list")
         symbols = ALL_USDT
-
     logger.info("Starting scan for %d symbols", len(symbols))
-
     def safe_analyze(sym):
         try:
             analyze_and_alert(sym)
         except Exception as e:
             logger.exception("Error analyzing symbol %s: %s", sym, e)
-
-    # Паралельне сканування
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as exe:
         list(exe.map(safe_analyze, symbols))
-
-    # Зберігаємо час останнього сканування
     state["last_scan"] = str(datetime.now(timezone.utc))
     save_json_safe(STATE_FILE, state)
     logger.info("Scan finished at %s", state["last_scan"])
