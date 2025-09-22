@@ -241,119 +241,137 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
 
 
 # ---------------- MAIN ANALYZE FUNCTION ----------------
+# ---------------- MAIN ANALYZE FUNCTION ----------------
 def analyze_and_alert(symbol: str):
     """
-    Повний аналіз сигналів: TP/SL, RR, патерни, вищий TF, графік із трьома тейками.
-    Логування всіх сигналів для дебагу.
+    Аналіз сигналів з динамічними TP, контекстною вагою патернів,
+    trend exhaustion, multi-TF, RR та рейтингом сигналів.
     """
+    # Беремо 200 свічок
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
 
     df = apply_all_features(df)
 
-    # ---------------- Multi-timeframe ----------------
+    # Multi-timeframe (1h)
     df_h1 = fetch_klines_rest(symbol, interval="1h", limit=200)
     higher_tf_votes = []
     if df_h1 is not None and len(df_h1) > 50:
         df_h1 = apply_all_features(df_h1)
         last_h1 = df_h1.iloc[-1]
-        if last_h1["ema_8"] > last_h1["ema_20"] > last_h1["ema_50"]:
+        if last_h1["close"] > last_h1["close"].rolling(8).mean().iloc[-1]:
             higher_tf_votes.append("higher_tf_up")
-        elif last_h1["ema_8"] < last_h1["ema_20"] < last_h1["ema_50"]:
+        else:
             higher_tf_votes.append("higher_tf_down")
 
-    # ---------------- Детект сигналу ----------------
+    # Сигнали з локального ТФ
     action, votes, pretop, last, confidence = detect_signal(df)
 
-    # Логування всіх сигналів для дебагу
-    logger.info(
-        "DEBUG Signal: %s action=%s confidence=%.2f votes=%s pretop=%s",
-        symbol, action, confidence, votes, pretop
-    )
-
-    # Врахування тренду вищого TF
+    # Врахування тренду вищого ТФ (градієнт)
     if higher_tf_votes:
-        votes.extend(higher_tf_votes)
-        if "higher_tf_up" in higher_tf_votes and action == "LONG":
-            confidence *= 1.2
-        elif "higher_tf_down" in higher_tf_votes and action == "SHORT":
-            confidence *= 1.2
-        else:
-            confidence *= 0.8
+        if "higher_tf_up" in higher_tf_votes:
+            confidence *= 1.3 if action=="LONG" else 0.7
+        elif "higher_tf_down" in higher_tf_votes:
+            confidence *= 1.3 if action=="SHORT" else 0.7
 
-    # ---------------- Entry / SL / TP ----------------
+    # Контекстна вага патернів
+    if "hammer_bull" in votes and last["close"] <= last["support"]*1.02:
+        confidence *= 1.5
+    if "shooting_star" in votes and last["close"] >= last["resistance"]*0.98:
+        confidence *= 1.5
+
+    # Обʼєднування S/R та обʼєму
+    if last["close"] > last["resistance"] and last["volume"] > 2*last["vol_ma20"]:
+        confidence *= 1.3
+    if last["close"] < last["support"] and last["volume"] > 2*last["vol_ma20"]:
+        confidence *= 1.3
+
+    # Entry / SL / TP (динамічні TP через ATR)
+    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], 14).average_true_range().iloc[-1]
     entry = stop_loss = tp1 = tp2 = tp3 = None
+
     if action == "LONG":
-        entry = last["support"] * 1.001
-        stop_loss = last["support"] * 0.99
-        tp1 = entry + (last["resistance"] - entry) * 0.33
-        tp2 = entry + (last["resistance"] - entry) * 0.66
+        entry = last["support"]*1.001
+        stop_loss = last["support"]*0.99
+        tp1 = entry + atr
+        tp2 = entry + 2*atr
         tp3 = last["resistance"]
     elif action == "SHORT":
-        entry = last["resistance"] * 0.999
-        stop_loss = last["resistance"] * 1.01
-        tp1 = entry - (entry - last["support"]) * 0.33
-        tp2 = entry - (entry - last["support"]) * 0.66
+        entry = last["resistance"]*0.999
+        stop_loss = last["resistance"]*1.01
+        tp1 = entry - atr
+        tp2 = entry - 2*atr
         tp3 = last["support"]
 
-    # ---------------- R/R ----------------
-    if entry and stop_loss and tp1 and tp2 and tp3:
-        rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
-        rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
-        rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
-    else:
-        rr1 = rr2 = rr3 = 0.0
+    if action == "WATCH" or entry is None:
+        return
 
-    # ---------------- Фільтр сигналів ----------------
-    send_signal = action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and rr1 >= 2.0
+    # RR
+    rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
+    rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
+    rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
 
-    # Причини сигналу
-    reasons = []
-    if "pretop" in votes: reasons.append("⏫")
-    if "fake_breakout_long" in votes or "fake_breakout_short" in votes: reasons.append("💥")
-    if "bullish_divergence" in votes or "bearish_divergence" in votes: reasons.append("📈")
-    if "resistance_flip_support" in votes or "support_flip_resistance" in votes: reasons.append("🔄")
-    if "volume_confirmation" in votes: reasons.append("🔊")
-    if "higher_tf_up" in votes or "higher_tf_down" in votes: reasons.append("🕒")
-    if not reasons: reasons = ["✨"]
+    # Trend exhaustion
+    if pretop and last["vol_spike"] and last["close"] > last["open"]:
+        confidence *= 0.9  # обережно біля перегріву
 
-    # ---------------- Формуємо повідомлення ----------------
-    msg = (
-        f"⚡ {symbol}\n"
-        f"➡️ {action}\n"
-        f"🔹 Entry: {entry:.6f}\n"
-        f"🛑 Stop: {stop_loss:.6f}\n"
-        f"💰 TP1: {tp1:.6f} (RR {rr1:.2f})\n"
-        f"💰 TP2: {tp2:.6f} (RR {rr2:.2f})\n"
-        f"💰 TP3: {tp3:.6f} (RR {rr3:.2f})\n"
-        f"🎯 Confidence: {confidence:.2f}\n"
-        f"💡 Reasons: {' '.join(reasons)}\n"
-        f"📊 Patterns: {', '.join(votes)}"
+    # Рейтинг сигналу
+    pattern_weight = min(1.0, len(votes)/5)  # нормалізація
+    score = confidence * rr1 * pattern_weight
+    SCORE_THRESHOLD = 0.5
+    if score < SCORE_THRESHOLD:
+        logger.info(f"Symbol={symbol} skipped, low score={score:.2f}")
+        return
+
+    # Логування
+    logger.info(
+        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f score=%.2f",
+        symbol, action, confidence, votes, pretop, rr1, rr2, rr3, score
     )
 
-    # ---------------- Малюємо графік ----------------
-    if send_signal:
-        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
-        send_telegram(msg, photo=photo_buf)
+    # Смайли для Telegram
+    emoji_entry = "🔹"
+    emoji_sl = "🛑"
+    emoji_tp1 = "✅"
+    emoji_tp2 = "✅✅"
+    emoji_tp3 = "🏁"
 
-        # ---------------- Зберігаємо стан ----------------
-        state.setdefault("signals", {})[symbol] = {
-            "action": action,
-            "entry": entry,
-            "sl": stop_loss,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "rr1": rr1,
-            "rr2": rr2,
-            "rr3": rr3,
-            "confidence": confidence,
-            "time": str(last.name),
-            "last_price": float(last["close"]),
-            "votes": votes
-        }
-        save_json_safe(STATE_FILE, state)
+    msg = (
+        f"⚡ TRADE SIGNAL\n"
+        f"Symbol: {symbol}\n"
+        f"Action: {action}\n"
+        f"{emoji_entry} Entry: {entry:.6f}\n"
+        f"{emoji_sl} Stop-Loss: {stop_loss:.6f}\n"
+        f"{emoji_tp1} TP1: {tp1:.6f} (RR {rr1:.2f})\n"
+        f"{emoji_tp2} TP2: {tp2:.6f} (RR {rr2:.2f})\n"
+        f"{emoji_tp3} TP3: {tp3:.6f} (RR {rr3:.2f})\n"
+        f"Confidence: {confidence:.2f}\n"
+        f"Patterns: {', '.join(votes)}\n"
+    )
+
+    # Малюємо графік
+    photo_buf = plot_signal_candles(df, symbol, action, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
+    send_telegram(msg, photo=photo_buf)
+
+    # Зберігаємо стан
+    state.setdefault("signals", {})[symbol] = {
+        "action": action,
+        "entry": entry,
+        "sl": stop_loss,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "rr1": rr1,
+        "rr2": rr2,
+        "rr3": rr3,
+        "confidence": confidence,
+        "score": score,
+        "time": str(last.name),
+        "last_price": float(last["close"]),
+        "votes": votes
+    }
+    save_json_safe(STATE_FILE, state)
 
 
 # ---------------- Графік ----------------
