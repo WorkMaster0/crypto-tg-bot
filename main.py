@@ -332,9 +332,14 @@ def analyze_and_alert(symbol: str):
 # ---------------- FETCH TOP SYMBOLS ----------------
 def fetch_top_symbols(limit=300):
     try:
-        tickers = binance_client.get_ticker_24hr()
+        # Отримуємо всі 24h тикери
+        tickers = binance_client.ticker_24hr()  # <-- правильний метод
         usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
-        sorted_pairs = sorted(usdt_pairs, key=lambda x: abs(float(x.get("priceChangePercent", 0))), reverse=True)
+        sorted_pairs = sorted(
+            usdt_pairs,
+            key=lambda x: abs(float(x.get("priceChangePercent", 0))),
+            reverse=True
+        )
         top_symbols = [d["symbol"] for d in sorted_pairs[:limit]]
         logger.info("Top %d symbols fetched: %s", limit, top_symbols[:10])
         return top_symbols
