@@ -183,7 +183,7 @@ def analyze_and_alert(symbol: str):
             return
 
         # --- Завантажуємо дані ---
-        df = fetch_klines(symbol, interval="15m", limit=200)
+        df = fetch_klines(symbol, limit=200)
         if df is None or len(df) < 50:
             logger.info("Symbol=%s: Not enough data", symbol)
             return
