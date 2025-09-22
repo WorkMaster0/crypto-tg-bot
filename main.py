@@ -242,15 +242,20 @@ def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, ent
     addplots = []
 
     if sl is not None:
-        addplots.append(mpf.make_addplot([sl]*len(df_plot), linestyle="--", linewidth=1.0, color="red"))
+        addplots.append(mpf.make_addplot([sl]*len(df_plot), linestyle="--", width=1.0, color="red"))
     if tp is not None:
-        addplots.append(mpf.make_addplot([tp]*len(df_plot), linestyle="--", linewidth=1.0, color="green"))
+        addplots.append(mpf.make_addplot([tp]*len(df_plot), linestyle="--", width=1.0, color="green"))
     if "support" in df_plot.columns and "resistance" in df_plot.columns:
-        addplots.append(mpf.make_addplot([df_plot["support"].iloc[-1]]*len(df_plot), linestyle=":", linewidth=0.8, color="blue"))
-        addplots.append(mpf.make_addplot([df_plot["resistance"].iloc[-1]]*len(df_plot), linestyle=":", linewidth=0.8, color="blue"))
+        addplots.append(mpf.make_addplot([df_plot["support"].iloc[-1]]*len(df_plot), linestyle=":", width=0.8, color="blue"))
+        addplots.append(mpf.make_addplot([df_plot["resistance"].iloc[-1]]*len(df_plot), linestyle=":", width=0.8, color="blue"))
     if entry is not None:
-        addplots.append(mpf.make_addplot([entry]*len(df_plot), scatter=True, markersize=50,
-                                         marker='v' if action == "SHORT" else '^', color="orange"))
+        addplots.append(mpf.make_addplot(
+            [entry]*len(df_plot),
+            scatter=True,
+            markersize=80,
+            marker='v' if action == "SHORT" else '^',
+            color="orange"
+        ))
 
     fig, ax = mpf.plot(
         df_plot,
