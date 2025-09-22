@@ -327,8 +327,13 @@ def analyze_and_alert(symbol: str):
 # ---------------- DYNAMIC TOP SYMBOLS ----------------
 def fetch_top_symbols(limit=300):
     url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/117.0.0.0 Safari/537.36"
+    }
     try:
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, headers=headers, timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, list):
