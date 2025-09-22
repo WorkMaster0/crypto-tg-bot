@@ -128,118 +128,145 @@ def fetch_klines(symbol, limit=500):
         df = fetch_klines_rest(symbol, limit=limit)
     return df
 
-# ---------------- FEATURE ENGINEERING ----------------
+# ---------------- ENHANCED FEATURE ENGINEERING ----------------
 def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # EMA
     df["ema_8"] = ta.trend.EMAIndicator(df["close"], 8).ema_indicator()
     df["ema_20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
+    df["ema_50"] = ta.trend.EMAIndicator(df["close"], 50).ema_indicator()
+
+    # RSI
     df["RSI_14"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
+    df["RSI_7"] = ta.momentum.RSIIndicator(df["close"], 7).rsi()
+
+    # MACD
     macd = ta.trend.MACD(df["close"])
     df["MACD"] = macd.macd()
     df["MACD_signal"] = macd.macd_signal()
     df["MACD_hist"] = macd.macd_diff()
+    df["MACD_cross_up"] = ((df["MACD"] > df["MACD_signal"]) & (df["MACD"].shift(1) <= df["MACD_signal"].shift(1)))
+    df["MACD_cross_down"] = ((df["MACD"] < df["MACD_signal"]) & (df["MACD"].shift(1) >= df["MACD_signal"].shift(1)))
+
+    # ADX
     adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], 14)
     df["ADX"] = adx.adx()
     df["ADX_pos"] = adx.adx_pos()
     df["ADX_neg"] = adx.adx_neg()
+
+    # Bollinger Bands
+    bb = ta.volatility.BollingerBands(df["close"], 20, 2)
+    df["BB_high"] = bb.bollinger_hband()
+    df["BB_low"] = bb.bollinger_lband()
+    
+    # Support/Resistance
     df["support"] = df["low"].rolling(20).min()
     df["resistance"] = df["high"].rolling(20).max()
+
+    # Volume spike
+    df["vol_ma20"] = df["volume"].rolling(20).mean()
+    df["vol_spike"] = df["volume"] > 1.5 * df["vol_ma20"]
+
     return df
 
-# ---------------- SIGNAL DETECTION ----------------
-# ---------- NEW detect_signal ----------
+
+# ---------------- ENHANCED SIGNAL DETECTION ----------------
 def detect_signal(df: pd.DataFrame):
-    """
-    Очікує df з вже застосованими фічами (apply_all_features).
-    Повертає: action, votes, pretop, last_row, confidence
-    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
     confidence = 0.2
 
-    # EMA
-    if last["ema_8"] > last["ema_20"]:
-        votes.append("ema_bull"); confidence += 0.10
+    # EMA trend
+    if last["ema_8"] > last["ema_20"] > last["ema_50"]:
+        votes.append("ema_strong_up"); confidence += 0.15
+    elif last["ema_8"] < last["ema_20"] < last["ema_50"]:
+        votes.append("ema_strong_down"); confidence += 0.15
     else:
-        votes.append("ema_bear"); confidence += 0.05
+        votes.append("ema_sideways"); confidence += 0.05
 
     # MACD
-    if last["MACD_hist"] > 0:
-        votes.append("macd_up"); confidence += 0.10
+    if last["MACD_cross_up"]:
+        votes.append("macd_cross_up"); confidence += 0.12
+    elif last["MACD_cross_down"]:
+        votes.append("macd_cross_down"); confidence += 0.12
     else:
-        votes.append("macd_down"); confidence += 0.05
+        confidence += 0.05 if last["MACD_hist"] > 0 else 0.03
 
     # RSI
-    if last["RSI_14"] < 30:
+    if last["RSI_14"] < 30 or last["RSI_7"] < 20:
         votes.append("rsi_oversold"); confidence += 0.08
-    elif last["RSI_14"] > 70:
+    elif last["RSI_14"] > 70 or last["RSI_7"] > 80:
         votes.append("rsi_overbought"); confidence += 0.08
 
-    # ADX
-    if last.get("ADX", 0) > 25:
-        votes.append("strong_trend"); confidence *= 1.1
+    # ADX with direction
+    if last["ADX"] > 25:
+        votes.append("strong_trend")
+        confidence *= 1.1
+        if last["ADX_pos"] > last["ADX_neg"]:
+            votes.append("trend_up")
+        else:
+            votes.append("trend_down")
 
-    # Candles
+    # Bollinger
+    if last["close"] > last["BB_high"]:
+        votes.append("bb_upper"); confidence += 0.05
+    elif last["close"] < last["BB_low"]:
+        votes.append("bb_lower"); confidence += 0.05
+
+    # Volume spike
+    if last["vol_spike"]:
+        votes.append("volume_spike"); confidence += 0.05
+
+    # Candlestick patterns
     body = last["close"] - last["open"]
-    rng = max(1e-9, (last["high"] - last["low"]))  # avoid div0
+    rng = max(1e-9, last["high"] - last["low"])
     upper_shadow = last["high"] - max(last["close"], last["open"])
     lower_shadow = min(last["close"], last["open"]) - last["low"]
-    candle_bonus = 1.0
 
     if lower_shadow > 2 * abs(body) and body > 0:
-        votes.append("hammer_bull"); candle_bonus = 1.2
+        votes.append("hammer_bull"); confidence *= 1.2
     elif upper_shadow > 2 * abs(body) and body < 0:
-        votes.append("shooting_star"); candle_bonus = 1.2
+        votes.append("shooting_star"); confidence *= 1.2
 
     if body > 0 and prev["close"] < prev["open"] and last["close"] > prev["open"] and last["open"] < prev["close"]:
-        votes.append("bullish_engulfing"); candle_bonus = 1.25
+        votes.append("bullish_engulfing"); confidence *= 1.25
     elif body < 0 and prev["close"] > prev["open"] and last["close"] < prev["open"] and last["open"] > prev["close"]:
-        votes.append("bearish_engulfing"); candle_bonus = 1.25
+        votes.append("bearish_engulfing"); confidence *= 1.25
 
-    if abs(body) < 0.1 * rng:
-        votes.append("doji"); candle_bonus = 1.1
-
-    confidence *= candle_bonus
-
-    # Fake breakout (біля рівнів)
-    fake_breakout = False
-    if last["close"] > last["resistance"] * 0.995 and last["close"] < last["resistance"] * 1.01:
-        votes.append("fake_breakout_short"); confidence += 0.15; fake_breakout = True
-    elif last["close"] < last["support"] * 1.005 and last["close"] > last["support"] * 0.99:
-        votes.append("fake_breakout_long"); confidence += 0.15; fake_breakout = True
-
-    # Pre-top
+    # Pre-top detection
     pretop = False
     if len(df) >= 10:
-        recent, last10 = df["close"].iloc[-1], df["close"].iloc[-10]
-        if (recent - last10) / last10 > 0.10:
+        if (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
             pretop = True; votes.append("pretop"); confidence += 0.10
 
-    # Визначимо дію, але робимо її "м'якшою" — +/-2% як тригер,
-    # щоб давати більше релевантних лімітних входів (не тільки по маркету).
+    # Action based on support/resistance
     action = "WATCH"
-    near_resistance = last["close"] >= last["resistance"] * 0.98  # в межах -2% від опору
-    near_support = last["close"] <= last["support"] * 1.02       # в межах +2% від підтримки
+    near_resistance = last["close"] >= last["resistance"] * 0.98
+    near_support = last["close"] <= last["support"] * 1.02
 
     if near_resistance:
         action = "SHORT"
     elif near_support:
         action = "LONG"
 
-    confidence = max(0.0, min(1.0, confidence))
-
-    # Залишаємо WATCH якщо немає ні fake_breakout ні pretop і не близько до рівня
-    if not (fake_breakout or pretop or near_support or near_resistance):
+    if not (pretop or near_support or near_resistance):
         action = "WATCH"
 
+    confidence = max(0.0, min(1.0, confidence))
     return action, votes, pretop, last, confidence
 
-# ---------- NEW plot_signal_candles ----------
-def plot_signal_candles(df, symbol, action, votes, pretop):
+
+# ---------------- ENHANCED PLOT ----------------
+def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, entry=None):
+    addplots = []
+    if tp: addplots.append(mpf.make_addplot([tp]*len(df), color='green'))
+    if sl: addplots.append(mpf.make_addplot([sl]*len(df), color='red'))
+    if entry: addplots.append(mpf.make_addplot([entry]*len(df), color='blue'))
+
     fig, ax = mpf.plot(
         df.tail(200), type='candle', style='yahoo',
-        title=f"{symbol} - {action}", returnfig=True
+        title=f"{symbol} - {action}", addplot=addplots, returnfig=True
     )
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight')
@@ -250,22 +277,22 @@ def plot_signal_candles(df, symbol, action, votes, pretop):
 # ---------- NEW analyze_and_alert ----------
 def analyze_and_alert(symbol: str):
     """
-    Повний аналіз + лімітний entry + TP/SL у відсотках + RR.
+    Повний аналіз з покращеними індикаторами, лімітним entry, TP/SL та RR.
     """
-    # беремо 200 свічок для аналізу
+    # Беремо 200 свічок для аналізу
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
 
-    df = apply_all_features(df)  # додає ema, rsi, macd, support/resistance, adx
-    action, votes, pretop, last, confidence = detect_signal(df)
+    df = apply_all_features_enhanced(df)  # Покращені фічі
+
+    action, votes, pretop, last, confidence = detect_signal_enhanced(df)
     prev_signal = state.get("signals", {}).get(symbol, {})
 
     # Визначаємо entry / TP / SL
     entry = None; stop_loss = None; take_profit = None
 
     if action == "LONG":
-        # кращий ліміт — трохи вище підтримки (щоб не купити / відскок)
         entry = last["support"] * 1.001
         stop_loss = last["support"] * 0.99
         take_profit = last["resistance"] * 0.997
@@ -275,48 +302,34 @@ def analyze_and_alert(symbol: str):
         take_profit = last["support"] * 1.003
 
     # Відстані у %
-    dist_entry_from_now_pct = None
-    dist_tp_pct = None
-    dist_sl_pct = None
-    rr = 0.0
+    dist_entry_from_now_pct = (entry / last["close"] - 1.0) * 100.0 if entry else None
+    dist_tp_pct = (take_profit / entry - 1.0) * 100.0 if entry and take_profit else None
+    dist_sl_pct = (stop_loss / entry - 1.0) * 100.0 if entry and stop_loss else None
 
-    try:
-        if entry is not None:
-            dist_entry_from_now_pct = (entry / last["close"] - 1.0) * 100.0
-        if entry is not None and take_profit is not None:
-            dist_tp_pct = (take_profit / entry - 1.0) * 100.0
-        if entry is not None and stop_loss is not None:
-            dist_sl_pct = (stop_loss / entry - 1.0) * 100.0
-        # RR
-        if entry is not None and stop_loss is not None and take_profit is not None:
-            risk = abs(entry - stop_loss)
-            reward = abs(take_profit - entry)
-            rr = (reward / risk) if risk > 0 else 0.0
-    except Exception as e:
-        logger.exception("RR calc error: %s", e)
+    # RR
+    rr = (abs(take_profit - entry) / abs(entry - stop_loss)) if entry and stop_loss and take_profit else 0.0
 
     logger.info(
         "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR=%.2f",
         symbol, action, confidence, votes, pretop, rr
     )
 
-    # Відправляємо сигнал якщо під поріг і відрізняється від попереднього
+    # Відправка сигналу, якщо confidence >= порогу і новий сигнал
     if action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and action != prev_signal.get("action"):
         reasons = []
-        if "fake_breakout_short" in votes or "fake_breakout_long" in votes:
-            reasons.append("Fake Breakout")
-        if pretop:
+        if "pretop" in votes:
             reasons.append("Pre-Top")
+        if "fake_breakout_long" in votes or "fake_breakout_short" in votes:
+            reasons.append("Fake Breakout")
         if not reasons:
             reasons = ["Pattern mix"]
 
-        # Формуємо текст (включно з % відстанями)
-        entry_str = f"{entry:.6f}" if entry is not None else "—"
-        sl_str = f"{stop_loss:.6f}" if stop_loss is not None else "—"
-        tp_str = f"{take_profit:.6f}" if take_profit is not None else "—"
-        dist_now = f"{dist_entry_from_now_pct:+.2f}%" if dist_entry_from_now_pct is not None else "—"
-        dist_to_tp = f"{dist_tp_pct:+.2f}%" if dist_tp_pct is not None else "—"
-        dist_to_sl = f"{dist_sl_pct:+.2f}%" if dist_sl_pct is not None else "—"
+        entry_str = f"{entry:.6f}" if entry else "—"
+        sl_str = f"{stop_loss:.6f}" if stop_loss else "—"
+        tp_str = f"{take_profit:.6f}" if take_profit else "—"
+        dist_now = f"{dist_entry_from_now_pct:+.2f}%" if dist_entry_from_now_pct else "—"
+        dist_to_tp = f"{dist_tp_pct:+.2f}%" if dist_tp_pct else "—"
+        dist_to_sl = f"{dist_sl_pct:+.2f}%" if dist_sl_pct else "—"
 
         msg = (
             f"⚡ TRADE SIGNAL\n"
@@ -332,10 +345,10 @@ def analyze_and_alert(symbol: str):
         )
 
         # Графік з TP/SL/ENTRY
-        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop, tp=take_profit, sl=stop_loss, entry=entry)
+        photo_buf = plot_signal_candles_enhanced(df, symbol, action, votes, pretop, tp=take_profit, sl=stop_loss, entry=entry)
         send_telegram(msg, photo=photo_buf)
 
-        # Зберігаємо сигнал у стані (щоб не спамити той самий)
+        # Зберігаємо сигнал у стані
         state.setdefault("signals", {})[symbol] = {
             "action": action,
             "entry": entry,
