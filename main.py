@@ -243,15 +243,16 @@ def plot_signal_candles(df, symbol, action, tp1=None, tp2=None, tp3=None, sl=Non
 # ---------------- MAIN ANALYZE FUNCTION ----------------
 def analyze_and_alert(symbol: str):
     """
-    Повний аналіз сигналів з патернами, S/R, Volume Confirmation, Multi-TF, RR-фільтром та компактним форматом зі смайлами.
+    Повний аналіз сигналів: TP/SL, RR, патерни, вищий TF, графік із трьома тейками.
+    Логування всіх сигналів для дебагу.
     """
-    # ---------------- Отримуємо дані ----------------
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
+
     df = apply_all_features(df)
 
-    # Multi-TF (1h)
+    # ---------------- Multi-timeframe ----------------
     df_h1 = fetch_klines_rest(symbol, interval="1h", limit=200)
     higher_tf_votes = []
     if df_h1 is not None and len(df_h1) > 50:
@@ -264,6 +265,12 @@ def analyze_and_alert(symbol: str):
 
     # ---------------- Детект сигналу ----------------
     action, votes, pretop, last, confidence = detect_signal(df)
+
+    # Логування всіх сигналів для дебагу
+    logger.info(
+        "DEBUG Signal: %s action=%s confidence=%.2f votes=%s pretop=%s",
+        symbol, action, confidence, votes, pretop
+    )
 
     # Врахування тренду вищого TF
     if higher_tf_votes:
@@ -290,71 +297,63 @@ def analyze_and_alert(symbol: str):
         tp2 = entry - (entry - last["support"]) * 0.66
         tp3 = last["support"]
 
-    # ---------------- Risk/Reward ----------------
-    rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
-    rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
-    rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
+    # ---------------- R/R ----------------
+    if entry and stop_loss and tp1 and tp2 and tp3:
+        rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
+        rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
+        rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
+    else:
+        rr1 = rr2 = rr3 = 0.0
 
-    # ---------------- Фільтр RR ----------------
-    if rr1 < 2.0:
-        return  # не надсилаємо слабкі сигнали
+    # ---------------- Фільтр сигналів ----------------
+    send_signal = action != "WATCH" and confidence >= CONF_THRESHOLD_MEDIUM and rr1 >= 2.0
 
-    # ---------------- Логування ----------------
-    logger.info(
-        "Symbol=%s action=%s confidence=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
-        symbol, action, confidence, votes, pretop, rr1, rr2, rr3
-    )
-
-    # ---------------- Підготовка повідомлення ----------------
+    # Причини сигналу
     reasons = []
-    if "pretop" in votes: reasons.append("Pre-Top")
-    if "fake_breakout_long" in votes or "fake_breakout_short" in votes: reasons.append("Fake Breakout")
-    if "bullish_divergence" in votes or "bearish_divergence" in votes: reasons.append("Divergence")
-    if "resistance_flip_support" in votes or "support_flip_resistance" in votes: reasons.append("S/R Flip")
-    if "volume_confirmation" in votes: reasons.append("Volume Confirm")
-    if "higher_tf_up" in votes or "higher_tf_down" in votes: reasons.append("Higher TF Alignment")
-    if not reasons: reasons = ["Pattern mix"]
+    if "pretop" in votes: reasons.append("⏫")
+    if "fake_breakout_long" in votes or "fake_breakout_short" in votes: reasons.append("💥")
+    if "bullish_divergence" in votes or "bearish_divergence" in votes: reasons.append("📈")
+    if "resistance_flip_support" in votes or "support_flip_resistance" in votes: reasons.append("🔄")
+    if "volume_confirmation" in votes: reasons.append("🔊")
+    if "higher_tf_up" in votes or "higher_tf_down" in votes: reasons.append("🕒")
+    if not reasons: reasons = ["✨"]
 
+    # ---------------- Формуємо повідомлення ----------------
     msg = (
-        f"⚡ TRADE SIGNAL\n"
-        f"🏷️ {symbol}\n"
-        f"Action: {action}\n"
-        f"🎯 Entry: {entry:.6f}\n"
-        f"🛑 SL: {stop_loss:.6f}\n"
+        f"⚡ {symbol}\n"
+        f"➡️ {action}\n"
+        f"🔹 Entry: {entry:.6f}\n"
+        f"🛑 Stop: {stop_loss:.6f}\n"
         f"💰 TP1: {tp1:.6f} (RR {rr1:.2f})\n"
         f"💰 TP2: {tp2:.6f} (RR {rr2:.2f})\n"
         f"💰 TP3: {tp3:.6f} (RR {rr3:.2f})\n"
-        f"⭐ Conf: {confidence:.2f}\n"
-        f"🔍 Reasons: {', '.join(reasons)}\n"
-        f"🧩 Patterns: {', '.join(votes)}"
+        f"🎯 Confidence: {confidence:.2f}\n"
+        f"💡 Reasons: {' '.join(reasons)}\n"
+        f"📊 Patterns: {', '.join(votes)}"
     )
 
     # ---------------- Малюємо графік ----------------
-    photo_buf = plot_signal_candles(
-        df, symbol, action, votes, pretop,
-        tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry
-    )
+    if send_signal:
+        photo_buf = plot_signal_candles(df, symbol, action, votes, pretop, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
+        send_telegram(msg, photo=photo_buf)
 
-    # ---------------- Відправка сигналу ----------------
-    send_telegram(msg, photo=photo_buf)
-
-    # ---------------- Збереження стану ----------------
-    state.setdefault("signals", {})[symbol] = {
-        "action": action,
-        "entry": entry,
-        "sl": stop_loss,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "rr1": rr1,
-        "rr2": rr2,
-        "rr3": rr3,
-        "confidence": confidence,
-        "time": str(last.name),
-        "last_price": float(last["close"]),
-        "votes": votes
-    }
-    save_json_safe(STATE_FILE, state)
+        # ---------------- Зберігаємо стан ----------------
+        state.setdefault("signals", {})[symbol] = {
+            "action": action,
+            "entry": entry,
+            "sl": stop_loss,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr1": rr1,
+            "rr2": rr2,
+            "rr3": rr3,
+            "confidence": confidence,
+            "time": str(last.name),
+            "last_price": float(last["close"]),
+            "votes": votes
+        }
+        save_json_safe(STATE_FILE, state)
 
 
 # ---------------- Графік ----------------
