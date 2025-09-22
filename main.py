@@ -245,8 +245,8 @@ def detect_signal(df: pd.DataFrame):
 
 def analyze_and_alert(symbol: str):
     """
-    Аналіз сигналу на основі патернів свічок, support/resistance, volume.
-    Вираховує три тейки, стоп, R/R та відправляє сигнал на Telegram.
+    Аналіз сигналу на основі свічок, support/resistance та volume.
+    Три тейки, стоп, entry, RR та відправка на Telegram.
     """
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 20:
@@ -255,11 +255,8 @@ def analyze_and_alert(symbol: str):
     df = df.copy()
     
     # ---------------- Feature Engineering ----------------
-    # Support/Resistance (локальні min/max за 20 свічок)
     df["support"] = df["low"].rolling(20).min()
     df["resistance"] = df["high"].rolling(20).max()
-    
-    # Volume confirmation
     df["vol_ma20"] = df["volume"].rolling(20).mean()
     df["vol_spike"] = df["volume"] > 1.5 * df["vol_ma20"]
 
@@ -303,7 +300,7 @@ def analyze_and_alert(symbol: str):
 
     confidence = max(0.0, min(1.0, confidence))
     if action == "WATCH" or confidence < CONF_THRESHOLD_MEDIUM:
-        return  # не відправляємо сигнал
+        return  # сигнал не відправляємо
 
     # ---------------- Entry / Stop-Loss / Take-Profits ----------------
     if action == "LONG":
@@ -323,6 +320,55 @@ def analyze_and_alert(symbol: str):
     rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
     rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
     rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
+
+    # ---------------- Message ----------------
+    msg = (
+        f"⚡ TRADE SIGNAL\n"
+        f"Symbol: {symbol}\n"
+        f"Action: {action}\n"
+        f"Entry: {entry:.6f}\n"
+        f"Stop-Loss: {stop_loss:.6f}\n"
+        f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
+        f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
+        f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
+        f"Confidence: {confidence:.2f}\n"
+        f"Patterns: {', '.join(votes)}\n"
+    )
+
+    # ---------------- Plot with 3 TPs ----------------
+    addplots = [
+        mpf.make_addplot([tp1]*len(df), color='green'),
+        mpf.make_addplot([tp2]*len(df), color='lime'),
+        mpf.make_addplot([tp3]*len(df), color='darkgreen'),
+        mpf.make_addplot([stop_loss]*len(df), color='red'),
+        mpf.make_addplot([entry]*len(df), color='blue')
+    ]
+    fig, ax = mpf.plot(df.tail(200), type='candle', style='yahoo', title=f"{symbol} - {action}", addplot=addplots, returnfig=True)
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+
+    # ---------------- Send to Telegram ----------------
+    send_telegram(msg, photo=buf)
+
+    # ---------------- Save state ----------------
+    state.setdefault("signals", {})[symbol] = {
+        "action": action,
+        "entry": entry,
+        "sl": stop_loss,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "rr1": rr1,
+        "rr2": rr2,
+        "rr3": rr3,
+        "confidence": confidence,
+        "time": str(last.name),
+        "last_price": float(last["close"]),
+        "votes": votes
+    }
+    save_json_safe(STATE_FILE, state)
 
     # ---------------- Message ----------------
     msg = (
