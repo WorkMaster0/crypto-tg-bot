@@ -237,50 +237,32 @@ def detect_signal(df: pd.DataFrame):
 
 # ---------- NEW plot_signal_candles ----------
 def plot_signal_candles(df, symbol, action, votes, pretop, tp=None, sl=None, entry=None):
-    """
-    Малює останні 200 свічок, додає горизонтальні лінії TP/SL/support/resistance
-    і маркер для лімітного входу.
-    Повертає буфер PNG.
-    """
     df_plot = df.tail(200).copy()
-    # Малюємо графік і отримуємо основну вісь
-    fig, axes = mpf.plot(
-        df_plot, type='candle', style='yahoo',
-        title=f"{symbol} - {action}", returnfig=True
+
+    addplots = []
+
+    if sl is not None:
+        addplots.append(mpf.make_addplot([sl]*len(df_plot), linestyle="--", linewidth=1.0, color="red"))
+    if tp is not None:
+        addplots.append(mpf.make_addplot([tp]*len(df_plot), linestyle="--", linewidth=1.0, color="green"))
+    if "support" in df_plot.columns and "resistance" in df_plot.columns:
+        addplots.append(mpf.make_addplot([df_plot["support"].iloc[-1]]*len(df_plot), linestyle=":", linewidth=0.8, color="blue"))
+        addplots.append(mpf.make_addplot([df_plot["resistance"].iloc[-1]]*len(df_plot), linestyle=":", linewidth=0.8, color="blue"))
+    if entry is not None:
+        addplots.append(mpf.make_addplot([entry]*len(df_plot), scatter=True, markersize=50,
+                                         marker='v' if action == "SHORT" else '^', color="orange"))
+
+    fig, ax = mpf.plot(
+        df_plot,
+        type="candle",
+        style="yahoo",
+        title=f"{symbol} - {action}",
+        addplot=addplots,
+        returnfig=True
     )
-    # axes може бути списком; головна вісь зазвичай axes[0]
-    try:
-        ax = axes[0]
-    except Exception:
-        ax = axes
 
-    # Додаємо лінії рівнів
-    try:
-        if sl is not None:
-            ax.axhline(sl, linestyle='--', linewidth=1.0)
-            ax.text(df_plot.index[-1], sl, f" SL {sl:.6f}", va='bottom', ha='right', fontsize=8)
-        if tp is not None:
-            ax.axhline(tp, linestyle='--', linewidth=1.0)
-            ax.text(df_plot.index[-1], tp, f" TP {tp:.6f}", va='bottom', ha='right', fontsize=8)
-        # Якщо є support/resistance в останній свічці додатково підпишемо їх
-        last = df_plot.iloc[-1]
-        if "support" in df_plot.columns and "resistance" in df_plot.columns:
-            s = last["support"]; r = last["resistance"]
-            ax.axhline(s, linestyle=':', linewidth=0.8)
-            ax.axhline(r, linestyle=':', linewidth=0.8)
-            ax.text(df_plot.index[-1], s, f" SUP {s:.6f}", va='top', ha='right', fontsize=7)
-            ax.text(df_plot.index[-1], r, f" RES {r:.6f}", va='bottom', ha='right', fontsize=7)
-        # Лімітний вхід маркером
-        if entry is not None:
-            ax.scatter([df_plot.index[-1]], [entry], marker='v' if action == "SHORT" else '^', s=60)
-            ax.text(df_plot.index[-1], entry, f" ENTRY {entry:.6f}", va='bottom', ha='left', fontsize=8)
-    except Exception as e:
-        logger.exception("plot extras error: %s", e)
-
-    # Зберігаємо в буфер
     buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format='png', bbox_inches='tight')
+    fig.savefig(buf, format="png", bbox_inches="tight")
     buf.seek(0)
     plt.close(fig)
     return buf
