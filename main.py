@@ -302,7 +302,7 @@ def analyze_and_alert(symbol: str):
         action = "SHORT"; confidence += 0.15
 
     confidence = max(0.0, min(1.0, confidence))
-    if action == "WATCH":
+    if action == "WATCH" or confidence < CONF_THRESHOLD_MEDIUM:
         return  # не відправляємо сигнал
 
     # ---------------- Entry / Stop-Loss / Take-Profits ----------------
