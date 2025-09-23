@@ -211,7 +211,7 @@ def detect_signal_pro(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
-    confidence = 0.5
+    confidence = 0.3
     pretop = False
 
     # --- Liquidity / traps ---
@@ -349,7 +349,7 @@ def analyze_and_alert(symbol: str):
 
     # --- Фільтри ---
     MIN_CONFIDENCE = CONF_THRESHOLD_MEDIUM
-    MIN_SCORE = 0.3
+    MIN_SCORE = 0.71
     MIN_RR = 2.0
 
     if confidence >= MIN_CONFIDENCE and score >= MIN_SCORE and rr1 >= MIN_RR:
