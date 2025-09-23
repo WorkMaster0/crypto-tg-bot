@@ -321,7 +321,7 @@ def analyze_and_alert(symbol: str):
         return
 
     df = apply_all_features(df)
-    action, votes, pretop, last, confidence = detect_signal(df)  # confidence залишаємо для сумісності
+    action, votes, pretop, last, confidence = detect_signal_v2(df)  # confidence залишаємо для сумісності
 
     # Entry / SL / TP
     entry = stop_loss = tp1 = tp2 = tp3 = None
