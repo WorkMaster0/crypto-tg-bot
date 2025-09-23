@@ -357,7 +357,7 @@ def analyze_and_alert(symbol: str):
     )
 
     # --- Фільтр: RR >= 2 та Score >= 50 ---
-    if score >= 50 and rr_best >= 2.0:
+    if score >= 30 and rr_best >= 2.0:
         msg = (
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
