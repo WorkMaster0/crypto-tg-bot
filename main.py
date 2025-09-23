@@ -294,7 +294,7 @@ def calculate_quality_score_advanced(df, votes, confidence):
 
     return min(score, 1.0)
 
-def analyze_and_alert_v2(symbol: str):
+def analyze_and_alert(symbol: str):
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
