@@ -133,176 +133,188 @@ def fetch_klines(symbol, limit=500):
         df = fetch_klines_rest(symbol, limit=limit)
     return df
 
-# ---------------- PATTERN-BASED FEATURE ENGINEERING ----------------
-def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------- PATTERN-BASED FEATURE ENGINEERING (PRO) ----------------
+def apply_pro_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Support/Resistance (динамічні рівні за останні 20 свічок)
+    # --- Support/Resistance (динамічні рівні) ---
     df["support"] = df["low"].rolling(20).min()
     df["resistance"] = df["high"].rolling(20).max()
 
-    # Volume analysis
+    # --- Volume analysis ---
     df["vol_ma20"] = df["volume"].rolling(20).mean()
     df["vol_spike"] = df["volume"] > 1.5 * df["vol_ma20"]
+    df["volume_cluster"] = df["volume"] > 2 * df["vol_ma20"]
 
-    # Candle structure
+    # --- Candle structure ---
     df["body"] = df["close"] - df["open"]
     df["range"] = df["high"] - df["low"]
     df["upper_shadow"] = df["high"] - df[["close", "open"]].max(axis=1)
     df["lower_shadow"] = df[["close", "open"]].min(axis=1) - df["low"]
 
+    # --- Liquidity grabs ---
+    df["liquidity_grab_long"] = (df["low"] < df["support"]) & (df["close"] > df["support"])
+    df["liquidity_grab_short"] = (df["high"] > df["resistance"]) & (df["close"] < df["resistance"])
+
+    # --- False breaks & traps ---
+    df["false_break_high"] = (df["high"] > df["resistance"]) & (df["close"] < df["resistance"])
+    df["false_break_low"] = (df["low"] < df["support"]) & (df["close"] > df["support"])
+    df["bull_trap"] = (df["close"] < df["open"]) & (df["high"] > df["resistance"])
+    df["bear_trap"] = (df["close"] > df["open"]) & (df["low"] < df["support"])
+
+    # --- Retests ---
+    df["retest_support"] = abs(df["close"] - df["support"]) / df["support"] < 0.003
+    df["retest_resistance"] = abs(df["close"] - df["resistance"]) / df["resistance"] < 0.003
+
+    # --- Trend ---
+    df["trend_ma"] = df["close"].rolling(20).mean()
+    df["trend_up"] = df["close"] > df["trend_ma"]
+    df["trend_down"] = df["close"] < df["trend_ma"]
+
+    # --- Wick exhaustion ---
+    df["long_lower_wick"] = df["lower_shadow"] > 2 * abs(df["body"])
+    df["long_upper_wick"] = df["upper_shadow"] > 2 * abs(df["body"])
+
+    # --- Momentum / Imbalance ---
+    df["imbalance_up"] = (df["body"] > 0) & (df["body"] > df["range"] * 0.6)
+    df["imbalance_down"] = (df["body"] < 0) & (abs(df["body"]) > df["range"] * 0.6)
+
+    # --- Volatility squeeze ---
+    df["atr"] = ta.volatility.AverageTrueRange(
+        df["high"], df["low"], df["close"], window=14
+    ).average_true_range()
+    df["squeeze"] = df["atr"] < df["atr"].rolling(50).mean() * 0.7
+
+    # --- Delta divergence (спрощено через об’єм) ---
+    df["delta_div_long"] = (df["body"] > 0) & (df["volume"] < df["vol_ma20"])
+    df["delta_div_short"] = (df["body"] < 0) & (df["volume"] < df["vol_ma20"])
+
+    # --- Breakout continuation ---
+    df["breakout_cont_long"] = (df["close"] > df["resistance"]) & (df["volume"] > df["vol_ma20"])
+    df["breakout_cont_short"] = (df["close"] < df["support"]) & (df["volume"] > df["vol_ma20"])
+
+    # --- Combo patterns ---
+    df["combo_bullish"] = df["imbalance_up"] & df["vol_spike"] & df["trend_up"]
+    df["combo_bearish"] = df["imbalance_down"] & df["vol_spike"] & df["trend_down"]
+
+    # --- Accumulation zones ---
+    df["accumulation_zone"] = (
+        (df["range"] < df["range"].rolling(20).mean() * 0.5) &
+        (df["volume"] > df["vol_ma20"])
+    )
+
     return df
 
-# ---------------- ADVANCED SIGNAL DETECTION (V2) ----------------
-def detect_signal_v2(df: pd.DataFrame):
+
+# ---------------- ADVANCED SIGNAL DETECTION (PRO) ----------------
+def detect_signal_pro(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
-    confidence = 0.5  # базова впевненість
-
-    # --- 1. Price Action (свічкові патерни) ---
-    # Hammer / Shooting Star
-    if last["lower_shadow"] > 2 * abs(last["body"]) and last["body"] > 0:
-        votes.append("hammer_bull"); confidence += 0.1
-    if last["upper_shadow"] > 2 * abs(last["body"]) and last["body"] < 0:
-        votes.append("shooting_star"); confidence += 0.1
-
-    # Engulfing
-    if last["body"] > 0 and prev["body"] < 0 and last["close"] > prev["open"] and last["open"] < prev["close"]:
-        votes.append("bullish_engulfing"); confidence += 0.1
-    if last["body"] < 0 and prev["body"] > 0 and last["close"] < prev["open"] and last["open"] > prev["close"]:
-        votes.append("bearish_engulfing"); confidence += 0.1
-
-    # Doji
-    if abs(last["body"]) < 0.1 * last["range"]:
-        votes.append("doji"); confidence += 0.05
-
-    # Tweezer Top/Bottom
-    if abs(last["high"] - prev["high"]) < 0.001 * last["high"] and last["close"] < last["open"]:
-        votes.append("tweezer_top"); confidence += 0.05
-    if abs(last["low"] - prev["low"]) < 0.001 * last["low"] and last["close"] > last["open"]:
-        votes.append("tweezer_bottom"); confidence += 0.05
-
-    # Inside / Outside bar
-    if last["high"] < prev["high"] and last["low"] > prev["low"]:
-        votes.append("inside_bar"); confidence += 0.05
-    if last["high"] > prev["high"] and last["low"] < prev["low"]:
-        votes.append("outside_bar"); confidence += 0.05
-
-    # Momentum exhaustion (3+ свічки в один бік)
-    if all(df["close"].iloc[-i] > df["open"].iloc[-i] for i in range(1, 4)):
-        votes.append("3_green"); confidence += 0.05
-    if all(df["close"].iloc[-i] < df["open"].iloc[-i] for i in range(1, 4)):
-        votes.append("3_red"); confidence += 0.05
-
-    # --- 2. Volume & Liquidity ---
-    if last["vol_spike"]:
-        votes.append("volume_spike"); confidence += 0.05
-    if last["volume"] > 2 * df["vol_ma20"].iloc[-1]:
-        votes.append("climax_volume"); confidence += 0.05
-    if last["volume"] < 0.5 * df["vol_ma20"].iloc[-1] and (
-        last["close"] > last["resistance"] or last["close"] < last["support"]):
-        votes.append("low_volume_breakout"); confidence -= 0.05
-
-    # --- 3. Structure & Levels ---
-    if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]:
-        votes.append("fake_breakout_short"); confidence += 0.05
-    if prev["close"] < prev["support"] and last["close"] > last["support"]:
-        votes.append("fake_breakout_long"); confidence += 0.05
-    if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]:
-        votes.append("resistance_flip_support"); confidence += 0.05
-    if prev["close"] > prev["support"] and last["close"] < last["support"]:
-        votes.append("support_flip_resistance"); confidence += 0.05
-
-    # Retest
-    if abs(last["close"] - last["support"]) / last["support"] < 0.003 and last["body"] > 0:
-        votes.append("support_retest"); confidence += 0.05
-    if abs(last["close"] - last["resistance"]) / last["resistance"] < 0.003 and last["body"] < 0:
-        votes.append("resistance_retest"); confidence += 0.05
-
-    # Liquidity grab (свічка проколола рівень, але закрилась всередині)
-    if last["low"] < last["support"] and last["close"] > last["support"]:
-        votes.append("liquidity_grab_long"); confidence += 0.05
-    if last["high"] > last["resistance"] and last["close"] < last["resistance"]:
-        votes.append("liquidity_grab_short"); confidence += 0.05
-
-    # --- 4. Trend & Context ---
-    df["trend"] = df["close"].rolling(20).mean()
-    if last["close"] > df["trend"].iloc[-1]:
-        votes.append("above_trend"); confidence += 0.05
-    else:
-        votes.append("below_trend"); confidence += 0.05
-
-    # --- Pre-top (як було) ---
+    confidence = 0.5
     pretop = False
+
+    # --- Liquidity / traps ---
+    if last["liquidity_grab_long"]: votes.append("liquidity_grab_long"); confidence += 0.08
+    if last["liquidity_grab_short"]: votes.append("liquidity_grab_short"); confidence += 0.08
+    if last["bull_trap"]: votes.append("bull_trap"); confidence += 0.05
+    if last["bear_trap"]: votes.append("bear_trap"); confidence += 0.05
+    if last["false_break_high"]: votes.append("false_break_high"); confidence += 0.05
+    if last["false_break_low"]: votes.append("false_break_low"); confidence += 0.05
+
+    # --- Volume & continuation ---
+    if last["volume_cluster"]: votes.append("volume_cluster"); confidence += 0.05
+    if last["breakout_cont_long"]: votes.append("breakout_cont_long"); confidence += 0.07
+    if last["breakout_cont_short"]: votes.append("breakout_cont_short"); confidence += 0.07
+
+    # --- Momentum & imbalance ---
+    if last["imbalance_up"]: votes.append("imbalance_up"); confidence += 0.05
+    if last["imbalance_down"]: votes.append("imbalance_down"); confidence += 0.05
+    if last["squeeze"]: votes.append("volatility_squeeze"); confidence += 0.03
+
+    # --- Trend ---
+    if last["trend_up"]: votes.append("trend_up"); confidence += 0.05
+    if last["trend_down"]: votes.append("trend_down"); confidence += 0.05
+
+    # --- Wick exhaustion ---
+    if last["long_lower_wick"]: votes.append("long_lower_wick"); confidence += 0.04
+    if last["long_upper_wick"]: votes.append("long_upper_wick"); confidence += 0.04
+
+    # --- Retests ---
+    if last["retest_support"]: votes.append("retest_support"); confidence += 0.05
+    if last["retest_resistance"]: votes.append("retest_resistance"); confidence += 0.05
+
+    # --- Divergences ---
+    if last["delta_div_long"]: votes.append("delta_div_long"); confidence += 0.06
+    if last["delta_div_short"]: votes.append("delta_div_short"); confidence += 0.06
+
+    # --- Combo patterns ---
+    if last["combo_bullish"]: votes.append("combo_bullish"); confidence += 0.1
+    if last["combo_bearish"]: votes.append("combo_bearish"); confidence += 0.1
+
+    # --- Accumulation ---
+    if last["accumulation_zone"]: votes.append("accumulation_zone"); confidence += 0.03
+
+    # --- Pre-top ---
     if len(df) >= 10 and (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
         pretop = True
         votes.append("pretop"); confidence += 0.1
 
     # --- Action ---
     action = "WATCH"
-    near_resistance = last["close"] >= last["resistance"] * 0.98
-    near_support = last["close"] <= last["support"] * 1.02
-    if near_resistance:
-        action = "SHORT"
-    elif near_support:
+    if "combo_bullish" in votes or "breakout_cont_long" in votes or "delta_div_long" in votes:
         action = "LONG"
+    elif "combo_bearish" in votes or "breakout_cont_short" in votes or "delta_div_short" in votes:
+        action = "SHORT"
+    else:
+        near_resistance = last["close"] >= last["resistance"] * 0.98
+        near_support = last["close"] <= last["support"] * 1.02
+        if near_resistance: action = "SHORT"
+        elif near_support: action = "LONG"
 
-    # Clamp confidence
     confidence = max(0.0, min(1.0, confidence))
     return action, votes, pretop, last, confidence
 
 
-# ---------------- QUALITY SCORING ----------------
-def calculate_quality_score_advanced(df, votes, confidence):
-    """
-    Розширений score:
-    - Свічкові патерни (Price Action)
-    - Volume / Liquidity патерни
-    - Structure / Levels
-    - Trend
-    """
+# ---------------- QUALITY SCORING (PRO) ----------------
+def calculate_quality_score_pro(df, votes, confidence):
     score = confidence
 
-    # Price Action
-    strong_pa = ["hammer_bull", "shooting_star", "bullish_engulfing", "bearish_engulfing",
-                 "doji", "tweezer_top", "tweezer_bottom", "inside_bar", "outside_bar",
-                 "3_green", "3_red", "pretop"]
-    for p in votes:
-        if p in strong_pa:
-            score += 0.05
-        else:
-            score += 0.02  # слабкіші патерни
+    strong_signals = [
+        "combo_bullish", "combo_bearish",
+        "liquidity_grab_long", "liquidity_grab_short",
+        "delta_div_long", "delta_div_short",
+        "breakout_cont_long", "breakout_cont_short"
+    ]
+    medium_signals = [
+        "bull_trap", "bear_trap",
+        "false_break_high", "false_break_low",
+        "volume_cluster", "retest_support", "retest_resistance"
+    ]
+    weak_signals = [
+        "trend_up", "trend_down",
+        "long_lower_wick", "long_upper_wick",
+        "volatility_squeeze", "accumulation_zone", "pretop"
+    ]
 
-    # Volume & Liquidity
-    strong_vol = ["volume_spike", "climax_volume", "liquidity_grab_long", "liquidity_grab_short"]
     for p in votes:
-        if p in strong_vol:
-            score += 0.03
-
-    # Structure & Levels
-    strong_struct = ["fake_breakout_long", "fake_breakout_short",
-                     "resistance_flip_support", "support_flip_resistance",
-                     "support_retest", "resistance_retest"]
-    for p in votes:
-        if p in strong_struct:
-            score += 0.03
-
-    # Trend
-    if "above_trend" in votes or "below_trend" in votes:
-        score += 0.02
+        if p in strong_signals: score += 0.1
+        elif p in medium_signals: score += 0.05
+        elif p in weak_signals: score += 0.02
 
     return min(score, 1.0)
 
+
+# ---------------- ANALYZE & ALERT (UPDATED) ----------------
 def analyze_and_alert(symbol: str):
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
 
-    df = apply_all_features(df)
+    df = apply_pro_features(df)
 
     # Виклик нової аналітики
-    action, votes, pretop, last, confidence = detect_signal_v2(df)
+    action, votes, pretop, last, confidence = detect_signal_pro(df)
 
     if action == "WATCH":
         return
@@ -328,7 +340,7 @@ def analyze_and_alert(symbol: str):
     rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
 
     # Quality Score
-    score = calculate_quality_score_advanced(df, votes, confidence)
+    score = calculate_quality_score_pro(df, votes, confidence)
 
     logger.info(
         "Symbol=%s action=%s confidence=%.2f score=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
@@ -343,10 +355,10 @@ def analyze_and_alert(symbol: str):
     if confidence >= MIN_CONFIDENCE and score >= MIN_SCORE and rr1 >= MIN_RR:
         reasons = []
         if "pretop" in votes: reasons.append("Pre-Top")
-        if "fake_breakout_long" in votes or "fake_breakout_short" in votes: reasons.append("Fake Breakout")
-        if "resistance_flip_support" in votes or "support_flip_resistance" in votes: reasons.append("S/R Flip")
-        if "volume_spike" in votes: reasons.append("Volume Spike")
-        if not reasons: reasons = ["Candle/Pattern Mix"]
+        if "combo_bullish" in votes or "combo_bearish" in votes: reasons.append("Combo")
+        if "liquidity_grab_long" in votes or "liquidity_grab_short" in votes: reasons.append("Liquidity Grab")
+        if "delta_div_long" in votes or "delta_div_short" in votes: reasons.append("Delta Divergence")
+        if not reasons: reasons = ["Pattern Mix"]
 
         msg = (
             f"⚡ TRADE SIGNAL\n"
