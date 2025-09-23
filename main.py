@@ -154,71 +154,102 @@ def apply_all_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------- PATTERN-BASED SIGNAL DETECTION ----------------
-def detect_signal(df: pd.DataFrame):
+# ---------------- ADVANCED SIGNAL DETECTION (V2) ----------------
+def detect_signal_v2(df: pd.DataFrame):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     votes = []
+    confidence = 0.5  # базова впевненість
 
-    # --- Базова confidence ---
-    confidence = 0.7
-
-    # --- Свічкові патерни ---
+    # --- 1. Price Action (свічкові патерни) ---
+    # Hammer / Shooting Star
     if last["lower_shadow"] > 2 * abs(last["body"]) and last["body"] > 0:
-        votes.append("hammer_bull")
-        confidence += 0.1
-    elif last["upper_shadow"] > 2 * abs(last["body"]) and last["body"] < 0:
-        votes.append("shooting_star")
-        confidence += 0.1
+        votes.append("hammer_bull"); confidence += 0.1
+    if last["upper_shadow"] > 2 * abs(last["body"]) and last["body"] < 0:
+        votes.append("shooting_star"); confidence += 0.1
 
+    # Engulfing
     if last["body"] > 0 and prev["body"] < 0 and last["close"] > prev["open"] and last["open"] < prev["close"]:
-        votes.append("bullish_engulfing")
-        confidence += 0.1
-    elif last["body"] < 0 and prev["body"] > 0 and last["close"] < prev["open"] and last["open"] > prev["close"]:
-        votes.append("bearish_engulfing")
-        confidence += 0.1
+        votes.append("bullish_engulfing"); confidence += 0.1
+    if last["body"] < 0 and prev["body"] > 0 and last["close"] < prev["open"] and last["open"] > prev["close"]:
+        votes.append("bearish_engulfing"); confidence += 0.1
 
-    # --- Volume confirmation ---
+    # Doji
+    if abs(last["body"]) < 0.1 * last["range"]:
+        votes.append("doji"); confidence += 0.05
+
+    # Tweezer Top/Bottom
+    if abs(last["high"] - prev["high"]) < 0.001 * last["high"] and last["close"] < last["open"]:
+        votes.append("tweezer_top"); confidence += 0.05
+    if abs(last["low"] - prev["low"]) < 0.001 * last["low"] and last["close"] > last["open"]:
+        votes.append("tweezer_bottom"); confidence += 0.05
+
+    # Inside / Outside bar
+    if last["high"] < prev["high"] and last["low"] > prev["low"]:
+        votes.append("inside_bar"); confidence += 0.05
+    if last["high"] > prev["high"] and last["low"] < prev["low"]:
+        votes.append("outside_bar"); confidence += 0.05
+
+    # Momentum exhaustion (3+ свічки в один бік)
+    if all(df["close"].iloc[-i] > df["open"].iloc[-i] for i in range(1, 4)):
+        votes.append("3_green"); confidence += 0.05
+    if all(df["close"].iloc[-i] < df["open"].iloc[-i] for i in range(1, 4)):
+        votes.append("3_red"); confidence += 0.05
+
+    # --- 2. Volume & Liquidity ---
     if last["vol_spike"]:
-        votes.append("volume_spike")
-        confidence += 0.05
+        votes.append("volume_spike"); confidence += 0.05
+    if last["volume"] > 2 * df["vol_ma20"].iloc[-1]:
+        votes.append("climax_volume"); confidence += 0.05
+    if last["volume"] < 0.5 * df["vol_ma20"].iloc[-1] and (
+        last["close"] > last["resistance"] or last["close"] < last["support"]):
+        votes.append("low_volume_breakout"); confidence -= 0.05
 
-    # --- Fake breakout detection ---
+    # --- 3. Structure & Levels ---
     if prev["close"] > prev["resistance"] and last["close"] < last["resistance"]:
-        votes.append("fake_breakout_short")
-        confidence += 0.05
+        votes.append("fake_breakout_short"); confidence += 0.05
     if prev["close"] < prev["support"] and last["close"] > last["support"]:
-        votes.append("fake_breakout_long")
-        confidence += 0.05
-
-    # --- Support/Resistance Flip ---
+        votes.append("fake_breakout_long"); confidence += 0.05
     if prev["close"] < prev["resistance"] and last["close"] > last["resistance"]:
-        votes.append("resistance_flip_support")
-        confidence += 0.05
+        votes.append("resistance_flip_support"); confidence += 0.05
     if prev["close"] > prev["support"] and last["close"] < last["support"]:
-        votes.append("support_flip_resistance")
-        confidence += 0.05
+        votes.append("support_flip_resistance"); confidence += 0.05
 
-    # --- Pre-top ---
+    # Retest
+    if abs(last["close"] - last["support"]) / last["support"] < 0.003 and last["body"] > 0:
+        votes.append("support_retest"); confidence += 0.05
+    if abs(last["close"] - last["resistance"]) / last["resistance"] < 0.003 and last["body"] < 0:
+        votes.append("resistance_retest"); confidence += 0.05
+
+    # Liquidity grab (свічка проколола рівень, але закрилась всередині)
+    if last["low"] < last["support"] and last["close"] > last["support"]:
+        votes.append("liquidity_grab_long"); confidence += 0.05
+    if last["high"] > last["resistance"] and last["close"] < last["resistance"]:
+        votes.append("liquidity_grab_short"); confidence += 0.05
+
+    # --- 4. Trend & Context ---
+    df["trend"] = df["close"].rolling(20).mean()
+    if last["close"] > df["trend"].iloc[-1]:
+        votes.append("above_trend"); confidence += 0.05
+    else:
+        votes.append("below_trend"); confidence += 0.05
+
+    # --- Pre-top (як було) ---
     pretop = False
-    if len(df) >= 10:
-        if (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
-            pretop = True
-            votes.append("pretop")
-            confidence += 0.1
+    if len(df) >= 10 and (last["close"] - df["close"].iloc[-10]) / df["close"].iloc[-10] > 0.10:
+        pretop = True
+        votes.append("pretop"); confidence += 0.1
 
-    # --- Дія відносно рівнів ---
+    # --- Action ---
     action = "WATCH"
     near_resistance = last["close"] >= last["resistance"] * 0.98
     near_support = last["close"] <= last["support"] * 1.02
-
     if near_resistance:
         action = "SHORT"
     elif near_support:
         action = "LONG"
 
-    if not (pretop or near_support or near_resistance):
-        action = "WATCH"
-
+    # Clamp confidence
     confidence = max(0.0, min(1.0, confidence))
     return action, votes, pretop, last, confidence
 
@@ -231,7 +262,7 @@ def analyze_and_alert(symbol: str):
 
     df = apply_all_features(df)
 
-    action, votes, pretop, last, confidence = detect_signal(df)
+    action, votes, pretop, last, confidence = detect_signal_v2(df)
 
     # Entry / SL / TP
     entry = stop_loss = tp1 = tp2 = tp3 = None
