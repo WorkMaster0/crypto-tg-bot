@@ -254,74 +254,58 @@ def detect_signal_v2(df: pd.DataFrame):
 
 
 # ---------------- QUALITY SCORING ----------------
-def calculate_quality_score(votes, df, last, prev):
+def calculate_quality_score_advanced(df, votes, confidence):
     """
-    Обчислює якість сигналу (0-100) на основі категорій:
-    Price Action, Volume, Structure, Context.
+    Розширений score:
+    - Свічкові патерни (Price Action)
+    - Volume / Liquidity патерни
+    - Structure / Levels
+    - Trend
     """
-    score = 0
-    reasons = {"PA": [], "VOL": [], "STR": [], "CTX": []}
+    score = confidence
 
-    # --- Price Action (30%) ---
-    if "hammer_bull" in votes or "shooting_star" in votes:
-        score += 10; reasons["PA"].append("Hammer/ShootingStar")
-    if "bullish_engulfing" in votes or "bearish_engulfing" in votes:
-        score += 10; reasons["PA"].append("Engulfing")
-    if "pretop" in votes:
-        score += 10; reasons["PA"].append("Pre-Top")
+    # Price Action
+    strong_pa = ["hammer_bull", "shooting_star", "bullish_engulfing", "bearish_engulfing",
+                 "doji", "tweezer_top", "tweezer_bottom", "inside_bar", "outside_bar",
+                 "3_green", "3_red", "pretop"]
+    for p in votes:
+        if p in strong_pa:
+            score += 0.05
+        else:
+            score += 0.02  # слабкіші патерни
 
-    # --- Volume (25%) ---
-    if "volume_spike" in votes:
-        score += 15; reasons["VOL"].append("Volume Spike")
-    # Volume climax = останній обʼєм > 2 * max(останніх 20)
-    if last["volume"] > 2 * df["volume"].iloc[-20:-1].max():
-        score += 10; reasons["VOL"].append("Climax")
+    # Volume & Liquidity
+    strong_vol = ["volume_spike", "climax_volume", "liquidity_grab_long", "liquidity_grab_short"]
+    for p in votes:
+        if p in strong_vol:
+            score += 0.03
 
-    # --- Structure (30%) ---
-    if "fake_breakout_long" in votes or "fake_breakout_short" in votes:
-        score += 10; reasons["STR"].append("Fake Breakout")
-    if "resistance_flip_support" in votes or "support_flip_resistance" in votes:
-        score += 10; reasons["STR"].append("S/R Flip")
-    # Retest support/resistance
-    if abs(last["close"] - last["support"]) / last["support"] < 0.005:
-        score += 5; reasons["STR"].append("Retest Support")
-    if abs(last["close"] - last["resistance"]) / last["resistance"] < 0.005:
-        score += 5; reasons["STR"].append("Retest Resistance")
+    # Structure & Levels
+    strong_struct = ["fake_breakout_long", "fake_breakout_short",
+                     "resistance_flip_support", "support_flip_resistance",
+                     "support_retest", "resistance_retest"]
+    for p in votes:
+        if p in strong_struct:
+            score += 0.03
 
-    # --- Context (15%) ---
-    # Тренд 20-EMA vs 50-EMA
-    ema20 = df["close"].ewm(span=20).mean().iloc[-1]
-    ema50 = df["close"].ewm(span=50).mean().iloc[-1]
-    if ema20 > ema50:
-        score += 10; reasons["CTX"].append("Uptrend")
-    else:
-        score += 5; reasons["CTX"].append("Downtrend")
+    # Trend
+    if "above_trend" in votes or "below_trend" in votes:
+        score += 0.02
 
-    return min(score, 100), reasons
+    return min(score, 1.0)
 
-
-def expected_edge(score, rr_best):
-    """
-    Прогнозована вигода = WinProb * RR - (1 - WinProb).
-    WinProb апроксимується з Quality Score.
-    """
-    if score < 40:
-        win_prob = 0.3
-    elif score < 70:
-        win_prob = 0.5
-    else:
-        win_prob = 0.7
-    return win_prob * rr_best - (1 - win_prob)
-
-
-# ---------------- UPDATED ANALYZE FUNCTION ----------------
-def analyze_and_alert(symbol: str):
+def analyze_and_alert_v2(symbol: str):
     df = fetch_klines(symbol, limit=200)
     if df is None or len(df) < 40:
         return
 
     df = apply_all_features(df)
-    action, votes, pretop, last, confidence = detect_signal_v2(df)  # confidence залишаємо для сумісності
+
+    # Виклик нової аналітики
+    action, votes, pretop, last, confidence = detect_signal_v2(df)
+
+    if action == "WATCH":
+        return
 
     # Entry / SL / TP
     entry = stop_loss = tp1 = tp2 = tp3 = None
@@ -338,26 +322,32 @@ def analyze_and_alert(symbol: str):
         tp2 = entry - (entry - last["support"]) * 0.66
         tp3 = last["support"]
 
-    if action == "WATCH":
-        return
-
     # R/R
     rr1 = (tp1 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp1)/(stop_loss - entry)
     rr2 = (tp2 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp2)/(stop_loss - entry)
     rr3 = (tp3 - entry)/(entry - stop_loss) if action=="LONG" else (entry - tp3)/(stop_loss - entry)
-    rr_best = max(rr1, rr2, rr3)
 
-    # Якість та Edge
-    score, reasons = calculate_quality_score(votes, df, last, df.iloc[-2])
-    edge = expected_edge(score, rr_best)
+    # Quality Score
+    score = calculate_quality_score_advanced(df, votes, confidence)
 
     logger.info(
-        "Symbol=%s action=%s Score=%d Edge=%.2f votes=%s RR1=%.2f RR2=%.2f RR3=%.2f",
-        symbol, action, score, edge, votes, rr1, rr2, rr3
+        "Symbol=%s action=%s confidence=%.2f score=%.2f votes=%s pretop=%s RR1=%.2f RR2=%.2f RR3=%.2f",
+        symbol, action, confidence, score, votes, pretop, rr1, rr2, rr3
     )
 
-    # --- Фільтр: RR >= 2 та Score >= 50 ---
-    if score >= 30 and rr_best >= 2.0:
+    # --- Фільтри ---
+    MIN_CONFIDENCE = CONF_THRESHOLD_MEDIUM
+    MIN_SCORE = 0.3
+    MIN_RR = 2.0
+
+    if confidence >= MIN_CONFIDENCE and score >= MIN_SCORE and rr1 >= MIN_RR:
+        reasons = []
+        if "pretop" in votes: reasons.append("Pre-Top")
+        if "fake_breakout_long" in votes or "fake_breakout_short" in votes: reasons.append("Fake Breakout")
+        if "resistance_flip_support" in votes or "support_flip_resistance" in votes: reasons.append("S/R Flip")
+        if "volume_spike" in votes: reasons.append("Volume Spike")
+        if not reasons: reasons = ["Candle/Pattern Mix"]
+
         msg = (
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
@@ -367,27 +357,20 @@ def analyze_and_alert(symbol: str):
             f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
             f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
             f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
-            f"Quality Score: {score}/100\n"
-            f"Expected Edge: {edge:.2f}R\n"
-            f"\n🟢 Price Action: {', '.join(reasons['PA']) or '—'}"
-            f"\n🔵 Volume: {', '.join(reasons['VOL']) or '—'}"
-            f"\n🟣 Structure: {', '.join(reasons['STR']) or '—'}"
-            f"\n⚪ Context: {', '.join(reasons['CTX']) or '—'}"
+            f"Confidence: {confidence:.2f}\n"
+            f"Quality Score: {score:.2f}\n"
+            f"Reasons: {', '.join(reasons)}\n"
+            f"Patterns: {', '.join(votes)}\n"
         )
 
-        photo_buf = plot_signal_candles(
-            df, symbol, action, tp1=tp1, tp2=tp2, tp3=tp3,
-            sl=stop_loss, entry=entry
-        )
+        photo_buf = plot_signal_candles(df, symbol, action, tp1=tp1, tp2=tp2, tp3=tp3, sl=stop_loss, entry=entry)
         send_telegram(msg, photo=photo_buf)
 
         state.setdefault("signals", {})[symbol] = {
-            "action": action, "entry": entry, "sl": stop_loss,
-            "tp1": tp1, "tp2": tp2, "tp3": tp3,
-            "rr1": rr1, "rr2": rr2, "rr3": rr3,
-            "quality_score": score, "edge": edge,
-            "time": str(last.name), "last_price": float(last["close"]),
-            "votes": votes, "reasons": reasons
+            "action": action, "entry": entry, "sl": stop_loss, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+            "rr1": rr1, "rr2": rr2, "rr3": rr3, "confidence": confidence,
+            "score": score,
+            "time": str(last.name), "last_price": float(last["close"]), "votes": votes
         }
         save_json_safe(STATE_FILE, state)
 
