@@ -71,20 +71,26 @@ def start_ws_listener():
     twm.start_futures_miniticker_socket(callback=handle_message)
     threading.Thread(target=twm.join, daemon=True).start()
 
-def fetch_top_symbols(limit=50):
-    """Бере топ-символи з кешу WebSocket"""
-    global _tickers_cache, _last_symbols
-    if not _tickers_cache:
-        return ALL_USDT  # fallback якщо ще не завантажилось
+def fetch_top_symbols(limit=None):
+    try:
+        tickers = binance_client.futures_ticker()
+        usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
 
-    usdt_pairs = {s: d for s, d in _tickers_cache.items() if s.endswith("USDT")}
-    sorted_pairs = sorted(
-        usdt_pairs.items(),
-        key=lambda kv: abs(kv[1].get("changePercent", 0)),
-        reverse=True
-    )
-    _last_symbols = [s for s, _ in sorted_pairs[:limit]]
-    return _last_symbols
+        # Сортуємо по % зміни (щоб активніші були на початку списку)
+        sorted_pairs = sorted(
+            usdt_pairs, 
+            key=lambda x: abs(float(x.get("priceChangePercent", 0))), 
+            reverse=True
+        )
+
+        # Якщо limit заданий – беремо тільки top-N, інакше всі
+        if limit:
+            return [d["symbol"] for d in sorted_pairs[:limit]]
+        else:
+            return [d["symbol"] for d in sorted_pairs]
+    except Exception as e:
+        logger.exception("Error fetching top symbols: %s", e)
+        return ALL_USDT
 
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
@@ -462,7 +468,7 @@ def analyze_and_alert(symbol:str):
 
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
-    symbols = fetch_top_symbols(limit=50)
+    symbols = fetch_top_symbols(limit=200)
     if not symbols: symbols = ALL_USDT
     logger.info("Scanning %d symbols",len(symbols))
     def safe_analyze(sym):
