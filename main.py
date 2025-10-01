@@ -407,19 +407,24 @@ def analyze_and_alert(symbol:str):
 
     if action=="WATCH": return
 
-    # --- Entry / SL / TP using ATR ---
-    atr = last["atr"] if "atr" in last else (last["high"]-last["low"])
+        # --- Entry ---
     entry = last["close"]
-    if action=="LONG":
-        stop_loss = entry - atr*1.5
-        tp1 = entry + atr*1.0
-        tp2 = entry + atr*2.0
-        tp3 = entry + atr*3.0
-    elif action=="SHORT":
-        stop_loss = entry + atr*1.5
-        tp1 = entry - atr*1.0
-        tp2 = entry - atr*2.0
-        tp3 = entry - atr*3.0
+
+    # --- Використовуємо найдальші рівні support/resistance ---
+    nearest_support = df["support"].tail(50).min()   # найнижча підтримка у вікні
+    nearest_resistance = df["resistance"].tail(50).max()  # найвища зона опору у вікні
+
+    if action == "LONG":
+        stop_loss = nearest_support * 0.995  # трохи нижче далекої підтримки
+        tp1 = nearest_resistance * 0.985     # перший тейк трохи нижче далекого опору
+        tp2 = nearest_resistance * 0.975
+        tp3 = nearest_resistance * 0.965
+
+    elif action == "SHORT":
+        stop_loss = nearest_resistance * 1.005  # трохи вище далекого опору
+        tp1 = nearest_support * 1.015           # тейки трохи вище далекої підтримки
+        tp2 = nearest_support * 1.025
+        tp3 = nearest_support * 1.035
 
     # --- R/R ---
     rr1 = (tp1-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp1)/(stop_loss-entry)
