@@ -37,6 +37,55 @@ CONF_THRESHOLD_MEDIUM = 0.3
 # ---------------- BINANCE CLIENT ----------------
 binance_client = Client(api_key="", api_secret="")
 
+# ---------------- BINANCE WEBSOCKET (для топ-символів) ----------------
+from binance import ThreadedWebsocketManager
+import threading
+
+_tickers_cache = {}
+_last_symbols = []
+
+def start_ws_listener():
+    """Запускає Binance Futures miniTicker WebSocket і оновлює кеш"""
+    def handle_message(msg):
+        global _tickers_cache
+        if isinstance(msg, dict) and "s" in msg:
+            sym = msg["s"]
+            _tickers_cache[sym] = {
+                "lastPrice": float(msg["c"]),
+                "changePercent": float(msg["P"]),
+                "volume": float(msg["v"]),
+                "quoteVolume": float(msg["q"])
+            }
+        elif isinstance(msg, list):
+            for t in msg:
+                sym = t["s"]
+                _tickers_cache[sym] = {
+                    "lastPrice": float(t["c"]),
+                    "changePercent": float(t["P"]),
+                    "volume": float(t["v"]),
+                    "quoteVolume": float(t["q"])
+                }
+
+    twm = ThreadedWebsocketManager()
+    twm.start()
+    twm.start_futures_miniticker_socket(callback=handle_message)
+    threading.Thread(target=twm.join, daemon=True).start()
+
+def fetch_top_symbols(limit=50):
+    """Бере топ-символи з кешу WebSocket"""
+    global _tickers_cache, _last_symbols
+    if not _tickers_cache:
+        return ALL_USDT  # fallback якщо ще не завантажилось
+
+    usdt_pairs = {s: d for s, d in _tickers_cache.items() if s.endswith("USDT")}
+    sorted_pairs = sorted(
+        usdt_pairs.items(),
+        key=lambda kv: abs(kv[1].get("changePercent", 0)),
+        reverse=True
+    )
+    _last_symbols = [s for s, _ in sorted_pairs[:limit]]
+    return _last_symbols
+
 # ---------------- STATE ----------------
 def load_json_safe(path, default):
     try:
@@ -411,17 +460,6 @@ def analyze_and_alert(symbol:str):
         }
         save_json_safe(STATE_FILE,state)
 
-# ---------------- FETCH TOP SYMBOLS ----------------
-def fetch_top_symbols(limit=50):
-    try:
-        tickers = binance_client.futures_ticker()
-        usdt_pairs = [t for t in tickers if t['symbol'].endswith("USDT")]
-        sorted_pairs = sorted(usdt_pairs,key=lambda x: abs(float(x.get("priceChangePercent",0))),reverse=True)
-        return [d["symbol"] for d in sorted_pairs[:limit]]
-    except Exception as e:
-        logger.exception("Error fetching top symbols: %s", e)
-        return ALL_USDT
-
 # ---------------- MASTER SCAN ----------------
 def scan_all_symbols():
     symbols = fetch_top_symbols(limit=50)
@@ -467,4 +505,5 @@ def telegram_webhook(token):
 # ---------------- MAIN ----------------
 if __name__=="__main__":
     logger.info("Starting pre-top detector bot")
+    start_ws_listener()
     app.run(host="0.0.0.0",port=PORT)
