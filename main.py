@@ -240,6 +240,7 @@ def detect_signal_pro(df: pd.DataFrame):
     votes = []
     confidence = 0.5
     pretop = False
+    prebottom = False
 
     # --- Existing features ---
     for col, add_conf in [
@@ -260,7 +261,7 @@ def detect_signal_pro(df: pd.DataFrame):
             votes.append(col)
             confidence += add_conf
 
-    # --- New advanced features ---
+    # --- Advanced features ---
     adv_features = [
         ("volume_spike_div",0.06), ("pre_top_candle_cluster",0.08),
         ("pre_bottom_wick_abs",0.08),
@@ -280,26 +281,36 @@ def detect_signal_pro(df: pd.DataFrame):
             votes.append(col)
             confidence += add_conf
 
-    # --- Pre-top detection ---
-    if len(df)>=10 and (last["close"]-df["close"].iloc[-10])/df["close"].iloc[-10]>0.10:
-        pretop=True
-        votes.append("pretop")
-        confidence+=0.1
+    # --- Pre-top / Pre-bottom detection ---
+    if len(df)>=10:
+        if (last["close"]-df["close"].iloc[-10])/df["close"].iloc[-10]>0.10:
+            pretop=True
+            votes.append("pretop")
+            confidence+=0.1
+        if (df["close"].iloc[-10]-last["close"])/df["close"].iloc[-10]>0.10:
+            prebottom=True
+            votes.append("prebottom")
+            confidence+=0.1
 
-    # --- Action ---
+    # --- Probabilities LONG/SHORT ---
+    score_long = sum([0.1 for s in ["combo_bullish","breakout_cont_long","delta_div_long","retest_support","liquidity_grab_long"] if s in last and last[s]])
+    score_short = sum([0.1 for s in ["combo_bearish","breakout_cont_short","delta_div_short","retest_resistance","liquidity_grab_short"] if s in last and last[s]])
+
+    prob_long = min(1.0, score_long)
+    prob_short = min(1.0, score_short)
+
+    # --- Action only on local extremes ---
+    is_local_top = last["close"] == df["close"].rolling(5).max().iloc[-1]
+    is_local_bottom = last["close"] == df["close"].rolling(5).min().iloc[-1]
+
     action = "WATCH"
-    if any(v in votes for v in ["combo_bullish","breakout_cont_long","delta_div_long"]):
+    if (is_local_bottom or last["retest_support"]) and prob_long>0:
         action = "LONG"
-    elif any(v in votes for v in ["combo_bearish","breakout_cont_short","delta_div_short"]):
+    elif (is_local_top or last["retest_resistance"]) and prob_short>0:
         action = "SHORT"
-    else:
-        near_resistance = last["close"] >= last["resistance"]*0.98
-        near_support = last["close"] <= last["support"]*1.02
-        if near_resistance: action="SHORT"
-        elif near_support: action="LONG"
 
     confidence = min(1.0,max(0.0,confidence))
-    return action,votes,pretop,last,confidence
+    return action, votes, pretop, prebottom, last, confidence, prob_long, prob_short
 
 # ---------------- QUALITY SCORE ----------------
 def calculate_quality_score_pro(df,votes,confidence):
@@ -332,41 +343,42 @@ def plot_signal_candles(df,symbol,action,tp1=None,tp2=None,tp3=None,sl=None,entr
     plt.close(fig)
     return buf
 
-# ---------------- ANALYZE ----------------
+# ---------------- ANALYZE AND ALERT ----------------
 def analyze_and_alert(symbol:str):
     df = fetch_klines(symbol,limit=200)
     if df is None or len(df)<40: return
     df = apply_advanced_features(df)
-    action,votes,pretop,last,confidence = detect_signal_pro(df)
+    action,votes,pretop,prebottom,last,confidence,prob_long,prob_short = detect_signal_pro(df)
 
     if action=="WATCH": return
 
-    # Entry / SL / TP
-    entry=stop_loss=tp1=tp2=tp3=None
+    # --- Entry / SL / TP using ATR ---
+    atr = last["atr"] if "atr" in last else (last["high"]-last["low"])
+    entry = last["close"]
     if action=="LONG":
-        entry=last["support"]*1.001
-        stop_loss=last["support"]*0.99
-        tp1=entry+(last["resistance"]-entry)*0.33
-        tp2=entry+(last["resistance"]-entry)*0.66
-        tp3=last["resistance"]
+        stop_loss = entry - atr*1.5
+        tp1 = entry + atr*1.0
+        tp2 = entry + atr*2.0
+        tp3 = entry + atr*3.0
     elif action=="SHORT":
-        entry=last["resistance"]*0.999
-        stop_loss=last["resistance"]*1.01
-        tp1=entry-(entry-last["support"])*0.33
-        tp2=entry-(entry-last["support"])*0.66
-        tp3=last["support"]
+        stop_loss = entry + atr*1.5
+        tp1 = entry - atr*1.0
+        tp2 = entry - atr*2.0
+        tp3 = entry - atr*3.0
 
-    # R/R
+    # --- R/R ---
     rr1 = (tp1-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp1)/(stop_loss-entry)
     rr2 = (tp2-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp2)/(stop_loss-entry)
     rr3 = (tp3-entry)/(entry-stop_loss) if action=="LONG" else (entry-tp3)/(stop_loss-entry)
 
+    # --- Quality Score ---
     score = calculate_quality_score_pro(df,votes,confidence)
-    logger.info("Symbol=%s action=%s confidence=%.2f score=%.2f votes=%s pretop=%s RR1=%.2f",symbol,action,confidence,score,votes,pretop,rr1)
+    logger.info("Symbol=%s action=%s confidence=%.2f score=%.2f votes=%s pretop=%s prebottom=%s RR1=%.2f",symbol,action,confidence,score,votes,pretop,prebottom,rr1)
 
-    if confidence>=CONF_THRESHOLD_MEDIUM and score>=0.65 and rr1>=2.0:
+    if confidence>=CONF_THRESHOLD_MEDIUM and score>=0.65 and rr1>=1.5:
         reasons=[]
         if "pretop" in votes: reasons.append("Pre-Top")
+        if "prebottom" in votes: reasons.append("Pre-Bottom")
         if "combo_bullish" in votes or "combo_bearish" in votes: reasons.append("Combo")
         if "liquidity_grab_long" in votes or "liquidity_grab_short" in votes: reasons.append("Liquidity Grab")
         if "delta_div_long" in votes or "delta_div_short" in votes: reasons.append("Delta Divergence")
@@ -376,13 +388,14 @@ def analyze_and_alert(symbol:str):
             f"⚡ TRADE SIGNAL\n"
             f"Symbol: {symbol}\n"
             f"Action: {action}\n"
+            f"LONG probability: {prob_long:.2f} | SHORT probability: {prob_short:.2f}\n"
+            f"Confidence: {confidence:.2f}\n"
+            f"Quality Score: {score:.2f}\n"
             f"Entry: {entry:.6f}\n"
             f"Stop-Loss: {stop_loss:.6f}\n"
             f"Take-Profit 1: {tp1:.6f} (RR {rr1:.2f})\n"
             f"Take-Profit 2: {tp2:.6f} (RR {rr2:.2f})\n"
             f"Take-Profit 3: {tp3:.6f} (RR {rr3:.2f})\n"
-            f"Confidence: {confidence:.2f}\n"
-            f"Quality Score: {score:.2f}\n"
             f"Reasons: {', '.join(reasons)}\n"
             f"Patterns: {', '.join(votes)}\n"
         )
@@ -393,7 +406,8 @@ def analyze_and_alert(symbol:str):
         state.setdefault("signals",{})[symbol] = {
             "action":action,"entry":entry,"sl":stop_loss,"tp1":tp1,"tp2":tp2,"tp3":tp3,
             "rr1":rr1,"rr2":rr2,"rr3":rr3,"confidence":confidence,
-            "score":score,"time":str(last.name),"last_price":float(last["close"]),"votes":votes
+            "score":score,"time":str(last.name),"last_price":float(last["close"]),
+            "votes":votes,"prob_long":prob_long,"prob_short":prob_short
         }
         save_json_safe(STATE_FILE,state)
 
