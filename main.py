@@ -89,7 +89,8 @@ def smart_auto_handler(message):
                 if signal:
                     signals.append(f"<b>{symbol}</b>\n{signal}")
 
-            except Exception:
+            except Exception as e:
+                print(f"[ERROR] Обробка символу {symbol}: {e}")
                 continue
 
         if not signals:
@@ -103,23 +104,26 @@ def smart_auto_handler(message):
 
 # ================== Webhook route ==================
 @app.route(WEBHOOK_URL_PATH, methods=['POST'])
-def webhook():
+def telegram_webhook():
     json_data = request.get_json()
     if json_data:
         update = types.Update.de_json(json_data)
-        print("Надійшов апдейт:", update)
+        print("[UPDATE] Надійшов апдейт:", update)
         bot.process_new_updates([update])
     return "", 200
 
-@app.route("/")
+@app.route("/", methods=['GET'])
 def index():
-    return "Bot is running!", 200
+    return "Bot is running ✅", 200
 
-# ================== Set webhook перед запуском ==================
+# ================== Setup webhook (без before_first_request) ==================
 def setup_webhook():
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
-    print(f"Webhook встановлено: {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
+        print(f"[INFO] Webhook встановлено: {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
+    except Exception as e:
+        print(f"[ERROR] Не вдалося встановити webhook: {e}")
 
 setup_webhook()
 
