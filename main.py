@@ -194,7 +194,8 @@ async def smart_auto_handler(message: types.Message):
             await message.answer(text, parse_mode="HTML")
 
     except Exception as e:
-  # ================== FLASK WEBHOOK ==================
+
+# ================== FLASK WEBHOOK ==================
 @app.route("/webhook", methods=["POST"])
 async def webhook():
     update = types.Update.model_validate(request.json)
