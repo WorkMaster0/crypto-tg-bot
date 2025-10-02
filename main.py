@@ -2,44 +2,58 @@ import os
 import asyncio
 import logging
 import numpy as np
-import requests
-from flask import Flask, request
-
+import matplotlib.pyplot as plt
+from io import BytesIO
+from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
-from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
+import requests
 
-# ----------------- ЛОГІ -----------------
+# ------------------------------------------------------------------------------
+# Логи
+# ------------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pump-bot")
+logger = logging.getLogger("telegram-bot")
 
-# ----------------- ENV -----------------
+# ------------------------------------------------------------------------------
+# ENV
+# ------------------------------------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://crypto-tg-bot-vl7x.onrender.com")
-PORT = int(os.getenv("PORT", 5000))
+APP_URL = os.getenv("APP_URL", "https://crypto-tg-bot-vl7x.onrender.com")  # твій рендер URL
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set in .env")
+    raise RuntimeError("BOT_TOKEN не задано у змінних оточення")
 
-# ----------------- INIT -----------------
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-dp = Dispatcher()
+# ------------------------------------------------------------------------------
+# Flask та Bot
+# ------------------------------------------------------------------------------
 app = Flask(__name__)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# ----------------- ФУНКЦІЇ -----------------
-def get_klines(symbol, interval="1h", limit=200):
-    """ Отримання свічок з Binance API """
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(url, params=params)
-    data = r.json()
-    if not isinstance(data, list):
+# ------------------------------------------------------------------------------
+# Функції для памп-дамп сигналів
+# ------------------------------------------------------------------------------
+def get_klines(symbol: str, interval="1h", limit=200):
+    """
+    Отримуємо історію з Binance (можна змінити під свій API)
+    """
+    try:
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        data = requests.get(url, params=params, timeout=10).json()
+        if not data:
+            return None
+        return {
+            "o": [float(x[1]) for x in data],
+            "h": [float(x[2]) for x in data],
+            "l": [float(x[3]) for x in data],
+            "c": [float(x[4]) for x in data],
+            "v": [float(x[5]) for x in data],
+        }
+    except Exception as e:
+        logger.error(f"get_klines error: {e}")
         return None
-    closes = [float(c[4]) for c in data]
-    highs = [float(c[2]) for c in data]
-    lows = [float(c[3]) for c in data]
-    volumes = [float(c[5]) for c in data]
-    return {"c": closes, "h": highs, "l": lows, "v": volumes}
 
 def find_support_resistance(prices, window=20, delta=0.005):
     sr_levels = []
@@ -54,118 +68,145 @@ def find_support_resistance(prices, window=20, delta=0.005):
                 sr_levels.append(prices[i])
     return sorted(sr_levels)
 
-# ----------------- КОМАНДИ -----------------
+def plot_candles(symbol, interval="1h", limit=100):
+    df = get_klines(symbol, interval, limit)
+    if not df:
+        return None
+    closes = df["c"]
+    plt.figure(figsize=(8,4))
+    plt.plot(closes, label=symbol)
+    plt.title(f"{symbol} - Last {limit} candles")
+    plt.xlabel("Candle")
+    plt.ylabel("Price")
+    plt.grid(True)
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    buf.seek(0)
+    plt.close()
+    return buf
+
+# ------------------------------------------------------------------------------
+# Команди бота
+# ------------------------------------------------------------------------------
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer(
+        "Привіт! 👋\n"
+        "Команди:\n"
+        "• /smart_sr SYMBOL — аналіз S/R рівнів\n"
+        "• /smart_auto — топ сигналів памп-дамп"
+    )
+
 @dp.message(Command("smart_sr"))
-async def smart_sr_handler(message: types.Message):
+async def smart_sr_cmd(message: types.Message):
     parts = message.text.split()
     if len(parts) < 2:
-        return await message.answer("⚠️ Використання: /smart_sr BTCUSDT")
-
+        return await message.reply("⚠️ Використання: /smart_sr BTCUSDT")
     symbol = parts[1].upper()
-    try:
-        df = get_klines(symbol, interval="1h", limit=200)
-        if not df or len(df.get("c", [])) == 0:
-            return await message.answer(f"❌ Дані для {symbol} недоступні")
+    df = get_klines(symbol, interval="1h", limit=200)
+    if not df:
+        return await message.answer(f"❌ Дані для {symbol} недоступні")
+    
+    closes = np.array(df["c"], dtype=float)
+    volumes = np.array(df["v"], dtype=float)
+    sr_levels = find_support_resistance(closes, window=20, delta=0.005)
+    last_price = closes[-1]
 
-        closes = np.array(df['c'], dtype=float)
-        volumes = np.array(df['v'], dtype=float)
-        sr_levels = find_support_resistance(closes, window=20, delta=0.005)
-        last_price = closes[-1]
+    signal = "ℹ️ Патерн не знайдено"
+    for lvl in sr_levels:
+        if last_price > lvl * 1.01:
+            signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
+        elif last_price < lvl * 0.99:
+            signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
 
-        # Перевірка breakout
-        signal = "ℹ️ Патерн не знайдено"
-        for lvl in sr_levels:
-            if last_price > lvl * 1.01:
-                signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}"
-            elif last_price < lvl * 0.99:
-                signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
+    # pre-top / pump
+    impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
+    vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
+    nearest_resistance = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
+    if impulse > 0.08 and vol_spike and nearest_resistance is not None:
+        signal += f"\n⚠️ Pre-top detected: можливий short біля {nearest_resistance:.4f}"
 
-        # Перевірка pre-top
-        impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-        vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
-        nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-        if impulse > 0.08 and vol_spike and nearest_res is not None:
-            signal += f"\n⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}"
-
-        await message.answer(f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
-
-    except Exception as e:
-        await message.answer(f"❌ Error: {e}")
+    img = plot_candles(symbol)
+    if img:
+        await bot.send_photo(message.chat.id, img, caption=f"<b>{symbol} — Smart S/R Analysis</b>\n\n{signal}", parse_mode="HTML")
+    else:
+        await message.answer(signal)
 
 @dp.message(Command("smart_auto"))
-async def smart_auto_handler(message: types.Message):
+async def smart_auto_cmd(message: types.Message):
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url).json()
-
-        # відбираємо USDT-пари з об'ємом
-        symbols = [
-            d for d in data
-            if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
-        ]
-        symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
-        top_symbols = [s["symbol"] for s in symbols[:30]]
+        symbols = [d for d in data if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000]
+        symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)[:30]
 
         signals = []
-        for symbol in top_symbols:
-            try:
-                df = get_klines(symbol, interval="1h", limit=200)
-                if not df or len(df.get("c", [])) < 50:
-                    continue
-
-                closes = np.array(df["c"], dtype=float)
-                volumes = np.array(df["v"], dtype=float)
-                sr_levels = find_support_resistance(closes, window=20, delta=0.005)
-                last_price = closes[-1]
-
-                signal = None
-                for lvl in sr_levels:
-                    if last_price > lvl * 1.01:
-                        signal = f"🚀 LONG breakout: пробив {lvl:.4f}"
-                        break
-                    elif last_price < lvl * 0.99:
-                        signal = f"⚡ SHORT breakout: пробив {lvl:.4f}"
-                        break
-
-                impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-                vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
-                nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-                if impulse > 0.08 and vol_spike and nearest_res is not None:
-                    signal = f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}"
-
-                if signal:
-                    signals.append(f"<b>{symbol}</b>\n{signal}")
-
-            except Exception:
+        for s in symbols:
+            symbol = s["symbol"]
+            df = get_klines(symbol, interval="1h", limit=200)
+            if not df or len(df.get("c", [])) < 50:
                 continue
+            closes = np.array(df["c"], dtype=float)
+            volumes = np.array(df["v"], dtype=float)
+            sr_levels = find_support_resistance(closes, window=20, delta=0.005)
+            last_price = closes[-1]
 
-        if signals:
-            await message.answer("<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(signals))
+            signal = None
+            for lvl in sr_levels:
+                if last_price > lvl * 1.01:
+                    signal = f"🚀 LONG breakout: пробито опір {lvl:.4f}"
+                    break
+                elif last_price < lvl * 0.99:
+                    signal = f"⚡ SHORT breakout: пробито підтримку {lvl:.4f}"
+                    break
+
+            impulse = (closes[-1]-closes[-4])/closes[-4] if len(closes)>=4 else 0
+            vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes)>=20 else False
+            nearest_res = max([lvl for lvl in sr_levels if lvl<last_price], default=None)
+            if impulse>0.08 and vol_spike and nearest_res:
+                signal = f"⚠️ Pre-top: можливий short біля {nearest_res:.4f}"
+
+            if signal:
+                signals.append(f"<b>{symbol}</b>\n{signal}")
+
+        if not signals:
+            await message.answer("ℹ️ Сигналів не знайдено")
         else:
-            await message.answer("ℹ️ Жодних сигналів не знайдено.")
-
+            await message.answer("<b>Smart Auto Signals</b>\n\n" + "\n\n".join(signals), parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Error: {e}")
 
-# ----------------- FLASK ROUTES -----------------
-@app.route("/", methods=["GET", "HEAD"])
-def index():
-    return "Bot is running!"
-
+# ------------------------------------------------------------------------------
+# Flask webhook
+# ------------------------------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
-async def webhook():
-    update = types.Update.model_validate(request.json)
-    await dp.feed_update(bot, update)
-    return "ok"
+def webhook():
+    try:
+        update = types.Update.model_validate(request.json)
+        asyncio.get_event_loop().create_task(dp.feed_update(bot, update))
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-# ----------------- STARTUP -----------------
-async def on_startup():
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-    print(f"🌍 Webhook встановлено: {WEBHOOK_URL}/webhook")
+@app.route("/", methods=["GET", "HEAD"])
+def root():
+    return "Bot is running ✅"
 
-# ----------------- RUN -----------------
+# ------------------------------------------------------------------------------
+# Запуск
+# ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(on_startup())
-    app.run(host="0.0.0.0", port=PORT)
+    import uvicorn
+
+    async def set_webhook():
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.set_webhook(f"{APP_URL}/webhook")
+            logger.info(f"🌍 Webhook встановлено: {APP_URL}/webhook")
+        except Exception as e:
+            logger.error(f"Не вдалося встановити вебхук: {e}")
+
+    asyncio.run(set_webhook())
+    port = int(os.getenv("PORT", 5000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
