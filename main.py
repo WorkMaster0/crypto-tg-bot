@@ -194,9 +194,7 @@ async def smart_auto_handler(message: types.Message):
             await message.answer(text, parse_mode="HTML")
 
     except Exception as e:
-        await message.answer(f"❌ Error: {e}")
-
-# ================== FLASK WEBHOOK ==================
+  # ================== FLASK WEBHOOK ==================
 @app.route("/webhook", methods=["POST"])
 async def webhook():
     update = types.Update.model_validate(request.json)
@@ -205,7 +203,9 @@ async def webhook():
 
 # ================== STARTUP ==================
 async def on_startup():
+    # ❌ Прибираємо старий webhook
     await bot.delete_webhook(drop_pending_updates=True)
+    # ✅ Ставимо новий з простим шляхом /webhook
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
     print(f"🌍 Webhook встановлено: {WEBHOOK_URL}/webhook")
 
