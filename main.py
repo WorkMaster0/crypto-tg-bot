@@ -1,64 +1,55 @@
-# main.py
-
 import os
+import io
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
-import io
-from flask import Flask, request, send_file
-import telebot
+from flask import Flask, request
+from telebot import TeleBot, types
 
-# ------------------ Налаштування ------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourapp.onrender.com/<TELEGRAM_TOKEN>
+# ================== ENV ==================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise ValueError("Відсутній TELEGRAM_TOKEN у .env!")
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+PORT = int(os.getenv("PORT", 5000))
+WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL_BASE")  # Наприклад: https://crypto-tg-bot-vl7x.onrender.com
+WEBHOOK_URL_PATH = f"/telegram_webhook/{TELEGRAM_TOKEN}"
+
+# ================== Flask & Bot ==================
 app = Flask(__name__)
+bot = TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
 
-# ------------------ Допоміжні функції ------------------
-
+# ================== Допоміжні функції ==================
 def get_klines(symbol, interval="1h", limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     data = requests.get(url).json()
-    # повертаємо словник списків
     return {
-        "o": [float(k[1]) for k in data],
-        "h": [float(k[2]) for k in data],
-        "l": [float(k[3]) for k in data],
-        "c": [float(k[4]) for k in data],
-        "v": [float(k[5]) for k in data]
+        "c": [float(d[4]) for d in data],  # close
+        "v": [float(d[5]) for d in data],  # volume
     }
 
-def find_support_resistance(prices, window=20, delta=0.005):
+def find_support_resistance(closes, window=20, delta=0.005):
     levels = []
-    for i in range(window, len(prices) - window):
-        high_range = max(prices[i-window:i+window])
-        low_range = min(prices[i-window:i+window])
-        if abs(prices[i] - high_range) / high_range < delta:
-            levels.append(prices[i])
-        elif abs(prices[i] - low_range) / low_range < delta:
-            levels.append(prices[i])
+    for i in range(window, len(closes)-window):
+        local_max = max(closes[i-window:i+window+1])
+        local_min = min(closes[i-window:i+window+1])
+        if abs(closes[i] - local_max)/local_max < delta:
+            levels.append(local_max)
+        if abs(closes[i] - local_min)/local_min < delta:
+            levels.append(local_min)
     return sorted(list(set(levels)))
 
-def plot_candles(symbol, df):
-    fig, ax = plt.subplots(figsize=(10,5))
-    o, h, l, c = df["o"], df["h"], df["l"], df["c"]
-    for i in range(len(c)):
-        color = 'green' if c[i] >= o[i] else 'red'
-        ax.plot([i, i], [l[i], h[i]], color='black')
-        ax.add_patch(plt.Rectangle((i-0.3, min(o[i], c[i])), 0.6, abs(c[i]-o[i]), color=color))
-    ax.set_title(symbol)
-    ax.set_xlabel("Candle")
-    ax.set_ylabel("Price")
+def plot_candles(closes):
+    fig, ax = plt.subplots()
+    ax.plot(closes, color='blue')
+    ax.set_title("Price chart")
     buf = io.BytesIO()
-    plt.tight_layout()
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close(fig)
     return buf
 
-# ------------------ Команди бота ------------------
-
+# ================== Обробник команди /smart_auto ==================
 @bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
     try:
@@ -69,6 +60,7 @@ def smart_auto_handler(message):
             d for d in data
             if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
         ]
+
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
         top_symbols = [s["symbol"] for s in symbols[:30]]
 
@@ -78,13 +70,14 @@ def smart_auto_handler(message):
                 df = get_klines(symbol, interval="1h", limit=200)
                 closes = np.array(df["c"], dtype=float)
                 volumes = np.array(df["v"], dtype=float)
+
                 if len(closes) < 50:
                     continue
 
                 sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 last_price = closes[-1]
-                signal = None
 
+                signal = None
                 for lvl in sr_levels:
                     diff = last_price - lvl
                     diff_pct = (diff / lvl) * 100
@@ -95,7 +88,6 @@ def smart_auto_handler(message):
                         signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
                         break
 
-                # Pre-top / pump
                 impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
                 vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
                 nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
@@ -106,10 +98,6 @@ def smart_auto_handler(message):
 
                 if signal:
                     signals.append(f"<b>{symbol}</b>\n{signal}")
-
-                    # Надсилаємо графік свічок
-                    img_buf = plot_candles(symbol, df)
-                    bot.send_photo(message.chat.id, img_buf)
 
             except Exception:
                 continue
@@ -123,23 +111,26 @@ def smart_auto_handler(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
 
-# ------------------ Webhook ------------------
-
-bot.remove_webhook()
-bot.set_webhook(url=WEBHOOK_URL)
-print(f"Webhook встановлено: {WEBHOOK_URL}")
-
-@app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=['POST'])
+# ================== Webhook route ==================
+@app.route(WEBHOOK_URL_PATH, methods=['POST'])
 def webhook():
-    json_str = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return '', 200
+    json_data = request.get_json()
+    if json_data:
+        update = types.Update.de_json(json_data)
+        bot.process_new_updates([update])
+    return "", 200
 
 @app.route("/")
 def index():
-    return "Bot is running!"
+    return "Bot is running!", 200
 
-# ------------------ Запуск локально ------------------
+# ================== Set webhook before first request ==================
+@app.before_first_request
+def setup_webhook():
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
+    print(f"Webhook встановлено: {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
+
+# ================== Run app ==================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=PORT)
