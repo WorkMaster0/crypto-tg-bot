@@ -121,7 +121,7 @@ def index():
     return "Bot is running"
 
 # ---------------- SETUP WEBHOOK ----------------
-@app.got_first_request
+@app.before_serving
 def setup_webhook():
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL)
