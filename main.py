@@ -12,7 +12,7 @@ if not TELEGRAM_TOKEN:
     raise ValueError("Відсутній TELEGRAM_TOKEN у .env!")
 
 PORT = int(os.getenv("PORT", 5000))
-WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL_BASE")  # Наприклад: https://crypto-tg-bot-vl7x.onrender.com
+WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL_BASE")  # Наприклад: https://<твій-домен>.onrender.com
 WEBHOOK_URL_PATH = f"/telegram_webhook/{TELEGRAM_TOKEN}"
 
 # ================== Flask & Bot ==================
@@ -24,8 +24,8 @@ def get_klines(symbol, interval="1h", limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     data = requests.get(url).json()
     return {
-        "c": [float(d[4]) for d in data],  # close
-        "v": [float(d[5]) for d in data],  # volume
+        "c": [float(d[4]) for d in data],
+        "v": [float(d[5]) for d in data],
     }
 
 def find_support_resistance(closes, window=20, delta=0.005):
@@ -39,17 +39,7 @@ def find_support_resistance(closes, window=20, delta=0.005):
             levels.append(local_min)
     return sorted(list(set(levels)))
 
-def plot_candles(closes):
-    fig, ax = plt.subplots()
-    ax.plot(closes, color='blue')
-    ax.set_title("Price chart")
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-# ================== Обробник команди /smart_auto ==================
+# ================== Команда /smart_auto ==================
 @bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
     try:
@@ -124,12 +114,13 @@ def webhook():
 def index():
     return "Bot is running!", 200
 
-# ================== Set webhook before first request ==================
-@app.before_first_request
+# ================== Set webhook перед запуском ==================
 def setup_webhook():
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
     print(f"Webhook встановлено: {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
+
+setup_webhook()
 
 # ================== Run app ==================
 if __name__ == "__main__":
