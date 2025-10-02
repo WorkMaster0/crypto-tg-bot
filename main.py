@@ -42,6 +42,7 @@ def find_support_resistance(closes, window=20, delta=0.005):
 # ================== Команда /smart_auto ==================
 @bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
+    print(f"[COMMAND] Виконано /smart_auto від {message.from_user.id}")
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url).json()
@@ -51,8 +52,12 @@ def smart_auto_handler(message):
             if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
         ]
 
+        print(f"[DEBUG] Відібрано {len(symbols)} монет з об’ємом >5M")
+
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
         top_symbols = [s["symbol"] for s in symbols[:30]]
+
+        print(f"[DEBUG] Топ {len(top_symbols)} монет для аналізу: {top_symbols}")
 
         signals = []
         for symbol in top_symbols:
@@ -69,37 +74,30 @@ def smart_auto_handler(message):
 
                 signal = None
                 for lvl in sr_levels:
-                    diff = last_price - lvl
-                    diff_pct = (diff / lvl) * 100
                     if last_price > lvl * 1.01:
-                        signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        signal = f"🚀 LONG breakout {symbol} біля {lvl:.4f}"
                         break
                     elif last_price < lvl * 0.99:
-                        signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        signal = f"⚡ SHORT breakout {symbol} біля {lvl:.4f}"
                         break
 
-                impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-                vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
-                nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
-                if impulse > 0.08 and vol_spike and nearest_res is not None:
-                    diff = last_price - nearest_res
-                    diff_pct = (diff / nearest_res) * 100
-                    signal = f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-
                 if signal:
-                    signals.append(f"<b>{symbol}</b>\n{signal}")
+                    signals.append(signal)
 
             except Exception as e:
-                print(f"[ERROR] Обробка символу {symbol}: {e}")
+                print(f"[ERROR] Символ {symbol}: {e}")
                 continue
 
         if not signals:
+            print("[DEBUG] Сигнали не знайдено")
             bot.send_message(message.chat.id, "ℹ️ Жодних сигналів не знайдено.")
         else:
+            print(f"[DEBUG] Надсилаю {len(signals)} сигналів")
             text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(signals)
             bot.send_message(message.chat.id, text, parse_mode="HTML")
 
     except Exception as e:
+        print(f"[FATAL ERROR] {e}")
         bot.send_message(message.chat.id, f"❌ Error: {e}")
 
 # ================== Webhook route ==================
