@@ -4,16 +4,23 @@ import numpy as np
 import requests
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
+from flask import Flask, request
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("❌ TELEGRAM_BOT_TOKEN не знайдений у .env")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # твій URL на Render
+if not BOT_TOKEN or not WEBHOOK_URL:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN або WEBHOOK_URL не знайдено у .env")
 
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# ✅ правильна ініціалізація для aiogram v3.7+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 dp = Dispatcher()
 
 # ---------- BINANCE API ----------
@@ -28,7 +35,7 @@ def get_klines(symbol, interval="1h", limit=200):
         return None
 
     return {
-        "t": [x[0] for x in data],   # time
+        "t": [x[0] for x in data],
         "o": [float(x[1]) for x in data],
         "h": [float(x[2]) for x in data],
         "l": [float(x[3]) for x in data],
@@ -75,7 +82,6 @@ async def smart_sr_handler(message: types.Message):
             elif last_price < lvl * 0.99:
                 signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}"
 
-        # Перевірка pre-top/pump
         impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
         vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
         nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
@@ -147,11 +153,24 @@ async def smart_auto_handler(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Error: {e}")
 
-# ---------- RUN ----------
-async def main():
-    logging.info("🤖 Pump/Dump bot запущено")
-    await dp.start_polling(bot)
+# ---------- Flask webhook ----------
+app = Flask(__name__)
+
+@app.route("/webhook", methods=["POST"])
+async def webhook():
+    update = types.Update.model_validate(request.json)
+    await dp.feed_update(bot, update)
+    return "ok"
+
+@app.route("/")
+def index():
+    return "✅ Bot is running with webhook"
+
+async def on_startup():
+    await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(on_startup())
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
