@@ -149,7 +149,12 @@ application.add_handler(CommandHandler("smart_auto", smart_auto))
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    application.process_update(update)
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        # якщо вже є loop (Gunicorn), створюємо таск
+        asyncio.create_task(application.process_update(update))
+    else:
+        loop.run_until_complete(application.process_update(update))
     return "OK"
 
 @app.route("/", methods=["GET", "HEAD"])
