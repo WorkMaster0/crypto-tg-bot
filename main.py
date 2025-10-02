@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 
 # ---------------- ENV ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")  # твій Telegram chat_id
+CHAT_ID = os.getenv("CHAT_ID")  
 PORT = int(os.getenv("PORT", "5000"))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://<твій домен>/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  
 
 if not TELEGRAM_TOKEN or not CHAT_ID or not WEBHOOK_URL:
     raise ValueError("❌ TELEGRAM_TOKEN, CHAT_ID та WEBHOOK_URL повинні бути встановлені!")
@@ -73,8 +73,6 @@ def smart_auto_handler(message):
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
         top_symbols = [s["symbol"] for s in symbols[:30]]
 
-        signals = []
-
         for symbol in top_symbols:
             try:
                 df = get_klines(symbol)
@@ -95,7 +93,6 @@ def smart_auto_handler(message):
                         signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n📊 Ринкова: {last_price:.4f}"
                         break
 
-                # Pre-top / pump detection
                 impulse = (closes[-1] - closes[-4])/closes[-4] if len(closes) >= 4 else 0
                 vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
                 nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
@@ -107,9 +104,6 @@ def smart_auto_handler(message):
                     bot.send_photo(message.chat.id, chart_buf, caption=f"<b>{symbol}</b>\n{signal}", parse_mode="HTML")
             except Exception:
                 continue
-
-        if not signals:
-            bot.send_message(message.chat.id, "ℹ️ Жодних сигналів не знайдено.")
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
@@ -127,7 +121,7 @@ def index():
     return "Bot is running"
 
 # ---------------- SETUP WEBHOOK ----------------
-@app.before_first_request
+@app.got_first_request
 def setup_webhook():
     bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL)
