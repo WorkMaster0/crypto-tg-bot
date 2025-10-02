@@ -1,102 +1,75 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+# main.py
 import os
-import logging
+import io
 import requests
 import numpy as np
+from flask import Flask, request, jsonify
+from telebot import TeleBot, types
 import matplotlib.pyplot as plt
-import io
-from PIL import Image
-from dotenv import load_dotenv
-from telebot import TeleBot
-import http.server
-import socketserver
-import threading
 
-# ---------------- LOGGING ----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-logger = logging.getLogger("smart-auto-bot")
-
-# ---------------- LOAD ENV ----------------
-load_dotenv()
+# ---------------- ENV ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-PORT = int(os.getenv("PORT", 5000))
+CHAT_ID = os.getenv("CHAT_ID")  # твій Telegram chat_id
+PORT = int(os.getenv("PORT", "5000"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://<твій домен>/webhook
+
+if not TELEGRAM_TOKEN or not CHAT_ID or not WEBHOOK_URL:
+    raise ValueError("❌ TELEGRAM_TOKEN, CHAT_ID та WEBHOOK_URL повинні бути встановлені!")
+
 bot = TeleBot(TELEGRAM_TOKEN)
+app = Flask(__name__)
 
-# ---------------- HTTP SERVER (для Render) ----------------
-def start_http():
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, format, *args):
-            logger.debug("HTTP: " + format % args)
-    port = PORT
-    try:
-        with socketserver.TCPServer(("", port), Handler) as httpd:
-            logger.info("HTTP server listening on port %d", port)
-            httpd.serve_forever()
-    except Exception as e:
-        logger.exception("HTTP server error: %s", e)
-
-threading.Thread(target=start_http, daemon=True).start()
-
-# ---------------- HELPER FUNCTIONS ----------------
+# ---------------- HELPERS ----------------
 def get_klines(symbol, interval="1h", limit=200):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    r = requests.get(url, timeout=10)
+    url = f"https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
     data = r.json()
-    return {
-        "t": [x[0] for x in data],
-        "o": [float(x[1]) for x in data],
-        "h": [float(x[2]) for x in data],
-        "l": [float(x[3]) for x in data],
+    df = {
         "c": [float(x[4]) for x in data],
-        "v": [float(x[5]) for x in data],
+        "v": [float(x[5]) for x in data]
     }
+    return df
 
-def find_support_resistance(closes, window=20):
-    levels = []
-    for i in range(window, len(closes)-window):
-        high_range = closes[i-window:i+window]
-        low_range = closes[i-window:i+window]
-        if closes[i] == max(high_range):
-            levels.append(closes[i])
-        elif closes[i] == min(low_range):
-            levels.append(closes[i])
-    return sorted(list(set(levels)))
+def find_support_resistance(closes, window=20, delta=0.005):
+    sr_levels = []
+    for i in range(window, len(closes)):
+        window_data = closes[i-window:i]
+        min_val = np.min(window_data)
+        max_val = np.max(window_data)
+        if all(abs(min_val - x)/x < delta for x in window_data):
+            sr_levels.append(min_val)
+        if all(abs(max_val - x)/x < delta for x in window_data):
+            sr_levels.append(max_val)
+    return sr_levels
 
-def plot_candles(closes, highs, lows, opens, sr_levels, symbol):
-    fig, ax = plt.subplots(figsize=(10,5))
-    x = np.arange(len(closes))
-    ax.plot(x, closes, color='black', label='Close')
-    ax.fill_between(x, lows, highs, color='lightgray', alpha=0.5)
-    for lvl in sr_levels:
-        ax.hlines(lvl, x[0], x[-1], colors='blue', linestyles='--', alpha=0.6)
-    ax.set_title(symbol)
-    ax.set_ylabel("Price")
+def plot_chart(closes, entry=None, tp=None, sl=None):
+    fig, ax = plt.subplots(figsize=(8,4))
+    ax.plot(closes, label="Close", color="blue")
+    if entry: ax.axhline(entry, color="orange", linestyle="--", label=f"Entry {entry:.4f}")
+    if tp: ax.axhline(tp, color="green", linestyle="--", label=f"TP {tp:.4f}")
+    if sl: ax.axhline(sl, color="red", linestyle="--", label=f"SL {sl:.4f}")
     ax.legend()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.tight_layout()
+    plt.savefig(buf, format="PNG")
     plt.close(fig)
     buf.seek(0)
     return buf
 
-# ---------------- SMART AUTO COMMAND ----------------
+# ---------------- COMMAND ----------------
 @bot.message_handler(commands=['smart_auto'])
 def smart_auto_handler(message):
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        data = requests.get(url, timeout=10).json()
+        data = requests.get(url).json()
 
-        # Фільтр USDT пар з об'ємом >5M
         symbols = [
             d for d in data
             if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000
         ]
 
-        # Топ 30 за абсолютною зміною ціни
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
         top_symbols = [s["symbol"] for s in symbols[:30]]
 
@@ -104,63 +77,62 @@ def smart_auto_handler(message):
 
         for symbol in top_symbols:
             try:
-                df = get_klines(symbol, interval="1h", limit=200)
-                if len(df["c"]) < 50:
+                df = get_klines(symbol)
+                if not df or len(df.get("c", [])) < 50:
                     continue
 
-                closes = np.array(df["c"], dtype=float)
-                volumes = np.array(df["v"], dtype=float)
-                highs = np.array(df["h"], dtype=float)
-                lows = np.array(df["l"], dtype=float)
-                opens = np.array(df["o"], dtype=float)
-
-                sr_levels = find_support_resistance(closes, window=20)
+                closes = np.array(df["c"])
+                volumes = np.array(df["v"])
+                sr_levels = find_support_resistance(closes)
                 last_price = closes[-1]
 
                 signal = None
                 for lvl in sr_levels:
-                    diff = last_price - lvl
-                    diff_pct = (diff / lvl) * 100
                     if last_price > lvl * 1.01:
-                        signal = (
-                            f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n"
-                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-                        )
+                        signal = f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n📊 Ринкова: {last_price:.4f}"
                         break
                     elif last_price < lvl * 0.99:
-                        signal = (
-                            f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n"
-                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-                        )
+                        signal = f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n📊 Ринкова: {last_price:.4f}"
                         break
 
-                impulse = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
+                # Pre-top / pump detection
+                impulse = (closes[-1] - closes[-4])/closes[-4] if len(closes) >= 4 else 0
                 vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:]) if len(volumes) >= 20 else False
                 nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
                 if impulse > 0.08 and vol_spike and nearest_res is not None:
-                    diff = last_price - nearest_res
-                    diff_pct = (diff / nearest_res) * 100
-                    signal = (
-                        f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n"
-                        f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-                    )
+                    signal = f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n📊 Ринкова: {last_price:.4f}"
 
                 if signal:
-                    img_buf = plot_candles(closes, highs, lows, opens, sr_levels, symbol)
-                    signals.append({"text": f"<b>{symbol}</b>\n{signal}", "photo": img_buf})
-
+                    chart_buf = plot_chart(closes, entry=last_price)
+                    bot.send_photo(message.chat.id, chart_buf, caption=f"<b>{symbol}</b>\n{signal}", parse_mode="HTML")
             except Exception:
                 continue
 
         if not signals:
             bot.send_message(message.chat.id, "ℹ️ Жодних сигналів не знайдено.")
-        else:
-            for s in signals:
-                bot.send_photo(message.chat.id, photo=s["photo"], caption=s["text"], parse_mode="HTML")
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {e}")
 
-# ---------------- RUN BOT ----------------
-logger.info("Smart Auto Bot started")
-bot.infinity_polling()
+# ---------------- FLASK WEBHOOK ----------------
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('utf-8')
+    update = types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return jsonify({"status": "ok"})
+
+@app.route('/')
+def index():
+    return "Bot is running"
+
+# ---------------- SETUP WEBHOOK ----------------
+@app.before_first_request
+def setup_webhook():
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    print(f"Webhook set to {WEBHOOK_URL}")
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
