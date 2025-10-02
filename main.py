@@ -129,7 +129,7 @@ bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
 print(f"Webhook встановлено: {WEBHOOK_URL}")
 
-@app.route(f"/{TELEGRAM_TOKEN}", methods=['POST'])
+@app.route(f"/telegram_webhook/{TELEGRAM_TOKEN}", methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_str)
