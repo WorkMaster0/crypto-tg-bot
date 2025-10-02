@@ -107,6 +107,7 @@ def webhook():
     json_data = request.get_json()
     if json_data:
         update = types.Update.de_json(json_data)
+        print("Надійшов апдейт:", update)
         bot.process_new_updates([update])
     return "", 200
 
