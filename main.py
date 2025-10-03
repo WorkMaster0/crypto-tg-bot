@@ -74,16 +74,22 @@ def send_telegram(text: str, photo=None):
 # ================== SMART AUTO ==================
 def smart_auto():
     try:
+        print("[INFO] Запускаю smart_auto()...")
+
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url, timeout=10).json()
 
+        print(f"[INFO] Отримано {len(data)} монет з Binance")
+
         # Фільтруємо тільки USDT-пари з нормальним об'ємом
         symbols = [d for d in data if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000]
+        print(f"[INFO] Фільтровані монети (>5M USDT volume): {len(symbols)}")
 
         # Сортуємо за % зміни ціни за 24 години
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
 
-        top_symbols = [s["symbol"] for s in symbols[:20]]  # top 20
+        top_symbols = [s["symbol"] for s in symbols[:20]]
+        print(f"[INFO] TOP 20 монет: {top_symbols}")
 
         all_signals = []
 
@@ -95,7 +101,8 @@ def smart_auto():
                 last_price = closes[-1]
 
                 if len(closes) < 20:
-                    continue  # недостатньо даних
+                    print(f"[WARN] {symbol}: недостатньо даних")
+                    continue  
 
                 sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 signals = []
@@ -105,17 +112,11 @@ def smart_auto():
                     diff = last_price - lvl
                     diff_pct = (diff / lvl) * 100
                     if last_price > lvl * 1.01:
-                        signals.append(
-                            f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n"
-                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-                        )
+                        signals.append(f"🚀 LONG breakout біля {lvl:.4f}")
                     elif last_price < lvl * 0.99:
-                        signals.append(
-                            f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n"
-                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-                        )
+                        signals.append(f"⚡ SHORT breakout біля {lvl:.4f}")
                     elif abs(last_price - lvl)/lvl <= 0.01:
-                        signals.append(f"⚠️ Fake breakout: ціна близько рівня {lvl:.4f} ({last_price:.4f})")
+                        signals.append(f"⚠️ Fake breakout біля {lvl:.4f}")
 
                 # ---------- Pre-top ----------
                 if len(closes) >= 4:
@@ -123,15 +124,13 @@ def smart_auto():
                     vol_spike = volumes[-1] > 1.5 * np.mean(volumes[-20:])
                     nearest_res = max([lvl for lvl in sr_levels if lvl < last_price], default=None)
                     if impulse > 0.08 and vol_spike and nearest_res is not None:
-                        diff = last_price - nearest_res
-                        diff_pct = (diff / nearest_res) * 100
-                        signals.append(
-                            f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n"
-                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
-                        )
+                        signals.append(f"⚠️ Pre-top біля {nearest_res:.4f}")
 
                 if signals:
+                    print(f"[SIGNAL] {symbol}: {signals}")
                     all_signals.append(f"<b>{symbol}</b>\n" + "\n".join(signals))
+                else:
+                    print(f"[INFO] {symbol}: сигналів нема")
 
             except Exception as e:
                 print(f"[ERROR] {symbol}: {e}")
@@ -139,20 +138,16 @@ def smart_auto():
 
         # Надсилаємо результати
         if not all_signals:
+            print("[INFO] Жодних сигналів не знайдено")
             send_telegram("ℹ️ Жодних сигналів не знайдено.")
         else:
             text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
-
-            # Безпечне отримання першого символу для графіку
-            match = re.search(r"<b>(\w+)</b>", all_signals[0])
-            if match:
-                first_symbol = match.group(1)
-                photo = plot_candles(first_symbol)
-                send_telegram(text, photo=photo)
-            else:
-                send_telegram(text)  # якщо не знайшли символ, надсилаємо без фото
+            first_symbol = re.search(r"<b>(\w+)</b>", all_signals[0]).group(1)
+            photo = plot_candles(first_symbol)
+            send_telegram(text, photo=photo)
 
     except Exception as e:
+        print(f"[FATAL] smart_auto(): {e}")
         send_telegram(f"❌ Error: {e}")
 
 # ================== WEBHOOK ==================
