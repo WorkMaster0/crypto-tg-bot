@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
@@ -143,7 +144,6 @@ def smart_auto():
             text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
 
             # Безпечне отримання першого символу для графіку
-            import re
             match = re.search(r"<b>(\w+)</b>", all_signals[0])
             if match:
                 first_symbol = match.group(1)
