@@ -137,14 +137,24 @@ def smart_auto():
                 continue
 
         # Надсилаємо результати
-        if not all_signals:
+                if not all_signals:
             print("[INFO] Жодних сигналів не знайдено")
             send_telegram("ℹ️ Жодних сигналів не знайдено.")
         else:
             text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
+
+            # 🔹 Розбиваємо повідомлення на частини по 3500 символів (безпечніше за 4096)
+            chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
+
             first_symbol = re.search(r"<b>(\w+)</b>", all_signals[0]).group(1)
             photo = plot_candles(first_symbol)
-            send_telegram(text, photo=photo)
+
+            # перше повідомлення з фото
+            send_telegram(chunks[0], photo=photo)
+
+            # решта просто текстом
+            for chunk in chunks[1:]:
+                send_telegram(chunk)
 
     except Exception as e:
         print(f"[FATAL] smart_auto(): {e}")
