@@ -117,11 +117,12 @@ def smart_auto_handler(message):
 # ================== Webhook routes ==================
 @app.route(WEBHOOK_URL_PATH, methods=['POST'])
 def telegram_webhook():
-    json_data = request.get_json()
-    if json_data:
-        update = types.Update.de_json(json_data)
-        print("[UPDATE] Надійшов апдейт:", update)
+    try:
+        json_str = request.get_data().decode("utf-8")
+        update = types.Update.de_json(json_str)
         bot.process_new_updates([update])
+    except Exception as e:
+        print(f"[ERROR] Webhook обробка: {e}")
     return "", 200
 
 @app.route("/", methods=['GET'])
