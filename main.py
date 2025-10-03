@@ -103,10 +103,15 @@ def smart_auto_handler(message):
 @app.route(WEBHOOK_URL_PATH, methods=['POST'])
 def telegram_webhook():
     try:
-        json_data = request.get_json(force=True)  # гарантовано dict
-        print(f"[UPDATE] Надійшов апдейт: {json_data}")  # Дебаг
+        json_data = request.get_json(force=True)
+        print(f"[UPDATE] Надійшов апдейт: {json_data}")
+
         update = types.Update.de_json(json_data)
-        bot.process_new_updates([update])
+        if update.message:
+            bot.process_new_messages([update.message])  # 👈 FIX тут
+        else:
+            bot.process_new_updates([update])  # fallback
+
     except Exception as e:
         print(f"[ERROR] Webhook обробка: {e}")
     return "!", 200
