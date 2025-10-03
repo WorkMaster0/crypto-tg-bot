@@ -65,14 +65,29 @@ def plot_candles(symbol, interval="1h", limit=100):
 def send_telegram(text: str, photo=None):
     try:
         if photo:
+            # caption максимум 1024 символи, візьмемо ~900 для безпеки
+            caption = text[:900]  
             files = {'photo': ('signal.png', photo, 'image/png')}
-            data = {'chat_id': CHAT_ID, 'caption': text, 'parse_mode': 'HTML'}
+            data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
             resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                                  data=data, files=files, timeout=15)
+
+            # якщо текст довший, решту відправимо окремим повідомленням
+            if len(text) > 900:
+                remaining = text[900:]
+                chunks = [remaining[i:i+3500] for i in range(0, len(remaining), 3500)]
+                for chunk in chunks:
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                  json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "HTML"},
+                                  timeout=15)
         else:
-            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                 json=payload, timeout=15)
+            # звичайне повідомлення без фото
+            chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
+            for chunk in chunks:
+                resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                     json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "HTML"},
+                                     timeout=15)
+
         if resp.status_code != 200:
             print("[ERROR] Telegram API:", resp.text)
     except Exception as e:
