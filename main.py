@@ -21,7 +21,7 @@ app = Flask(__name__)
 # ================== Допоміжні функції ==================
 def get_klines(symbol, interval="1h", limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    data = requests.get(url).json()
+    data = requests.get(url, timeout=10).json()
     return {
         "c": [float(d[4]) for d in data],
         "h": [float(d[2]) for d in data],
@@ -46,6 +46,7 @@ def plot_candles(symbol, interval="1h", limit=100):
     highs = df["h"][-limit:]
     lows = df["l"][-limit:]
     opens = [closes[0]] + closes[:-1]  # простий approximation
+
     fig, ax = plt.subplots(figsize=(8,4))
     for i in range(len(closes)):
         color = "green" if closes[i] >= opens[i] else "red"
@@ -73,13 +74,18 @@ def send_telegram(text: str, photo=None):
 def smart_auto():
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=10).json()
 
+        # Фільтруємо тільки USDT-пари з нормальним об'ємом
         symbols = [d for d in data if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000]
+
+        # Сортуємо за % зміни ціни за 24 години
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
-        top_symbols = [s["symbol"] for s in symbols[:30]]
+
+        top_symbols = [s["symbol"] for s in symbols[:20]]  # top 20
 
         all_signals = []
+
         for symbol in top_symbols:
             try:
                 df = get_klines(symbol, interval="1h", limit=200)
@@ -87,11 +93,13 @@ def smart_auto():
                 volumes = np.array(df["v"], dtype=float)
                 last_price = closes[-1]
 
-                sr_levels = find_support_resistance(closes, window=20, delta=0.005)
+                if len(closes) < 20:
+                    continue  # недостатньо даних
 
+                sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 signals = []
 
-                # ---------- Breakout ----------
+                # ---------- Breakout & Fake breakout ----------
                 for lvl in sr_levels:
                     diff = last_price - lvl
                     diff_pct = (diff / lvl) * 100
@@ -99,7 +107,6 @@ def smart_auto():
                         signals.append(f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)")
                     elif last_price < lvl * 0.99:
                         signals.append(f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)")
-                    # ---------- Fake breakout ----------
                     elif abs(last_price - lvl)/lvl <= 0.01:
                         signals.append(f"⚠️ Fake breakout: ціна близько рівня {lvl:.4f} ({last_price:.4f})")
 
@@ -115,15 +122,18 @@ def smart_auto():
 
                 if signals:
                     all_signals.append(f"<b>{symbol}</b>\n" + "\n".join(signals))
-            except Exception:
+
+            except Exception as e:
+                print(f"[ERROR] {symbol}: {e}")
                 continue
 
         if not all_signals:
             send_telegram("ℹ️ Жодних сигналів не знайдено.")
         else:
             text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
-            # надсилаємо разом із графіком останньої монети
-            photo = plot_candles(top_symbols[0])
+            # Надсилаємо графік тільки для першої монети з сигналом
+            first_symbol = all_signals[0].split("\n")[0][3:]  # дістаємо символ з тексту
+            photo = plot_candles(first_symbol)
             send_telegram(text, photo=photo)
 
     except Exception as e:
