@@ -2,10 +2,11 @@ import os
 import io
 import requests
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 from flask import Flask, request, jsonify
-from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 # ================== ENV ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -25,11 +26,11 @@ def get_klines(symbol, interval="1h", limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     data = requests.get(url).json()
     return {
-        "c": np.array([float(d[4]) for d in data], dtype=float),
-        "o": np.array([float(d[1]) for d in data], dtype=float),
-        "h": np.array([float(d[2]) for d in data], dtype=float),
-        "l": np.array([float(d[3]) for d in data], dtype=float),
-        "v": np.array([float(d[5]) for d in data], dtype=float),
+        "o": [float(d[1]) for d in data],
+        "h": [float(d[2]) for d in data],
+        "l": [float(d[3]) for d in data],
+        "c": [float(d[4]) for d in data],
+        "v": [float(d[5]) for d in data],
     }
 
 def find_support_resistance(closes, window=20, delta=0.005):
@@ -54,11 +55,10 @@ def send_telegram(text: str, photo=None):
             payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
-        print(f"[ERROR] Telegram send failed: {e}")
+        print("[ERROR] Telegram send:", e)
 
-# ================== ГРАФІК ==================
+# ================== PLOT UTILITY ==================
 def plot_signal(df_data, symbol, level, last_price, signal_type):
-    import pandas as pd
     df = pd.DataFrame({
         "Open": df_data["o"],
         "High": df_data["h"],
@@ -66,60 +66,74 @@ def plot_signal(df_data, symbol, level, last_price, signal_type):
         "Close": df_data["c"],
         "Volume": df_data["v"]
     })
-    df.index = pd.date_range(end=pd.Timestamp.now(), periods=len(df))
+    df.index = pd.date_range(end=datetime.now(), periods=len(df))
 
-    addplots = [mpf.make_addplot([level]*len(df), color='red' if signal_type=="SHORT" else 'green', linestyle="--")]
-    fig, ax = mpf.plot(df.tail(60), type='candle', style='yahoo', addplot=addplots,
-                       returnfig=True, title=f"{symbol} {signal_type} signal")
+    df_plot = df.tail(60)  # останні 60 свічок
+    n = len(df_plot)
+    addplots = [mpf.make_addplot([level]*n, color='red' if signal_type=="SHORT" else 'green', linestyle="--")]
+
+    fig, ax = mpf.plot(
+        df_plot,
+        type='candle',
+        style='yahoo',
+        addplot=addplots,
+        returnfig=True,
+        title=f"{symbol} {signal_type} signal"
+    )
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight')
+    plt.close(fig)  # закриваємо фігуру
     buf.seek(0)
-    plt.close(fig)
     return buf
 
 # ================== SMART AUTO ==================
-def analyze_symbol(symbol):
-    try:
-        df = get_klines(symbol)
-        closes = df["c"]
-        last_price = closes[-1]
-        sr_levels = find_support_resistance(closes, window=20, delta=0.005)
-
-        for lvl in sr_levels:
-            if last_price > lvl * 1.01:
-                pct = (last_price - lvl)/lvl*100
-                text = f"🚀 <b>LONG breakout</b> {symbol}\nРівень: {lvl:.4f}\nЦіна: {last_price:.4f} ({pct:.2f}% вище)"
-                photo = plot_signal(df, symbol, lvl, last_price, "LONG")
-                send_telegram(text, photo)
-                return
-            elif last_price < lvl * 0.99:
-                pct = (lvl - last_price)/lvl*100
-                text = f"⚡ <b>SHORT breakout</b> {symbol}\nРівень: {lvl:.4f}\nЦіна: {last_price:.4f} ({pct:.2f}% нижче)"
-                photo = plot_signal(df, symbol, lvl, last_price, "SHORT")
-                send_telegram(text, photo)
-                return
-    except Exception as e:
-        print(f"[ERROR] {symbol}: {e}")
-
 def smart_auto():
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url).json()
+
+        # Беремо топ USDT-пари по об'єму
         symbols = [d for d in data if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 5_000_000]
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
         top_symbols = [s["symbol"] for s in symbols[:30]]
 
-        if not top_symbols:
-            send_telegram("ℹ️ Жодних монет не знайдено для аналізу.")
-            return
+        signals = []
+        for symbol in top_symbols:
+            try:
+                df = get_klines(symbol, interval="1h", limit=200)
+                closes = np.array(df["c"], dtype=float)
+                last_price = closes[-1]
+                sr_levels = find_support_resistance(closes, window=20, delta=0.005)
 
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            executor.map(analyze_symbol, top_symbols)
+                signal = None
+                photo = None
+                for lvl in sr_levels:
+                    pct_diff = (last_price - lvl)/lvl*100
+                    if last_price > lvl * 1.01:
+                        signal = f"🚀 LONG breakout {symbol} біля {lvl:.4f} ({pct_diff:+.2f}%)"
+                        photo = plot_signal(df, symbol, lvl, last_price, "LONG")
+                        break
+                    elif last_price < lvl * 0.99:
+                        signal = f"⚡ SHORT breakout {symbol} біля {lvl:.4f} ({pct_diff:+.2f}%)"
+                        photo = plot_signal(df, symbol, lvl, last_price, "SHORT")
+                        break
+
+                if signal:
+                    signals.append((signal, photo))
+            except Exception as e:
+                print(f"[ERROR] {symbol}: {e}")
+                continue
+
+        if not signals:
+            send_telegram("ℹ️ Жодних сигналів не знайдено.")
+        else:
+            for text, photo in signals:
+                send_telegram(text, photo=photo)
 
     except Exception as e:
         send_telegram(f"❌ Error: {e}")
 
-# ================== WEBHOOK ==================
+# ================== WEBHOOK ROUTE ==================
 @app.route(WEBHOOK_URL_PATH, methods=['POST'])
 def telegram_webhook():
     update = request.get_json(force=True) or {}
@@ -133,7 +147,7 @@ def telegram_webhook():
 def index():
     return "Bot is running ✅", 200
 
-# ================== WEBHOOK SETUP ==================
+# ================== SETUP WEBHOOK ==================
 def setup_webhook():
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
