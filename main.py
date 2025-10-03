@@ -32,12 +32,12 @@ def get_klines(symbol, interval="1h", limit=200):
 
 def find_support_resistance(prices, window=20, delta=0.005):
     sr_levels = []
-    for i in range(window, len(prices)-window):
-        local_max = max(prices[i-window:i+window+1])
-        local_min = min(prices[i-window:i+window+1])
-        if prices[i] == local_max and all(abs(prices[i]-lvl)/lvl > delta for lvl in sr_levels):
+    for i in range(window, len(prices) - window):
+        local_max = max(prices[i - window:i + window + 1])
+        local_min = min(prices[i - window:i + window + 1])
+        if prices[i] == local_max and all(abs(prices[i] - lvl) / lvl > delta for lvl in sr_levels):
             sr_levels.append(prices[i])
-        elif prices[i] == local_min and all(abs(prices[i]-lvl)/lvl > delta for lvl in sr_levels):
+        elif prices[i] == local_min and all(abs(prices[i] - lvl) / lvl > delta for lvl in sr_levels):
             sr_levels.append(prices[i])
     return sorted(sr_levels)
 
@@ -48,11 +48,11 @@ def plot_candles(symbol, interval="1h", limit=100):
     lows = df["l"][-limit:]
     opens = [closes[0]] + closes[:-1]  # простий approximation
 
-    fig, ax = plt.subplots(figsize=(8,4))
+    fig, ax = plt.subplots(figsize=(8, 4))
     for i in range(len(closes)):
         color = "green" if closes[i] >= opens[i] else "red"
-        ax.plot([i,i],[lows[i], highs[i]], color=color)
-        ax.plot([i-0.1,i+0.1],[closes[i], closes[i]], color=color, linewidth=3)
+        ax.plot([i, i], [lows[i], highs[i]], color=color)
+        ax.plot([i - 0.1, i + 0.1], [closes[i], closes[i]], color=color, linewidth=3)
     ax.set_title(symbol)
     buf = io.BytesIO()
     plt.tight_layout()
@@ -63,22 +63,27 @@ def plot_candles(symbol, interval="1h", limit=100):
 
 # ================== TELEGRAM ==================
 def send_telegram(text: str, photo=None):
-    if photo:
-        files = {'photo': ('signal.png', photo, 'image/png')}
-        data = {'chat_id': CHAT_ID, 'caption': text, 'parse_mode': 'HTML'}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files)
-    else:
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
+    try:
+        if photo:
+            files = {'photo': ('signal.png', photo, 'image/png')}
+            data = {'chat_id': CHAT_ID, 'caption': text, 'parse_mode': 'HTML'}
+            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                                 data=data, files=files, timeout=15)
+        else:
+            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+            resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                 json=payload, timeout=15)
+        if resp.status_code != 200:
+            print("[ERROR] Telegram API:", resp.text)
+    except Exception as e:
+        print("[ERROR] send_telegram:", e)
 
 # ================== SMART AUTO ==================
 def smart_auto():
     try:
         print("[INFO] Запускаю smart_auto()...")
-
         url = "https://api.binance.com/api/v3/ticker/24hr"
         data = requests.get(url, timeout=10).json()
-
         print(f"[INFO] Отримано {len(data)} монет з Binance")
 
         # Фільтруємо тільки USDT-пари з нормальним об'ємом
@@ -88,7 +93,7 @@ def smart_auto():
         # Сортуємо за % зміни ціни за 24 години
         symbols = sorted(symbols, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
 
-        top_symbols = [s["symbol"] for s in symbols[:20]]
+        top_symbols = [s["symbol"] for s in symbols[:20]]  # top 20
         print(f"[INFO] TOP 20 монет: {top_symbols}")
 
         all_signals = []
@@ -101,8 +106,7 @@ def smart_auto():
                 last_price = closes[-1]
 
                 if len(closes) < 20:
-                    print(f"[WARN] {symbol}: недостатньо даних")
-                    continue  
+                    continue  # недостатньо даних
 
                 sr_levels = find_support_resistance(closes, window=20, delta=0.005)
                 signals = []
@@ -115,7 +119,7 @@ def smart_auto():
                         signals.append(f"🚀 LONG breakout біля {lvl:.4f}")
                     elif last_price < lvl * 0.99:
                         signals.append(f"⚡ SHORT breakout біля {lvl:.4f}")
-                    elif abs(last_price - lvl)/lvl <= 0.01:
+                    elif abs(last_price - lvl) / lvl <= 0.01:
                         signals.append(f"⚠️ Fake breakout біля {lvl:.4f}")
 
                 # ---------- Pre-top ----------
@@ -136,28 +140,27 @@ def smart_auto():
                 print(f"[ERROR] {symbol}: {e}")
                 continue
 
-        # Надсилаємо результати
-                if not all_signals:
-            print("[INFO] Жодних сигналів не знайдено")
+        if not all_signals:
             send_telegram("ℹ️ Жодних сигналів не знайдено.")
         else:
             text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
 
-            # 🔹 Розбиваємо повідомлення на частини по 3500 символів (безпечніше за 4096)
+            # 🔹 Розбиваємо повідомлення на частини по 3500 символів
             chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
 
-            first_symbol = re.search(r"<b>(\w+)</b>", all_signals[0]).group(1)
-            photo = plot_candles(first_symbol)
+            match = re.search(r"<b>(\w+)</b>", all_signals[0])
+            if match:
+                first_symbol = match.group(1)
+                photo = plot_candles(first_symbol)
+                send_telegram(chunks[0], photo=photo)
+            else:
+                send_telegram(chunks[0])
 
-            # перше повідомлення з фото
-            send_telegram(chunks[0], photo=photo)
-
-            # решта просто текстом
+            # решта частин без фото
             for chunk in chunks[1:]:
                 send_telegram(chunk)
 
     except Exception as e:
-        print(f"[FATAL] smart_auto(): {e}")
         send_telegram(f"❌ Error: {e}")
 
 # ================== WEBHOOK ==================
