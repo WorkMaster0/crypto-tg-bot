@@ -104,9 +104,15 @@ def smart_auto():
                     diff = last_price - lvl
                     diff_pct = (diff / lvl) * 100
                     if last_price > lvl * 1.01:
-                        signals.append(f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)")
+                        signals.append(
+                            f"🚀 LONG breakout: ціна пробила опір {lvl:.4f}\n"
+                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        )
                     elif last_price < lvl * 0.99:
-                        signals.append(f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)")
+                        signals.append(
+                            f"⚡ SHORT breakout: ціна пробила підтримку {lvl:.4f}\n"
+                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        )
                     elif abs(last_price - lvl)/lvl <= 0.01:
                         signals.append(f"⚠️ Fake breakout: ціна близько рівня {lvl:.4f} ({last_price:.4f})")
 
@@ -118,7 +124,10 @@ def smart_auto():
                     if impulse > 0.08 and vol_spike and nearest_res is not None:
                         diff = last_price - nearest_res
                         diff_pct = (diff / nearest_res) * 100
-                        signals.append(f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)")
+                        signals.append(
+                            f"⚠️ Pre-top detected: можливий short біля {nearest_res:.4f}\n"
+                            f"📊 Ринкова: {last_price:.4f} | Відрив: {diff:+.4f} ({diff_pct:+.2f}%)"
+                        )
 
                 if signals:
                     all_signals.append(f"<b>{symbol}</b>\n" + "\n".join(signals))
@@ -127,20 +136,21 @@ def smart_auto():
                 print(f"[ERROR] {symbol}: {e}")
                 continue
 
+        # Надсилаємо результати
         if not all_signals:
-    send_telegram("ℹ️ Жодних сигналів не знайдено.")
-else:
-    text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
+            send_telegram("ℹ️ Жодних сигналів не знайдено.")
+        else:
+            text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
 
-    # Безпечне отримання першого символу для графіку
-    import re
-    match = re.search(r"<b>(\w+)</b>", all_signals[0])
-    if match:
-        first_symbol = match.group(1)
-        photo = plot_candles(first_symbol)
-        send_telegram(text, photo=photo)
-    else:
-        send_telegram(text)  # якщо не знайшли символ, надсилаємо без фото
+            # Безпечне отримання першого символу для графіку
+            import re
+            match = re.search(r"<b>(\w+)</b>", all_signals[0])
+            if match:
+                first_symbol = match.group(1)
+                photo = plot_candles(first_symbol)
+                send_telegram(text, photo=photo)
+            else:
+                send_telegram(text)  # якщо не знайшли символ, надсилаємо без фото
 
     except Exception as e:
         send_telegram(f"❌ Error: {e}")
