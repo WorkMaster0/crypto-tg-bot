@@ -128,13 +128,19 @@ def smart_auto():
                 continue
 
         if not all_signals:
-            send_telegram("ℹ️ Жодних сигналів не знайдено.")
-        else:
-            text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
-            # Надсилаємо графік тільки для першої монети з сигналом
-            first_symbol = all_signals[0].split("\n")[0][3:]  # дістаємо символ з тексту
-            photo = plot_candles(first_symbol)
-            send_telegram(text, photo=photo)
+    send_telegram("ℹ️ Жодних сигналів не знайдено.")
+else:
+    text = "<b>Smart Auto S/R Signals</b>\n\n" + "\n\n".join(all_signals)
+
+    # Безпечне отримання першого символу для графіку
+    import re
+    match = re.search(r"<b>(\w+)</b>", all_signals[0])
+    if match:
+        first_symbol = match.group(1)
+        photo = plot_candles(first_symbol)
+        send_telegram(text, photo=photo)
+    else:
+        send_telegram(text)  # якщо не знайшли символ, надсилаємо без фото
 
     except Exception as e:
         send_telegram(f"❌ Error: {e}")
