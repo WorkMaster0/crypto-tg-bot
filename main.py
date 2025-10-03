@@ -85,31 +85,30 @@ def smart_auto():
         tickers = client.get_ticker()
         logging.info(f"Отримано {len(tickers)} монет з Binance")
 
-        # фільтруємо по USDT і volume > 5M
+        # фільтруємо по USDT і об'єму > 5M
         usdt_pairs = [x for x in tickers if x['symbol'].endswith("USDT") and float(x['quoteVolume']) > 5_000_000]
         logging.info(f"Фільтровані монети (>5M USDT volume): {len(usdt_pairs)}")
 
-        # беремо топ-20 за volume
-        top_symbols = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)[:20]
+        # беремо топ-20 за ростом (% зміна за 24h)
+        top_symbols = sorted(usdt_pairs, key=lambda x: float(x['priceChangePercent']), reverse=True)[:20]
         symbols = [x['symbol'] for x in top_symbols]
-        logging.info(f"TOP 20 монет: {symbols}")
+        logging.info(f"TOP 20 монет за ростом 24h: {symbols}")
 
         # аналізуємо
         results = []
         for s in symbols:
             sigs = analyze_symbol(s)
             if sigs:
-                results.append(f"[SIGNAL] <b>{s}</b>:\n" + "\n".join(sigs))
+                results.append(f"[SIGNAL] <b>{s}</b> (+{top_symbols[symbols.index(s)]['priceChangePercent']}%):\n" + "\n".join(sigs))
             else:
-                results.append(f"[INFO] {s}: сигналів нема")
+                results.append(f"[INFO] {s} (+{top_symbols[symbols.index(s)]['priceChangePercent']}%): сигналів нема")
 
         # формуємо повідомлення
-        full_msg = "📊 <b>Smart Auto Scan — TOP 20</b>\n\n" + "\n\n".join(results)
+        full_msg = "📊 <b>Smart Auto Scan — TOP 20 росту (24h)</b>\n\n" + "\n\n".join(results)
         send_telegram(full_msg)
 
     except Exception as e:
         logging.error(f"smart_auto error: {e}")
-
 
 # ---------------------------------
 # Flask routes
